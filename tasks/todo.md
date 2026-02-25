@@ -235,12 +235,12 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 - [x] 34.1 Add `DiskBackedVectorBuffer` + `DiskBackedIndexLoader` (v1/v2/v3)
 - [x] 34.2 Add `ANNSIndex.loadDiskBacked(from:)`
 - [x] 34.3 Add `DiskBackedTests` and pass them
-- [ ] 34.4 Commit Task 34
+- [x] 34.4 Commit Task 34
 
 - [x] 35.1 Add `KMeans` (k-means++)
 - [x] 35.2 Add build/search-only `ShardedIndex` actor
 - [x] 35.3 Add `ShardedIndexTests` and pass them
-- [ ] 35.4 Commit Task 35
+- [x] 35.4 Commit Task 35
 
 - [x] V.1 Run full suite and confirm no new regressions (allow known Mmap baseline failure)
 - [x] V.2 Add Phase 12 review notes to this file
@@ -255,4 +255,4 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
   - Targeted xcodebuild suites passed: `FilteredSearchTests`, `RangeSearchTests`, `RuntimeMetricTests`, `DiskBackedTests`, `ShardedIndexTests`, `ANNSIndexTests`, `PersistenceTests`.
   - Full xcodebuild run reports the known baseline `MmapTests` failure (`Index capacity exceeded; rebuild with larger capacity`) and no additional regressions.
 
-> Last Updated: 2026-02-25 (Tasks 31-35 implemented; pending final commits)
+> Last Updated: 2026-02-25 (Tasks 31-35 implemented and committed)
