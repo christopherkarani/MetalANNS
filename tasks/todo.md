@@ -3,7 +3,7 @@
 > **Status**: NOT STARTED
 > **Owner**: Subagent (dispatched by orchestrator)
 > **Reviewer**: Orchestrator (main session)
-> **Last Updated**: 2026-02-25 20:09:37 EAT
+> **Last Updated**: 2026-02-25 20:16:26 EAT
 
 ---
 
@@ -264,7 +264,7 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 > **Status**: IN PROGRESS
 > **Owner**: Subagent (dispatched by orchestrator)
 > **Reviewer**: Orchestrator (main session)
-> **Last Updated**: 2026-02-25 20:09:37 EAT
+> **Last Updated**: 2026-02-25 20:16:26 EAT
 
 - [x] 1 — Bump to Swift 6.2 (`Package.swift`)
 > Notes (Task 1): Updated `swift-tools-version` to 6.2. `xcodebuild build -scheme MetalANNS` succeeded. `xcodebuild test` on runnable package scheme (`MetalANNS-Package`) is currently failing on baseline `BatchInsertTests` recall threshold.
@@ -281,11 +281,11 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 - [x] 5 — Add `@concurrent` to read-only actor methods
 > Notes (Task 5): Added `@concurrent` to read-only actor methods on `ANNSIndex` and `ShardedIndex`, with actor-state snapshot helpers to satisfy isolation while preserving behavior. Build succeeded; full package test run shows the same baseline `BatchInsertTests` recall failure.
 
-- [ ] 6 — Evaluate `InlineArray` and record defer rationale
-> Notes (Task 6): Pending.
+- [x] 6 — Evaluate `InlineArray` and record defer rationale
+> Notes (Task 6): Deferred for now. Current neighbor degree is runtime-configurable (`IndexConfiguration.degree`), which makes practical `InlineArray` adoption non-ergonomic without introducing compile-time degree specialization or dispatch fan-out. Revisit after allocation profiling on traversal hot paths.
 
-- [ ] 7 — Add `Swift62ModernizationTests` and pass full suite
-> Notes (Task 7): Pending.
+- [x] 7 — Add `Swift62ModernizationTests` and pass full suite
+> Notes (Task 7): Added `Swift62ModernizationTests.swift` with typed-throws and concurrent-access coverage (`typedThrowCatchesIndexEmpty`, `typedThrowCatchesDimensionMismatch`, `newErrorCasesExist`, `concurrentSearchesRunInParallel`, `concurrentCountAccess`). Build succeeded. Full package run now executes 87 tests in 34 suites; same baseline failure remains in `BatchInsertTests` recall threshold.
 
 ### Required Commit Messages
 
@@ -298,10 +298,10 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 ### Phase 13 Complete — Signal
 
 ```
-STATUS: PENDING
-FINAL BUILD RESULT: PENDING
-FINAL TEST RESULT: PENDING
-TOTAL COMMITS: PENDING
-ISSUES ENCOUNTERED: PENDING
-DECISIONS MADE: PENDING
+STATUS: COMPLETE
+FINAL BUILD RESULT: `xcodebuild build -scheme MetalANNS -destination 'platform=macOS' -skipPackagePluginValidation` => BUILD SUCCEEDED
+FINAL TEST RESULT: `xcodebuild test -scheme MetalANNS-Package -destination 'platform=macOS' -skipPackagePluginValidation` => FAILED on baseline `BatchInsertTests` recall threshold expectation (`batchRecall + 0.10 >= sequentialRecall`)
+TOTAL COMMITS: 5 (Phase 13 messages)
+ISSUES ENCOUNTERED: Persistent baseline failure in `BatchInsertTests` during all package test runs; package workspace scheme required `MetalANNS-Package` for executable test action.
+DECISIONS MADE: Task 6 InlineArray deferred due runtime degree configurability; Task 6 note folded into Task 7 commit as agreed.
 ```
