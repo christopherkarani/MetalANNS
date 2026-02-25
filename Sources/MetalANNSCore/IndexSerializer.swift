@@ -201,13 +201,15 @@ public enum IndexSerializer {
             throw ANNSError.corruptFile("Malformed payload")
         }
 
+        let loadCapacity = max(2, nodeCount * 2)
+
         let vectors: any VectorStorage
         if storageType == 1 {
-            vectors = try Float16VectorBuffer(capacity: nodeCount, dim: dim, device: device)
+            vectors = try Float16VectorBuffer(capacity: loadCapacity, dim: dim, device: device)
         } else {
-            vectors = try VectorBuffer(capacity: nodeCount, dim: dim, device: device)
+            vectors = try VectorBuffer(capacity: loadCapacity, dim: dim, device: device)
         }
-        let graph = try GraphBuffer(capacity: nodeCount, degree: degree, device: device)
+        let graph = try GraphBuffer(capacity: loadCapacity, degree: degree, device: device)
 
         vectorData.withUnsafeBytes { raw in
             vectors.buffer.contents().copyMemory(from: raw.baseAddress!, byteCount: vectorByteCount)
