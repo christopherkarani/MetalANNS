@@ -174,14 +174,12 @@ struct PersistenceTests {
         return graphBuffer
     }
 
-    private func vectorsFromBuffer(_ vectorBuffer: VectorBuffer) -> [[Float]] {
-        let flat = vectorBuffer.floatPointer.prefix(vectorBuffer.count * vectorBuffer.dim)
+    private func vectorsFromBuffer(_ vectorBuffer: any VectorStorage) -> [[Float]] {
         var vectors = [[Float]]()
         vectors.reserveCapacity(vectorBuffer.count)
 
         for index in 0..<vectorBuffer.count {
-            let start = index * vectorBuffer.dim
-            let row = Array(flat[start..<start + vectorBuffer.dim])
+            let row = vectorBuffer.vector(at: index)
             vectors.append(row)
         }
         return vectors

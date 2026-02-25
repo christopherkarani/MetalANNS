@@ -11,7 +11,7 @@ public enum IncrementalBuilder {
         vector: [Float],
         at internalID: Int,
         into graph: GraphBuffer,
-        vectors: VectorBuffer,
+        vectors: any VectorStorage,
         entryPoint: UInt32,
         metric: Metric,
         degree: Int
@@ -128,7 +128,7 @@ public enum IncrementalBuilder {
     private static func nearestNeighbors(
         to vector: [Float],
         graph: GraphBuffer,
-        vectors: VectorBuffer,
+        vectors: any VectorStorage,
         entryPoint: Int,
         degree: Int,
         metric: Metric

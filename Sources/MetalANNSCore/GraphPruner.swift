@@ -6,7 +6,7 @@ public enum GraphPruner {
     /// through other neighbors.
     public static func prune(
         graph: GraphBuffer,
-        vectors: VectorBuffer,
+        vectors: any VectorStorage,
         nodeCount: Int,
         metric: Metric
     ) throws {

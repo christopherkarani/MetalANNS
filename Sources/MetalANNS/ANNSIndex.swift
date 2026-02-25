@@ -10,7 +10,7 @@ public actor ANNSIndex {
 
     private var configuration: IndexConfiguration
     private var context: MetalContext?
-    private var vectors: VectorBuffer?
+    private var vectors: (any VectorStorage)?
     private var graph: GraphBuffer?
     private var idMap: IDMap
     private var softDeletion: SoftDeletion
@@ -53,7 +53,12 @@ public actor ANNSIndex {
 
         let capacity = max(2, inputVectors.count * 2)
         let device = context?.device
-        let vectorBuffer = try VectorBuffer(capacity: capacity, dim: dim, device: device)
+        let vectorBuffer: any VectorStorage
+        if configuration.useFloat16 {
+            vectorBuffer = try Float16VectorBuffer(capacity: capacity, dim: dim, device: device)
+        } else {
+            vectorBuffer = try VectorBuffer(capacity: capacity, dim: dim, device: device)
+        }
         let graphBuffer = try GraphBuffer(capacity: capacity, degree: configuration.degree, device: device)
         try vectorBuffer.batchInsert(vectors: inputVectors, startingAt: 0)
         vectorBuffer.setCount(inputVectors.count)
@@ -280,6 +285,7 @@ public actor ANNSIndex {
 
         var resolvedConfiguration = persistedMetadata?.configuration ?? .default
         resolvedConfiguration.metric = loaded.metric
+        resolvedConfiguration.useFloat16 = loaded.vectors.isFloat16
 
         await index.applyLoadedState(
             configuration: resolvedConfiguration,
@@ -303,7 +309,7 @@ public actor ANNSIndex {
 
     private func applyLoadedState(
         configuration: IndexConfiguration,
-        vectors: VectorBuffer,
+        vectors: any VectorStorage,
         graph: GraphBuffer,
         idMap: IDMap,
         entryPoint: UInt32,
@@ -318,7 +324,7 @@ public actor ANNSIndex {
         self.isBuilt = true
     }
 
-    private func extractVectors(from vectors: VectorBuffer) -> [[Float]] {
+    private func extractVectors(from vectors: any VectorStorage) -> [[Float]] {
         (0..<vectors.count).map { vectors.vector(at: $0) }
     }
 

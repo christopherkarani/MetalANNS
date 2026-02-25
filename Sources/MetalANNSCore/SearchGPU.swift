@@ -10,7 +10,7 @@ public enum SearchGPU {
     public static func search(
         context: MetalContext,
         query: [Float],
-        vectors: VectorBuffer,
+        vectors: any VectorStorage,
         graph: GraphBuffer,
         entryPoint: Int,
         k: Int,
@@ -102,7 +102,7 @@ public enum SearchGPU {
     private static func computeDistancesOnGPU(
         context: MetalContext,
         query: [Float],
-        vectors: VectorBuffer,
+        vectors: any VectorStorage,
         neighborIDs: [UInt32],
         metric: Metric
     ) async throws -> [Float] {
@@ -112,43 +112,86 @@ public enum SearchGPU {
 
         let functionName: String = switch metric {
         case .cosine:
-            "cosine_distance"
+            vectors.isFloat16 ? "cosine_distance_f16" : "cosine_distance"
         case .l2:
-            "l2_distance"
+            vectors.isFloat16 ? "l2_distance_f16" : "l2_distance"
         case .innerProduct:
-            "inner_product_distance"
+            vectors.isFloat16 ? "inner_product_distance_f16" : "inner_product_distance"
         }
 
         let pipeline = try await context.pipelineCache.pipeline(for: functionName)
 
-        var neighborVectors: [Float] = []
-        neighborVectors.reserveCapacity(neighborIDs.count * vectors.dim)
-        for neighborID in neighborIDs {
-            neighborVectors.append(contentsOf: vectors.vector(at: Int(neighborID)))
+        let outputLength = neighborIDs.count * MemoryLayout<Float>.stride
+        guard let outputBuffer = context.device.makeBuffer(length: outputLength, options: .storageModeShared) else {
+            throw ANNSError.searchFailed("Failed to allocate search distance output buffer")
         }
 
-        let scalarSize = MemoryLayout<Float>.stride
-        let queryLength = query.count * scalarSize
-        let neighborLength = neighborVectors.count * scalarSize
-        let outputLength = neighborIDs.count * scalarSize
+        let queryBuffer: MTLBuffer
+        let neighborBuffer: MTLBuffer
+        if vectors.isFloat16 {
+            var queryHalf: [UInt16] = []
+            queryHalf.reserveCapacity(query.count)
+            for value in query {
+                queryHalf.append(Float16(value).bitPattern)
+            }
 
-        guard
-            let queryBuffer = context.device.makeBuffer(
-                bytes: query,
-                length: queryLength,
-                options: .storageModeShared
-            ),
-            let neighborBuffer = context.device.makeBuffer(
-                bytes: neighborVectors,
-                length: neighborLength,
-                options: .storageModeShared
-            ),
-            let outputBuffer = context.device.makeBuffer(
-                length: outputLength,
-                options: .storageModeShared
-            )
-        else {
-            throw ANNSError.searchFailed("Failed to allocate search distance buffers")
+            var neighborVectorsHalf: [UInt16] = []
+            neighborVectorsHalf.reserveCapacity(neighborIDs.count * vectors.dim)
+            for neighborID in neighborIDs {
+                let vector = vectors.vector(at: Int(neighborID))
+                for value in vector {
+                    neighborVectorsHalf.append(Float16(value).bitPattern)
+                }
+            }
+
+            let queryLength = queryHalf.count * MemoryLayout<UInt16>.stride
+            let neighborLength = neighborVectorsHalf.count * MemoryLayout<UInt16>.stride
+
+            guard
+                let queryHalfBuffer = context.device.makeBuffer(
+                    bytes: queryHalf,
+                    length: queryLength,
+                    options: .storageModeShared
+                ),
+                let neighborHalfBuffer = context.device.makeBuffer(
+                    bytes: neighborVectorsHalf,
+                    length: neighborLength,
+                    options: .storageModeShared
+                )
+            else {
+                throw ANNSError.searchFailed("Failed to allocate Float16 search distance buffers")
+            }
+
+            queryBuffer = queryHalfBuffer
+            neighborBuffer = neighborHalfBuffer
+        } else {
+            var neighborVectors: [Float] = []
+            neighborVectors.reserveCapacity(neighborIDs.count * vectors.dim)
+            for neighborID in neighborIDs {
+                neighborVectors.append(contentsOf: vectors.vector(at: Int(neighborID)))
+            }
+
+            let scalarSize = MemoryLayout<Float>.stride
+            let queryLength = query.count * scalarSize
+            let neighborLength = neighborVectors.count * scalarSize
+
+            guard
+                let queryFloatBuffer = context.device.makeBuffer(
+                    bytes: query,
+                    length: queryLength,
+                    options: .storageModeShared
+                ),
+                let neighborFloatBuffer = context.device.makeBuffer(
+                    bytes: neighborVectors,
+                    length: neighborLength,
+                    options: .storageModeShared
+                )
+            else {
+                throw ANNSError.searchFailed("Failed to allocate Float32 search distance buffers")
+            }
+
+            queryBuffer = queryFloatBuffer
+            neighborBuffer = neighborFloatBuffer
         }
 
         var dim = UInt32(vectors.dim)

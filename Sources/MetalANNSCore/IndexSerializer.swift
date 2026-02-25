@@ -3,10 +3,10 @@ import Metal
 
 public enum IndexSerializer {
     private static let headerMagic: [UInt8] = [0x4D, 0x41, 0x4E, 0x4E] // "MANN"
-    private static let version: UInt32 = 1
+    private static let version: UInt32 = 2
 
     public static func save(
-        vectors: VectorBuffer,
+        vectors: any VectorStorage,
         graph: GraphBuffer,
         idMap: IDMap,
         entryPoint: UInt32,
@@ -22,9 +22,11 @@ public enum IndexSerializer {
         guard nodeCount == graph.nodeCount else {
             throw ANNSError.constructionFailed("Vector and graph node counts do not match")
         }
-        let vectorByteCount = nodeCount * vectors.dim * MemoryLayout<Float>.stride
+        let bytesPerElement = vectors.isFloat16 ? MemoryLayout<UInt16>.stride : MemoryLayout<Float>.stride
+        let vectorByteCount = nodeCount * vectors.dim * bytesPerElement
         let adjacencyByteCount = nodeCount * degree * MemoryLayout<UInt32>.stride
         let distanceByteCount = nodeCount * degree * MemoryLayout<Float>.stride
+        let storageType: UInt32 = vectors.isFloat16 ? 1 : 0
 
         var filePayload = Data()
         append(magic: headerMagic, to: &filePayload)
@@ -33,6 +35,7 @@ public enum IndexSerializer {
         append(uint32: UInt32(degree), to: &filePayload)
         append(uint32: UInt32(vectors.dim), to: &filePayload)
         append(uint32: metricCode(metric), to: &filePayload)
+        append(uint32: storageType, to: &filePayload)
 
         filePayload.append(Data(bytes: vectors.buffer.contents(), count: vectorByteCount))
         filePayload.append(Data(bytes: graph.adjacencyBuffer.contents(), count: adjacencyByteCount))
@@ -48,7 +51,7 @@ public enum IndexSerializer {
     }
 
     public static func load(from fileURL: URL, device: MTLDevice? = nil) throws -> (
-        vectors: VectorBuffer,
+        vectors: any VectorStorage,
         graph: GraphBuffer,
         idMap: IDMap,
         entryPoint: UInt32,
@@ -68,8 +71,8 @@ public enum IndexSerializer {
         }
 
         let formatVersion = try readUInt32(payload, &cursor)
-        guard formatVersion == version else {
-            throw ANNSError.corruptFile("Unsupported file version")
+        guard formatVersion == 1 || formatVersion == version else {
+            throw ANNSError.corruptFile("Unsupported file version \(formatVersion)")
         }
 
         let nodeCount = Int(try readUInt32(payload, &cursor))
@@ -77,8 +80,17 @@ public enum IndexSerializer {
         let dim = Int(try readUInt32(payload, &cursor))
         let metricCode = try readUInt32(payload, &cursor)
         let metric = try metric(from: metricCode)
+        let storageType: UInt32 = if formatVersion >= 2 {
+            try readUInt32(payload, &cursor)
+        } else {
+            0
+        }
+        guard storageType == 0 || storageType == 1 else {
+            throw ANNSError.corruptFile("Unsupported storage type \(storageType)")
+        }
 
-        let vectorByteCount = nodeCount * dim * MemoryLayout<Float>.stride
+        let bytesPerElement = storageType == 1 ? MemoryLayout<UInt16>.stride : MemoryLayout<Float>.stride
+        let vectorByteCount = nodeCount * dim * bytesPerElement
         let adjacencyByteCount = nodeCount * degree * MemoryLayout<UInt32>.stride
         let distanceByteCount = nodeCount * degree * MemoryLayout<Float>.stride
 
@@ -110,7 +122,12 @@ public enum IndexSerializer {
             throw ANNSError.corruptFile("Malformed payload")
         }
 
-        let vectors = try VectorBuffer(capacity: nodeCount, dim: dim, device: device)
+        let vectors: any VectorStorage
+        if storageType == 1 {
+            vectors = try Float16VectorBuffer(capacity: nodeCount, dim: dim, device: device)
+        } else {
+            vectors = try VectorBuffer(capacity: nodeCount, dim: dim, device: device)
+        }
         let graph = try GraphBuffer(capacity: nodeCount, degree: degree, device: device)
 
         vectorData.withUnsafeBytes { raw in

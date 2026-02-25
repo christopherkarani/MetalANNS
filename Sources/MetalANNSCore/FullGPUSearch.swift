@@ -7,7 +7,7 @@ public enum FullGPUSearch {
     public static func search(
         context: MetalContext,
         query: [Float],
-        vectors: VectorBuffer,
+        vectors: any VectorStorage,
         graph: GraphBuffer,
         entryPoint: Int,
         k: Int,
@@ -37,7 +37,8 @@ public enum FullGPUSearch {
         let kLimit = min(k, nodeCount, maxEF)
         let efLimit = min(max(ef, kLimit), nodeCount, maxEF)
 
-        let pipeline = try await context.pipelineCache.pipeline(for: "beam_search")
+        let kernelName = vectors.isFloat16 ? "beam_search_f16" : "beam_search"
+        let pipeline = try await context.pipelineCache.pipeline(for: kernelName)
 
         let floatSize = MemoryLayout<Float>.stride
         let uintSize = MemoryLayout<UInt32>.stride

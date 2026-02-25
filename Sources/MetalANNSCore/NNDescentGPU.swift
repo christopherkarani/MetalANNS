@@ -43,7 +43,7 @@ public enum NNDescentGPU {
 
     public static func computeInitialDistances(
         context: MetalContext,
-        vectors: VectorBuffer,
+        vectors: any VectorStorage,
         graph: GraphBuffer,
         nodeCount: Int,
         metric: Metric
@@ -52,7 +52,8 @@ public enum NNDescentGPU {
             throw ANNSError.constructionFailed("nodeCount out of bounds for graph/vector capacity")
         }
 
-        let pipeline = try await context.pipelineCache.pipeline(for: "compute_initial_distances")
+        let kernelName = vectors.isFloat16 ? "compute_initial_distances_f16" : "compute_initial_distances"
+        let pipeline = try await context.pipelineCache.pipeline(for: kernelName)
 
         var n = UInt32(nodeCount)
         var degree = UInt32(graph.degree)
@@ -89,7 +90,7 @@ public enum NNDescentGPU {
 
     public static func build(
         context: MetalContext,
-        vectors: VectorBuffer,
+        vectors: any VectorStorage,
         graph: GraphBuffer,
         nodeCount: Int,
         metric: Metric,
@@ -131,7 +132,8 @@ public enum NNDescentGPU {
         }
 
         let reversePipeline = try await context.pipelineCache.pipeline(for: "build_reverse_list")
-        let localJoinPipeline = try await context.pipelineCache.pipeline(for: "local_join")
+        let localJoinKernel = vectors.isFloat16 ? "local_join_f16" : "local_join"
+        let localJoinPipeline = try await context.pipelineCache.pipeline(for: localJoinKernel)
 
         var n = UInt32(nodeCount)
         var d = UInt32(degree)
