@@ -6,6 +6,7 @@ public actor ANNSIndex {
     private struct PersistedMetadata: Codable, Sendable {
         let configuration: IndexConfiguration
         let softDeletion: SoftDeletion
+        let metadataStore: MetadataStore?
     }
 
     private var configuration: IndexConfiguration
@@ -14,6 +15,7 @@ public actor ANNSIndex {
     private var graph: GraphBuffer?
     private var idMap: IDMap
     private var softDeletion: SoftDeletion
+    private var metadataStore: MetadataStore
     private var entryPoint: UInt32
     private var isBuilt: Bool
     private var isReadOnlyLoadedIndex: Bool
@@ -26,6 +28,7 @@ public actor ANNSIndex {
         self.graph = nil
         self.idMap = IDMap()
         self.softDeletion = SoftDeletion()
+        self.metadataStore = MetadataStore()
         self.entryPoint = 0
         self.isBuilt = false
         self.isReadOnlyLoadedIndex = false
@@ -120,6 +123,7 @@ public actor ANNSIndex {
         self.graph = graphBuffer
         self.idMap = builtIDMap
         self.softDeletion = SoftDeletion()
+        self.metadataStore = MetadataStore()
         self.entryPoint = builtEntryPoint
         self.isBuilt = true
         self.isReadOnlyLoadedIndex = false
@@ -246,6 +250,7 @@ public actor ANNSIndex {
             throw ANNSError.idNotFound(id)
         }
         softDeletion.markDeleted(internalID)
+        metadataStore.remove(id: internalID)
     }
 
     public func compact() async throws {
@@ -272,16 +277,52 @@ public actor ANNSIndex {
             useFloat16: configuration.useFloat16
         )
 
+        var remapping: [UInt32: UInt32] = [:]
+        remapping.reserveCapacity(result.idMap.count)
+        for oldIndex in 0..<vectors.count {
+            let oldID = UInt32(oldIndex)
+            if softDeletion.isDeleted(oldID) {
+                continue
+            }
+            guard let externalID = idMap.externalID(for: oldID),
+                  let newID = result.idMap.internalID(for: externalID) else {
+                continue
+            }
+            remapping[oldID] = newID
+        }
+
         self.vectors = result.vectors
         self.graph = result.graph
         self.idMap = result.idMap
         self.entryPoint = result.entryPoint
         self.softDeletion = SoftDeletion()
+        self.metadataStore = metadataStore.remapped(using: remapping)
         self.isReadOnlyLoadedIndex = false
         self.mmapLifetime = nil
     }
 
-    public func search(query: [Float], k: Int) async throws -> [SearchResult] {
+    public func setMetadata(_ column: String, value: String, for id: String) throws {
+        guard let internalID = idMap.internalID(for: id) else {
+            throw ANNSError.idNotFound(id)
+        }
+        metadataStore.set(column, stringValue: value, for: internalID)
+    }
+
+    public func setMetadata(_ column: String, value: Float, for id: String) throws {
+        guard let internalID = idMap.internalID(for: id) else {
+            throw ANNSError.idNotFound(id)
+        }
+        metadataStore.set(column, floatValue: value, for: internalID)
+    }
+
+    public func setMetadata(_ column: String, value: Int64, for id: String) throws {
+        guard let internalID = idMap.internalID(for: id) else {
+            throw ANNSError.idNotFound(id)
+        }
+        metadataStore.set(column, intValue: value, for: internalID)
+    }
+
+    public func search(query: [Float], k: Int, filter: SearchFilter? = nil) async throws -> [SearchResult] {
         guard isBuilt, let vectors, let graph else {
             throw ANNSError.indexEmpty
         }
@@ -292,8 +333,14 @@ public actor ANNSIndex {
             return []
         }
 
+        let hasFilter = filter != nil
         let deletedCount = softDeletion.deletedCount
-        let effectiveK = min(vectors.count, k + deletedCount)
+        let effectiveK: Int
+        if hasFilter {
+            effectiveK = min(vectors.count, k * 4 + deletedCount)
+        } else {
+            effectiveK = min(vectors.count, k + deletedCount)
+        }
         let effectiveEf = max(configuration.efSearch, effectiveK)
 
         let rawResults: [SearchResult]
@@ -320,7 +367,11 @@ public actor ANNSIndex {
             )
         }
 
-        let filtered = softDeletion.filterResults(rawResults)
+        var filtered = softDeletion.filterResults(rawResults)
+        if let filter {
+            filtered = filtered.filter { metadataStore.matches(id: $0.internalID, filter: filter) }
+        }
+
         let mapped = filtered.compactMap { result -> SearchResult? in
             guard let externalID = idMap.externalID(for: result.internalID) else {
                 return nil
@@ -385,7 +436,11 @@ public actor ANNSIndex {
             to: url
         )
 
-        let metadata = PersistedMetadata(configuration: configuration, softDeletion: softDeletion)
+        let metadata = PersistedMetadata(
+            configuration: configuration,
+            softDeletion: softDeletion,
+            metadataStore: metadataStore
+        )
         let metadataData = try JSONEncoder().encode(metadata)
         try metadataData.write(to: Self.metadataURL(for: url), options: .atomic)
     }
@@ -404,7 +459,11 @@ public actor ANNSIndex {
             to: url
         )
 
-        let metadata = PersistedMetadata(configuration: configuration, softDeletion: softDeletion)
+        let metadata = PersistedMetadata(
+            configuration: configuration,
+            softDeletion: softDeletion,
+            metadataStore: metadataStore
+        )
         let metadataData = try JSONEncoder().encode(metadata)
         try metadataData.write(to: Self.metadataURL(for: url), options: .atomic)
     }
@@ -426,7 +485,8 @@ public actor ANNSIndex {
             graph: loaded.graph,
             idMap: loaded.idMap,
             entryPoint: loaded.entryPoint,
-            softDeletion: persistedMetadata?.softDeletion ?? SoftDeletion()
+            softDeletion: persistedMetadata?.softDeletion ?? SoftDeletion(),
+            metadataStore: persistedMetadata?.metadataStore ?? MetadataStore()
         )
 
         return index
@@ -449,6 +509,7 @@ public actor ANNSIndex {
             idMap: loaded.idMap,
             entryPoint: loaded.entryPoint,
             softDeletion: persistedMetadata?.softDeletion ?? SoftDeletion(),
+            metadataStore: persistedMetadata?.metadataStore ?? MetadataStore(),
             isReadOnlyLoadedIndex: true,
             mmapLifetime: loaded.mmapLifetime
         )
@@ -471,6 +532,7 @@ public actor ANNSIndex {
         idMap: IDMap,
         entryPoint: UInt32,
         softDeletion: SoftDeletion,
+        metadataStore: MetadataStore = MetadataStore(),
         isReadOnlyLoadedIndex: Bool = false,
         mmapLifetime: AnyObject? = nil
     ) {
@@ -480,6 +542,7 @@ public actor ANNSIndex {
         self.idMap = idMap
         self.entryPoint = entryPoint
         self.softDeletion = softDeletion
+        self.metadataStore = metadataStore
         self.isBuilt = true
         self.isReadOnlyLoadedIndex = isReadOnlyLoadedIndex
         self.mmapLifetime = mmapLifetime

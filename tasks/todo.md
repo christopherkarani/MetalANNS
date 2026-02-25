@@ -7,6 +7,17 @@
 
 ---
 
+## Task: Test Data Strategy for New Search Tests
+
+- [x] 1 — Inventory the current `ANNSIndex` implementation, persistence layers, and active test suites that exercise recall/order expectations for `FilteredSearch`, `RangeSearch`, `RuntimeMetric`, `DiskBacked`, and `Sharded` behaviors.
+- [x] 2 — Spot nondeterministic or flaky patterns (random dataset generation, unseeded ordering, runtime metric overrides, actor scheduling).
+- [x] 3 — Draft a deterministic test data strategy with concrete fixtures, seeds, and validation steps to ensure the upcoming tests avoid flaky recall/order assertions.
+- [x] 4 — Review the draft for coverage completeness and note any remaining verification actions or research gaps.
+
+> Notes: Capture file/line references where relevant; ensure plan aligns with TDD mind-set before implementation.
+
+---
+
 ## How This File Works
 
 This file is the **shared communication layer** between the orchestrator and executing agents.
@@ -191,3 +202,47 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 - [ ] 1 — Collect current signatures/kernels/serialization data from the key MetalANNS files
 - [ ] 2 — Summarize the APIs, kernel dispatch names, serialization layout, and divergence risks
 - [ ] 3 — Draft recommended edit map per file to guide Float16 integration work
+
+---
+
+## Audit: Phase 12 Tasks 31-35 Integration Risk
+
+- [ ] 1 — Review Phase 12 Task 31-35 descriptions and note the integration targets (metadata filtering additions, range search, runtime metric overrides, disk-backed loader, and sharded index architecture).
+- [ ] 2 — Inspect current `ANNSIndex` API, serialization/`PersistedMetadata` logic, and any existing filtering/metric hooks to identify compatibility touchpoints.
+- [ ] 3 — Analyze compile-time and runtime pitfalls (type/API updates, optional metadata, new actors, loader dependencies) for `MetadataStore`/`SearchFilter`, `rangeSearch`, runtime metric, `DiskBacked` loader, and `ShardedIndex`.
+- [ ] 4 — Summarize findings with precise file references and actionable recommendations for mitigating each risk.
+
+> Last Updated: pending
+
+---
+
+## Phase 12 Combined Execution (Tasks 31-35)
+
+- [x] 31.1 Add `SearchFilter` and `MetadataStore` core types
+- [x] 31.2 Add metadata APIs + filtered search to `ANNSIndex`
+- [x] 31.3 Persist metadata sidecar with backward compatibility
+- [x] 31.4 Add `FilteredSearchTests` and pass them
+- [ ] 31.5 Commit Task 31
+
+- [ ] 32.1 Add `rangeSearch` with optional filter/metric override
+- [ ] 32.2 Add `RangeSearchTests` and pass them
+- [ ] 32.3 Commit Task 32
+
+- [ ] 33.1 Add runtime metric override to `search`, `batchSearch`, `rangeSearch`
+- [ ] 33.2 Add `RuntimeMetricTests` and pass them
+- [ ] 33.3 Commit Task 33
+
+- [ ] 34.1 Add `DiskBackedVectorBuffer` + `DiskBackedIndexLoader` (v1/v2/v3)
+- [ ] 34.2 Add `ANNSIndex.loadDiskBacked(from:)`
+- [ ] 34.3 Add `DiskBackedTests` and pass them
+- [ ] 34.4 Commit Task 34
+
+- [ ] 35.1 Add `KMeans` (k-means++)
+- [ ] 35.2 Add build/search-only `ShardedIndex` actor
+- [ ] 35.3 Add `ShardedIndexTests` and pass them
+- [ ] 35.4 Commit Task 35
+
+- [ ] V.1 Run full suite and confirm no new regressions (allow known Mmap baseline failure)
+- [ ] V.2 Add Phase 12 review notes to this file
+
+> Last Updated: 2026-02-25 (Task 31 in progress)
