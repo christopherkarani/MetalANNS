@@ -3,7 +3,7 @@
 > **Status**: NOT STARTED
 > **Owner**: Subagent (dispatched by orchestrator)
 > **Reviewer**: Orchestrator (main session)
-> **Last Updated**: 2026-02-25 04:42:09 EAT
+> **Last Updated**: 2026-02-25 04:44:19 EAT
 
 ---
 
@@ -49,7 +49,7 @@ This file is the **shared communication layer** between the orchestrator and exe
   - Neighbor lists maintained sorted by distance ascending
 - [x] 10.4 — **GREEN**: All 3 tests pass. Specifically confirm `recallCheck` achieves > 0.85
 - [x] 10.5 — **REGRESSION**: All Phase 1 + Phase 2 tests still pass (26 prior tests)
-- [ ] 10.6 — **GIT**: `git add Sources/MetalANNSCore/NNDescentCPU.swift Tests/MetalANNSTests/NNDescentCPUTests.swift && git commit -m "feat: implement CPU NN-Descent reference (Accelerate backend)"`
+- [x] 10.6 — **GIT**: `git add Sources/MetalANNSCore/NNDescentCPU.swift Tests/MetalANNSTests/NNDescentCPUTests.swift && git commit -m "feat: implement CPU NN-Descent reference (Accelerate backend)"`
 
 > **Agent notes** _(write issues/decisions here)_:
 
@@ -59,11 +59,11 @@ This file is the **shared communication layer** between the orchestrator and exe
 
 **Acceptance**: `NNDescentGPUTests/randomInitValid` passes on Mac with GPU. Twelfth commit.
 
-- [ ] 11.1 — Create `Tests/MetalANNSTests/NNDescentGPUTests.swift` — 1 test:
+- [x] 11.1 — Create `Tests/MetalANNSTests/NNDescentGPUTests.swift` — 1 test:
   - `randomInitValid` — 100 nodes, degree=8: verify no self-loops, no duplicate neighbors, all IDs < nodeCount
   - Guard with `guard MTLCreateSystemDefaultDevice() != nil else { return }` — NOT `XCTSkip`
-- [ ] 11.2 — **RED**: Test fails (NNDescentGPU not defined)
-- [ ] 11.3 — Create `Sources/MetalANNSCore/Shaders/NNDescent.metal` — 2 kernels:
+- [x] 11.2 — **RED**: Test fails (NNDescentGPU not defined)
+- [x] 11.3 — Create `Sources/MetalANNSCore/Shaders/NNDescent.metal` — 2 kernels:
   - `random_init`:
     - `buffer(0)` = adjacency (device uint*), `buffer(1)` = node_count, `buffer(2)` = degree, `buffer(3)` = seed
     - LCG PRNG: `state * 1664525u + 1013904223u`, per-node seed: `seed ^ (tid * 2654435761u)`
@@ -74,18 +74,22 @@ This file is the **shared communication layer** between the orchestrator and exe
     - One thread per (node, slot): `tid / degree` = node, `tid % degree` = slot
     - metric_type: 0=cosine, 1=l2, 2=innerProduct
     - Guard: `if (tid >= node_count * degree) return;`
-- [ ] 11.4 — Create `Sources/MetalANNSCore/NNDescentGPU.swift`:
+- [x] 11.4 — Create `Sources/MetalANNSCore/NNDescentGPU.swift`:
   - `public enum NNDescentGPU` — stateless, all static methods
   - `static func randomInit(context:graph:nodeCount:seed:) async throws`
   - `static func computeInitialDistances(context:vectors:graph:nodeCount:metric:) async throws`
   - Both methods: get pipeline → set buffers/bytes → dispatch threads → execute
   - **Metric mapping**: `var metricType: UInt32 = switch metric { case .cosine: 0; case .l2: 1; case .innerProduct: 2 }`
-- [ ] 11.5 — **GREEN**: `randomInitValid` test passes
-- [ ] 11.6 — **METRIC MAPPING DECISION**: Verify that the `metric_type` UInt32 mapping (cosine=0, l2=1, innerProduct=2) is consistent between the Metal shader's `if/else` chain and the Swift wrapper. **Write confirmation in the notes below.**
-- [ ] 11.7 — **REGRESSION**: All prior tests still pass
+- [x] 11.5 — **GREEN**: `randomInitValid` test passes
+- [x] 11.6 — **METRIC MAPPING DECISION**: Verify that the `metric_type` UInt32 mapping (cosine=0, l2=1, innerProduct=2) is consistent between the Metal shader's `if/else` chain and the Swift wrapper. **Write confirmation in the notes below.**
+- [x] 11.7 — **REGRESSION**: All prior tests still pass
 - [ ] 11.8 — **GIT**: `git add Sources/MetalANNSCore/Shaders/NNDescent.metal Sources/MetalANNSCore/NNDescentGPU.swift Tests/MetalANNSTests/NNDescentGPUTests.swift && git commit -m "feat: add Metal random_init and compute_initial_distances kernels"`
 
 > **Agent notes** _(REQUIRED — document your 11.6 confirmation here)_:
+> Metric mapping verified as consistent in both layers:
+> `NNDescentGPU.computeInitialDistances` maps `.cosine -> 0`, `.l2 -> 1`, `.innerProduct -> 2`,
+> and `compute_initial_distances` in `NNDescent.metal` dispatches `if metric_type == 0` (cosine),
+> `else if metric_type == 1` (l2), `else` (inner product).
 
 ---
 
