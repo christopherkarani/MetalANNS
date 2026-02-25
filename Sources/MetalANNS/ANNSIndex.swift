@@ -172,7 +172,7 @@ public actor ANNSIndex {
 
         let rawResults: [SearchResult]
         if let context {
-            rawResults = try await SearchGPU.search(
+            rawResults = try await FullGPUSearch.search(
                 context: context,
                 query: query,
                 vectors: vectors,
