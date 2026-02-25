@@ -1,0 +1,109 @@
+import Foundation
+import Testing
+import MetalANNSCore
+
+@Suite("SIMD Distance Tests")
+struct SIMDDistanceTests {
+    @Test("cosineMatchesScalar")
+    func cosineMatchesScalar() {
+        let dim = 128
+        let a = randomVector(dim: dim)
+        let b = randomVector(dim: dim)
+
+        let simd = SIMDDistance.cosine(a, b)
+        let scalar = scalarCosine(a, b)
+        #expect(abs(simd - scalar) < 1e-5)
+    }
+
+    @Test("l2MatchesScalar")
+    func l2MatchesScalar() {
+        let dim = 128
+        let a = randomVector(dim: dim)
+        let b = randomVector(dim: dim)
+
+        let simd = SIMDDistance.l2(a, b)
+        let scalar = scalarL2(a, b)
+        #expect(abs(simd - scalar) < 1e-5)
+    }
+
+    @Test("innerProductMatchesScalar")
+    func innerProductMatchesScalar() {
+        let dim = 128
+        let a = randomVector(dim: dim)
+        let b = randomVector(dim: dim)
+
+        let simd = SIMDDistance.innerProduct(a, b)
+        let scalar = scalarInnerProduct(a, b)
+        #expect(abs(simd - scalar) < 1e-5)
+    }
+
+    @Test("simdFasterThanScalar")
+    func simdFasterThanScalar() {
+        let dim = 256
+        let iterations = 10_000
+        let a = randomVector(dim: dim)
+        let b = randomVector(dim: dim)
+        let clock = ContinuousClock()
+
+        var warmup: Float = 0
+        for _ in 0..<1_000 {
+            warmup += SIMDDistance.cosine(a, b)
+            warmup += scalarCosine(a, b)
+        }
+        #expect(warmup.isFinite)
+
+        var simdAccumulator: Float = 0
+        let simdStart = clock.now
+        for _ in 0..<iterations {
+            simdAccumulator += SIMDDistance.cosine(a, b)
+        }
+        let simdTime = simdStart.duration(to: clock.now)
+        #expect(simdAccumulator.isFinite)
+
+        var scalarAccumulator: Float = 0
+        let scalarStart = clock.now
+        for _ in 0..<iterations {
+            scalarAccumulator += scalarCosine(a, b)
+        }
+        let scalarTime = scalarStart.duration(to: clock.now)
+        #expect(scalarAccumulator.isFinite)
+
+        #expect(simdTime < scalarTime)
+    }
+
+    private func randomVector(dim: Int) -> [Float] {
+        (0..<dim).map { _ in Float.random(in: -0.25...0.25) }
+    }
+
+    private func scalarCosine(_ a: [Float], _ b: [Float]) -> Float {
+        var dot: Float = 0
+        var normA: Float = 0
+        var normB: Float = 0
+        for i in 0..<a.count {
+            let lhs = a[i]
+            let rhs = b[i]
+            dot += lhs * rhs
+            normA += lhs * lhs
+            normB += rhs * rhs
+        }
+        let denom = sqrt(normA) * sqrt(normB)
+        return denom < 1e-10 ? 1.0 : (1.0 - (dot / denom))
+    }
+
+    private func scalarL2(_ a: [Float], _ b: [Float]) -> Float {
+        var sum: Float = 0
+        for i in 0..<a.count {
+            let diff = a[i] - b[i]
+            sum += diff * diff
+        }
+        return sum
+    }
+
+    private func scalarInnerProduct(_ a: [Float], _ b: [Float]) -> Float {
+        var dot: Float = 0
+        for i in 0..<a.count {
+            dot += a[i] * b[i]
+        }
+        return -dot
+    }
+}

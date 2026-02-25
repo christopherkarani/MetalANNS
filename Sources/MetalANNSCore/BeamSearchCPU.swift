@@ -44,7 +44,7 @@ public enum BeamSearchCPU {
 
         let efLimit = min(vectors.count, ef)
         let entryID = UInt32(entryPoint)
-        let entryDistance = distance(query: query, vector: vectors[entryPoint], metric: metric)
+        let entryDistance = SIMDDistance.distance(query, vectors[entryPoint], metric: metric)
 
         var visited: Set<UInt32> = [entryID]
         var candidates: [Candidate] = [Candidate(nodeID: entryID, distance: entryDistance)]
@@ -66,9 +66,9 @@ public enum BeamSearchCPU {
                 }
                 visited.insert(neighborID)
 
-                let candidateDistance = distance(
-                    query: query,
-                    vector: vectors[neighborIndex],
+                let candidateDistance = SIMDDistance.distance(
+                    query,
+                    vectors[neighborIndex],
                     metric: metric
                 )
 
@@ -96,36 +96,5 @@ public enum BeamSearchCPU {
             break
         }
         list.insert(candidate, at: insertionIndex)
-    }
-
-    private static func distance(query: [Float], vector: [Float], metric: Metric) -> Float {
-        switch metric {
-        case .cosine:
-            var dot: Float = 0
-            var normQ: Float = 0
-            var normV: Float = 0
-            for d in 0..<query.count {
-                let q = query[d]
-                let v = vector[d]
-                dot += q * v
-                normQ += q * q
-                normV += v * v
-            }
-            let denom = sqrt(normQ) * sqrt(normV)
-            return denom < 1e-10 ? 1.0 : (1.0 - (dot / denom))
-        case .l2:
-            var sum: Float = 0
-            for d in 0..<query.count {
-                let diff = query[d] - vector[d]
-                sum += diff * diff
-            }
-            return sum
-        case .innerProduct:
-            var dot: Float = 0
-            for d in 0..<query.count {
-                dot += query[d] * vector[d]
-            }
-            return -dot
-        }
     }
 }

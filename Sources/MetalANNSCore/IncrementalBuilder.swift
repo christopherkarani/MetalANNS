@@ -67,7 +67,11 @@ public enum IncrementalBuilder {
                 continue
             }
 
-            let newDistance = distance(from: vector, to: vectors.vector(at: neighborIndex), metric: metric)
+            let newDistance = SIMDDistance.distance(
+                vector,
+                vectors.vector(at: neighborIndex),
+                metric: metric
+            )
 
             if let replaceIndex = worstNeighborIndex(in: existingDistances), newDistance < existingDistances[replaceIndex] {
                 var updatedIDs = existingIDs
@@ -95,9 +99,9 @@ public enum IncrementalBuilder {
             if !existingIDs.contains(UInt32(internalID)) {
                 let existingDistances = graph.neighborDistances(of: fallbackIndex)
                 if let replaceIndex = worstNeighborIndex(in: existingDistances) {
-                    let fallbackDistance = distance(
-                        from: vector,
-                        to: vectors.vector(at: fallbackIndex),
+                    let fallbackDistance = SIMDDistance.distance(
+                        vector,
+                        vectors.vector(at: fallbackIndex),
                         metric: metric
                     )
 
@@ -133,7 +137,11 @@ public enum IncrementalBuilder {
         let ef = max(1, degree * 2)
         let efLimit = min(nodeCount, ef)
 
-        let entryDistance = distance(from: vector, to: vectors.vector(at: entryPoint), metric: metric)
+        let entryDistance = SIMDDistance.distance(
+            vector,
+            vectors.vector(at: entryPoint),
+            metric: metric
+        )
         var visited: Set<UInt32> = [UInt32(entryPoint)]
         var candidates: [Candidate] = [Candidate(nodeID: UInt32(entryPoint), distance: entryDistance)]
         var results: [Candidate] = [Candidate(nodeID: UInt32(entryPoint), distance: entryDistance)]
@@ -155,7 +163,11 @@ public enum IncrementalBuilder {
                 }
                 visited.insert(neighborID)
 
-                let candidateDistance = distance(from: vector, to: vectors.vector(at: index), metric: metric)
+                let candidateDistance = SIMDDistance.distance(
+                    vector,
+                    vectors.vector(at: index),
+                    metric: metric
+                )
                 if results.count < efLimit || candidateDistance < results[results.count - 1].distance {
                     let candidate = Candidate(nodeID: neighborID, distance: candidateDistance)
                     insertSorted(candidate, into: &candidates)
@@ -194,36 +206,5 @@ public enum IncrementalBuilder {
             break
         }
         list.insert(candidate, at: insertionIndex)
-    }
-
-    private static func distance(from lhs: [Float], to rhs: [Float], metric: Metric) -> Float {
-        switch metric {
-        case .cosine:
-            var dot: Float = 0
-            var normL: Float = 0
-            var normR: Float = 0
-            for d in 0..<lhs.count {
-                let a = lhs[d]
-                let b = rhs[d]
-                dot += a * b
-                normL += a * a
-                normR += b * b
-            }
-            let denom = sqrt(normL) * sqrt(normR)
-            return denom < 1e-10 ? 1.0 : (1.0 - (dot / denom))
-        case .l2:
-            var sum: Float = 0
-            for d in 0..<lhs.count {
-                let diff = lhs[d] - rhs[d]
-                sum += diff * diff
-            }
-            return sum
-        case .innerProduct:
-            var dot: Float = 0
-            for d in 0..<lhs.count {
-                dot += lhs[d] * rhs[d]
-            }
-            return -dot
-        }
     }
 }
