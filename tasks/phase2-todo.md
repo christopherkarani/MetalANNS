@@ -1,9 +1,9 @@
 # MetalANNS — Phase 2: GPU-Resident Graph Data Structures
 
-> **Status**: NOT STARTED
+> **Status**: COMPLETE
 > **Owner**: Subagent (dispatched by orchestrator)
 > **Reviewer**: Orchestrator (main session)
-> **Last Updated**: —
+> **Last Updated**: 2026-02-25 04:30:37 EAT
 
 ---
 
@@ -19,11 +19,11 @@ This file is the **shared communication layer** between the orchestrator and exe
 
 ## Pre-Flight Checks
 
-- [ ] Working directory is `/Users/chriskarani/CodingProjects/MetalANNS`
-- [ ] Phase 1 code exists: `Sources/MetalANNSCore/MetalDevice.swift`, `Sources/MetalANNSCore/Errors.swift`, `Sources/MetalANNSCore/Metric.swift` all present
-- [ ] `git log --oneline` shows exactly 6 commits from Phase 1
-- [ ] Full test suite passes: `xcodebuild test -scheme MetalANNS -destination 'platform=macOS' 2>&1 | grep -E '(passed|failed)'` → zero failures
-- [ ] Read implementation plan: `docs/plans/2026-02-25-metalanns-implementation.md` (lines 1008–1418)
+- [x] Working directory is `/Users/chriskarani/CodingProjects/MetalANNS`
+- [x] Phase 1 code exists: `Sources/MetalANNSCore/MetalDevice.swift`, `Sources/MetalANNSCore/Errors.swift`, `Sources/MetalANNSCore/Metric.swift` all present
+- [x] `git log --oneline` shows exactly 6 commits from Phase 1
+- [x] Full test suite passes: `xcodebuild test -scheme MetalANNS -destination 'platform=macOS' 2>&1 | grep -E '(passed|failed)'` → zero failures
+- [x] Read implementation plan: `docs/plans/2026-02-25-metalanns-implementation.md` (lines 1008–1418)
 
 ---
 
@@ -31,12 +31,12 @@ This file is the **shared communication layer** between the orchestrator and exe
 
 **Acceptance**: `VectorBufferTests` suite passes (3 tests). Seventh git commit.
 
-- [ ] 7.1 — Create `Tests/MetalANNSTests/VectorBufferTests.swift` — 3 tests using Swift Testing (`@Suite`, `@Test`, `#expect`):
+- [x] 7.1 — Create `Tests/MetalANNSTests/VectorBufferTests.swift` — 3 tests using Swift Testing (`@Suite`, `@Test`, `#expect`):
   - `insertSingle` — insert 3-dim vector at index 0, read back, verify equality
   - `batchInsert` — 100 random 128-dim vectors, verify roundtrip within `1e-7` tolerance
   - `countTracking` — verify count starts at 0, tracks after `setCount(1)`
-- [ ] 7.2 — **RED**: `xcodebuild test -scheme MetalANNS -destination 'platform=macOS' -only-testing MetalANNSTests/VectorBufferTests 2>&1 | grep -E '(PASS|FAIL|error:)'` → confirms FAIL (VectorBuffer not defined)
-- [ ] 7.3 — Create `Sources/MetalANNSCore/VectorBuffer.swift`:
+- [x] 7.2 — **RED**: `xcodebuild test -scheme MetalANNS -destination 'platform=macOS' -only-testing MetalANNSTests/VectorBufferTests 2>&1 | grep -E '(PASS|FAIL|error:)'` → confirms FAIL (VectorBuffer not defined)
+- [x] 7.3 — Create `Sources/MetalANNSCore/VectorBuffer.swift`:
   - `public final class VectorBuffer: @unchecked Sendable`
   - Properties: `buffer: MTLBuffer`, `dim: Int`, `capacity: Int`, `count: Int` (private set)
   - `rawPointer: UnsafeMutablePointer<Float>` (private)
@@ -46,9 +46,9 @@ This file is the **shared communication layer** between the orchestrator and exe
   - `vector(at:)` → `[Float]` via `UnsafeBufferPointer`
   - `setCount(_:)` — manual count setter
   - `floatPointer: UnsafeBufferPointer<Float>` — computed property for GPU operations
-- [ ] 7.4 — **GREEN**: Same test command → ALL 3 PASS
-- [ ] 7.5 — **REGRESSION**: All Phase 1 tests still pass — run full suite
-- [ ] 7.6 — **GIT**: `git add Sources/MetalANNSCore/VectorBuffer.swift Tests/MetalANNSTests/VectorBufferTests.swift && git commit -m "feat: add VectorBuffer for GPU-resident vector storage"`
+- [x] 7.4 — **GREEN**: Same test command → ALL 3 PASS
+- [x] 7.5 — **REGRESSION**: All Phase 1 tests still pass — run full suite
+- [x] 7.6 — **GIT**: `git add Sources/MetalANNSCore/VectorBuffer.swift Tests/MetalANNSTests/VectorBufferTests.swift && git commit -m "feat: add VectorBuffer for GPU-resident vector storage"`
 
 > **Agent notes** _(write issues/decisions here)_:
 
@@ -58,12 +58,12 @@ This file is the **shared communication layer** between the orchestrator and exe
 
 **Acceptance**: `GraphBufferTests` suite passes (3 tests). Eighth git commit.
 
-- [ ] 8.1 — Create `Tests/MetalANNSTests/GraphBufferTests.swift` — 3 tests:
+- [x] 8.1 — Create `Tests/MetalANNSTests/GraphBufferTests.swift` — 3 tests:
   - `setAndReadNeighbors` — set 4 neighbors (IDs + distances) for node 0, read back, verify equality
   - `nodeIndependence` — set different neighbors for node 0 and node 1, verify neither overwrites the other
   - `capacityAndDegree` — verify `.capacity == 100`, `.degree == 32` after init
-- [ ] 8.2 — **RED**: Test fails (GraphBuffer not defined)
-- [ ] 8.3 — Create `Sources/MetalANNSCore/GraphBuffer.swift`:
+- [x] 8.2 — **RED**: Test fails (GraphBuffer not defined)
+- [x] 8.3 — Create `Sources/MetalANNSCore/GraphBuffer.swift`:
   - `public final class GraphBuffer: @unchecked Sendable`
   - TWO MTLBuffers: `adjacencyBuffer` (UInt32) and `distanceBuffer` (Float32)
   - Properties: `degree: Int`, `capacity: Int`, `nodeCount: Int` (private set)
@@ -72,12 +72,13 @@ This file is the **shared communication layer** between the orchestrator and exe
   - `setNeighbors(of:ids:distances:)` — validates `ids.count == degree && distances.count == degree`
   - `neighborIDs(of:)` → `[UInt32]`, `neighborDistances(of:)` → `[Float]`
   - `setCount(_:)` — manual node count setter
-- [ ] 8.4 — **GREEN**: All 3 tests pass
-- [ ] 8.5 — **REGRESSION**: All Phase 1 + Task 7 tests still pass
-- [ ] 8.6 — **INITIALIZATION DECISION**: The plan initializes graph slots in a simple `for` loop. For 100K+ nodes with degree 32, that's 3.2M iterations. Evaluate whether this needs optimization (memset, vDSP.fill) or is acceptable. **Write your decision in the notes below.**
-- [ ] 8.7 — **GIT**: `git add Sources/MetalANNSCore/GraphBuffer.swift Tests/MetalANNSTests/GraphBufferTests.swift && git commit -m "feat: add GraphBuffer for GPU-resident adjacency list storage"`
+- [x] 8.4 — **GREEN**: All 3 tests pass
+- [x] 8.5 — **REGRESSION**: All Phase 1 + Task 7 tests still pass
+- [x] 8.6 — **INITIALIZATION DECISION**: The plan initializes graph slots in a simple `for` loop. For 100K+ nodes with degree 32, that's 3.2M iterations. Evaluate whether this needs optimization (memset, vDSP.fill) or is acceptable. **Write your decision in the notes below.**
+- [x] 8.7 — **GIT**: `git add Sources/MetalANNSCore/GraphBuffer.swift Tests/MetalANNSTests/GraphBufferTests.swift && git commit -m "feat: add GraphBuffer for GPU-resident adjacency list storage"`
 
 > **Agent notes** _(REQUIRED — document your 8.6 decision here)_:
+> Kept the simple initialization loop. Rationale: this is one-time construction work, correctness/readability are higher priority in Phase 2, and this path remains straightforward to swap for a bulk fill (`memset`/Accelerate) later if profiling shows startup bottlenecks at 100K+ nodes.
 
 ---
 
@@ -85,18 +86,18 @@ This file is the **shared communication layer** between the orchestrator and exe
 
 **Acceptance**: `MetadataTests` suite passes (3 tests). Ninth git commit.
 
-- [ ] 9.1 — Create `Tests/MetalANNSTests/MetadataTests.swift` — 3 tests:
+- [x] 9.1 — Create `Tests/MetalANNSTests/MetadataTests.swift` — 3 tests:
   - `metadataRoundtrip` — set all 5 fields (entryPointID=42, nodeCount=1000, degree=32, dim=128), read back, verify
   - `idMapMapping` — assign "doc-a" → 0, "doc-b" → 1, verify bidirectional lookup
   - `idMapDuplicate` — assign "doc-a" twice, second returns nil
-- [ ] 9.2 — **RED**: Tests fail (types not defined)
-- [ ] 9.3 — Create `Sources/MetalANNSCore/MetadataBuffer.swift`:
+- [x] 9.2 — **RED**: Tests fail (types not defined)
+- [x] 9.3 — Create `Sources/MetalANNSCore/MetadataBuffer.swift`:
   - `public final class MetadataBuffer: @unchecked Sendable`
   - Single MTLBuffer, 5 × `MemoryLayout<UInt32>.stride` bytes
   - `pointer: UnsafeMutablePointer<UInt32>` (private)
   - Computed properties for each field: `entryPointID`, `nodeCount`, `degree`, `dim`, `iterationCount`
   - Init zero-fills with `memset`
-- [ ] 9.4 — Create `Sources/MetalANNSCore/IDMap.swift`:
+- [x] 9.4 — Create `Sources/MetalANNSCore/IDMap.swift`:
   - `public struct IDMap: Sendable, Codable` (struct — naturally Sendable)
   - `externalToInternal: [String: UInt32]` and `internalToExternal: [UInt32: String]` (private)
   - `nextID: UInt32` (private)
@@ -104,12 +105,13 @@ This file is the **shared communication layer** between the orchestrator and exe
   - `func internalID(for:) -> UInt32?`
   - `func externalID(for:) -> String?`
   - `var count: Int`
-- [ ] 9.5 — **ACTOR ISOLATION DECISION**: `IDMap` uses `mutating func`. In Phase 6, `ANNSIndex` actor will store `IDMap` as a var property. Confirm this pattern works with actor isolation (actor-isolated var can call mutating methods). **Write your assessment in the notes below.**
-- [ ] 9.6 — **GREEN**: All 3 tests pass
-- [ ] 9.7 — **REGRESSION**: All Phase 1 + Phase 2 prior tests still pass
-- [ ] 9.8 — **GIT**: `git add Sources/MetalANNSCore/MetadataBuffer.swift Sources/MetalANNSCore/IDMap.swift Tests/MetalANNSTests/MetadataTests.swift && git commit -m "feat: add MetadataBuffer and bidirectional IDMap"`
+- [x] 9.5 — **ACTOR ISOLATION DECISION**: `IDMap` uses `mutating func`. In Phase 6, `ANNSIndex` actor will store `IDMap` as a var property. Confirm this pattern works with actor isolation (actor-isolated var can call mutating methods). **Write your assessment in the notes below.**
+- [x] 9.6 — **GREEN**: All 3 tests pass
+- [x] 9.7 — **REGRESSION**: All Phase 1 + Phase 2 prior tests still pass
+- [x] 9.8 — **GIT**: `git add Sources/MetalANNSCore/MetadataBuffer.swift Sources/MetalANNSCore/IDMap.swift Tests/MetalANNSTests/MetadataTests.swift && git commit -m "feat: add MetadataBuffer and bidirectional IDMap"`
 
 > **Agent notes** _(REQUIRED — document your 9.5 decision here)_:
+> `IDMap` as a `struct` with `mutating assign` is compatible with actor isolation. When stored as an actor-isolated `var`, mutating calls are serialized by the actor executor, so no additional synchronization is required for this type in Phase 6.
 
 ---
 
@@ -119,10 +121,14 @@ When all items above are checked, update this section:
 
 ```
 STATUS: COMPLETE
-FINAL TEST RESULT: (paste xcodebuild test summary)
-TOTAL COMMITS: (paste git log --oneline)
-ISSUES ENCOUNTERED: (list any)
-DECISIONS MADE: (list Task 8.6 and 9.5 decisions)
+FINAL TEST RESULT: Test run with 26 tests in 9 suites passed after 0.149 seconds. ** TEST SUCCEEDED **
+TOTAL COMMITS: 10 total commits on branch (includes pre-existing orchestration commit `3a6a17b Add phase-2 graph data structures prompt and todo` + 3 Phase 2 implementation commits)
+ISSUES ENCOUNTERED:
+- The documented scheme `MetalANNS` is not configured for test action in this repository. Executed all RED/GREEN/regression runs with `MetalANNS-Package` instead.
+- Commit-count expectation in checklist says 9 total, but repository had an existing orchestration commit before implementation; ending total is 10 while still adding exactly 3 Phase 2 feature commits.
+DECISIONS MADE:
+- Task 8.6: Kept simple loop sentinel initialization for `GraphBuffer`; one-time construction cost is acceptable for Phase 2 and easy to optimize later if profiling requires.
+- Task 9.5: `IDMap` as a struct with `mutating assign` is actor-safe when stored as actor-isolated `var`; actor serialization handles mutation safety.
 ```
 
 ---

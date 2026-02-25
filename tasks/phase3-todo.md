@@ -1,9 +1,9 @@
 # MetalANNS — Phase 3: Graph Construction — NN-Descent via Metal
 
-> **Status**: NOT STARTED
+> **Status**: COMPLETE
 > **Owner**: Subagent (dispatched by orchestrator)
 > **Reviewer**: Orchestrator (main session)
-> **Last Updated**: 2026-02-25 04:48:34 EAT
+> **Last Updated**: 2026-02-25 04:50:34 EAT
 
 ---
 
@@ -164,8 +164,8 @@ This file is the **shared communication layer** between the orchestrator and exe
 - [x] 13.6 — **GREEN**: Sort test passes — every node's distances are ascending
 - [x] 13.7 — **REGRESSION**: All prior tests still pass (26 + 3 Task 10 + 1 Task 11 + 1 Task 12)
 - [x] 13.8 — **FULL SUITE**: `xcodebuild test -scheme MetalANNS-Package -destination 'platform=macOS' 2>&1 | grep -E '(Test Suite|passed|failed)'` → **zero failures**
-- [ ] 13.9 — **GIT LOG**: `git log --oneline` shows exactly 14 commits
-- [ ] 13.10 — **GIT**: `git add Sources/MetalANNSCore/Shaders/Sort.metal Sources/MetalANNSCore/NNDescentGPU.swift Tests/MetalANNSTests/BitonicSortTests.swift && git commit -m "feat: add bitonic sort kernel for neighbor list ordering"`
+- [x] 13.9 — **GIT LOG**: `git log --oneline` shows exactly 14 commits
+- [x] 13.10 — **GIT**: `git add Sources/MetalANNSCore/Shaders/Sort.metal Sources/MetalANNSCore/NNDescentGPU.swift Tests/MetalANNSTests/BitonicSortTests.swift && git commit -m "feat: add bitonic sort kernel for neighbor list ordering"`
 
 > **Agent notes** _(REQUIRED — document your 13.5 decision here)_:
 > Chosen approach: sort once at the end of `NNDescentGPU.build()` (not per-iteration).
@@ -179,10 +179,27 @@ When all items above are checked, update this section:
 
 ```
 STATUS: COMPLETE
-FINAL TEST RESULT: (paste xcodebuild test summary)
-TOTAL COMMITS: (paste git log --oneline)
-ISSUES ENCOUNTERED: (list any)
-DECISIONS MADE: (list Task 11.6, 12.7, and 13.5 decisions)
+FINAL TEST RESULT: Test run with 32 tests in 12 suites passed after 0.154 seconds. (xcodebuild test -scheme MetalANNS-Package -destination 'platform=macOS')
+TOTAL COMMITS:
+8187eb6 feat: add bitonic sort kernel for neighbor list ordering
+6a06d6f feat: implement GPU NN-Descent with reverse edges, local join, and convergence
+fe4ac93 feat: add Metal random_init and compute_initial_distances kernels
+0a8c20a feat: implement CPU NN-Descent reference (Accelerate backend)
+06c7d29 feat: add MetadataBuffer and bidirectional IDMap
+aab0459 feat: add GraphBuffer for GPU-resident adjacency list storage
+06ddde2 feat: add VectorBuffer for GPU-resident vector storage
+3a6a17b Add phase-2 graph data structures prompt and todo
+7cb5a9c feat: implement Metal distance shaders (cosine, L2, inner product) with GPU tests
+045212c feat: add MetalContext with device lifecycle and PipelineCache
+ad22132 feat: implement Accelerate distance kernels (cosine, L2, inner product)
+b7d21f6 feat: add ComputeBackend protocol with factory and stub backends
+d0dddeb feat: add ANNSError, Metric, and IndexConfiguration types
+adc01bb chore: initialize MetalANNS Swift package scaffold
+ISSUES ENCOUNTERED: None blocking. Early RED command for a single Swift Testing method selector returned 0 tests, so suite-level selector was used for reliable verification.
+DECISIONS MADE:
+- 11.6 metric mapping kept consistent across Swift and shader: cosine=0, l2=1, innerProduct=2.
+- 12.7 convergence threshold kept at 0.001 * degree * nodeCount (1.6 for 200x8); no tuning required for passing recall target within maxIterations=15.
+- 13.5 sorting is executed once at the end of build(), not per iteration, to reduce overhead while guaranteeing final neighbor ordering.
 ```
 
 ---
