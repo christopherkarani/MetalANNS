@@ -100,6 +100,13 @@ public actor ANNSIndex {
             builtEntryPoint = cpuResult.entryPoint
         }
 
+        try GraphPruner.prune(
+            graph: graphBuffer,
+            vectors: vectorBuffer,
+            nodeCount: inputVectors.count,
+            metric: configuration.metric
+        )
+
         self.vectors = vectorBuffer
         self.graph = graphBuffer
         self.idMap = builtIDMap
