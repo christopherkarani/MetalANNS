@@ -21,6 +21,11 @@ public struct SoftDeletion: Sendable, Codable {
         deletedIDs.count
     }
 
+    /// All internal IDs currently marked as deleted.
+    public var allDeletedIDs: Set<UInt32> {
+        deletedIDs
+    }
+
     public func filterResults(_ results: [SearchResult]) -> [SearchResult] {
         results.filter { !isDeleted($0.internalID) }
     }

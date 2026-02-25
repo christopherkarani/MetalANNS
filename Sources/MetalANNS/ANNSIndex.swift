@@ -16,6 +16,8 @@ public actor ANNSIndex {
     private var softDeletion: SoftDeletion
     private var entryPoint: UInt32
     private var isBuilt: Bool
+    private var isReadOnlyLoadedIndex: Bool
+    private var mmapLifetime: AnyObject?
 
     public init(configuration: IndexConfiguration = .default) {
         self.configuration = configuration
@@ -26,6 +28,8 @@ public actor ANNSIndex {
         self.softDeletion = SoftDeletion()
         self.entryPoint = 0
         self.isBuilt = false
+        self.isReadOnlyLoadedIndex = false
+        self.mmapLifetime = nil
     }
 
     public func build(vectors inputVectors: [[Float]], ids: [String]) async throws {
@@ -118,11 +122,16 @@ public actor ANNSIndex {
         self.softDeletion = SoftDeletion()
         self.entryPoint = builtEntryPoint
         self.isBuilt = true
+        self.isReadOnlyLoadedIndex = false
+        self.mmapLifetime = nil
     }
 
     public func insert(_ vector: [Float], id: String) async throws {
         guard isBuilt, let vectors, let graph else {
             throw ANNSError.indexEmpty
+        }
+        guard !isReadOnlyLoadedIndex else {
+            throw ANNSError.constructionFailed("Index is read-only (mmap-loaded)")
         }
         guard vector.count == vectors.dim else {
             throw ANNSError.dimensionMismatch(expected: vectors.dim, got: vector.count)
@@ -160,11 +169,116 @@ public actor ANNSIndex {
         }
     }
 
+    public func batchInsert(_ vectors: [[Float]], ids: [String]) async throws {
+        guard isBuilt, let vectorStorage = self.vectors, let graph else {
+            throw ANNSError.indexEmpty
+        }
+        guard !isReadOnlyLoadedIndex else {
+            throw ANNSError.constructionFailed("Index is read-only (mmap-loaded)")
+        }
+        guard vectors.count == ids.count else {
+            throw ANNSError.constructionFailed("Vector and ID counts do not match")
+        }
+        guard !vectors.isEmpty else {
+            return
+        }
+
+        let dim = vectorStorage.dim
+        for vector in vectors {
+            guard vector.count == dim else {
+                throw ANNSError.dimensionMismatch(expected: dim, got: vector.count)
+            }
+        }
+
+        var seenIDs = Set<String>()
+        for id in ids {
+            if !seenIDs.insert(id).inserted {
+                throw ANNSError.idAlreadyExists(id)
+            }
+            if idMap.internalID(for: id) != nil {
+                throw ANNSError.idAlreadyExists(id)
+            }
+        }
+
+        let startSlot = idMap.count
+        guard startSlot + vectors.count <= vectorStorage.capacity,
+              startSlot + vectors.count <= graph.capacity else {
+            throw ANNSError.constructionFailed("Index capacity exceeded; rebuild with larger capacity")
+        }
+
+        var slots: [Int] = []
+        slots.reserveCapacity(ids.count)
+        for id in ids {
+            guard let assignedID = idMap.assign(externalID: id) else {
+                throw ANNSError.idAlreadyExists(id)
+            }
+            slots.append(Int(assignedID))
+        }
+
+        for (offset, vector) in vectors.enumerated() {
+            try vectorStorage.insert(vector: vector, at: slots[offset])
+        }
+        let newMaxCount = (slots.last ?? 0) + 1
+        if vectorStorage.count < newMaxCount {
+            vectorStorage.setCount(newMaxCount)
+        }
+
+        try BatchIncrementalBuilder.batchInsert(
+            vectors: vectors,
+            startingAt: startSlot,
+            into: graph,
+            vectorStorage: vectorStorage,
+            entryPoint: entryPoint,
+            metric: configuration.metric,
+            degree: configuration.degree
+        )
+
+        if graph.nodeCount < newMaxCount {
+            graph.setCount(newMaxCount)
+        }
+    }
+
     public func delete(id: String) throws {
+        guard !isReadOnlyLoadedIndex else {
+            throw ANNSError.constructionFailed("Index is read-only (mmap-loaded)")
+        }
         guard let internalID = idMap.internalID(for: id) else {
             throw ANNSError.idNotFound(id)
         }
         softDeletion.markDeleted(internalID)
+    }
+
+    public func compact() async throws {
+        guard !isReadOnlyLoadedIndex else {
+            throw ANNSError.constructionFailed("Index is read-only (mmap-loaded)")
+        }
+        guard isBuilt, let vectors, let graph else {
+            throw ANNSError.indexEmpty
+        }
+        guard softDeletion.deletedCount > 0 else {
+            return
+        }
+
+        let result = try await IndexCompactor.compact(
+            vectors: vectors,
+            graph: graph,
+            idMap: idMap,
+            softDeletion: softDeletion,
+            metric: configuration.metric,
+            degree: configuration.degree,
+            context: context,
+            maxIterations: configuration.maxIterations,
+            convergenceThreshold: configuration.convergenceThreshold,
+            useFloat16: configuration.useFloat16
+        )
+
+        self.vectors = result.vectors
+        self.graph = result.graph
+        self.idMap = result.idMap
+        self.entryPoint = result.entryPoint
+        self.softDeletion = SoftDeletion()
+        self.isReadOnlyLoadedIndex = false
+        self.mmapLifetime = nil
     }
 
     public func search(query: [Float], k: Int) async throws -> [SearchResult] {
@@ -276,6 +390,25 @@ public actor ANNSIndex {
         try metadataData.write(to: Self.metadataURL(for: url), options: .atomic)
     }
 
+    public func saveMmapCompatible(to url: URL) async throws {
+        guard isBuilt, let vectors, let graph else {
+            throw ANNSError.indexEmpty
+        }
+
+        try IndexSerializer.saveMmapCompatible(
+            vectors: vectors,
+            graph: graph,
+            idMap: idMap,
+            entryPoint: entryPoint,
+            metric: configuration.metric,
+            to: url
+        )
+
+        let metadata = PersistedMetadata(configuration: configuration, softDeletion: softDeletion)
+        let metadataData = try JSONEncoder().encode(metadata)
+        try metadataData.write(to: Self.metadataURL(for: url), options: .atomic)
+    }
+
     public static func load(from url: URL) async throws -> ANNSIndex {
         let persistedMetadata = try loadPersistedMetadataIfPresent(from: url)
         let initialConfiguration = persistedMetadata?.configuration ?? .default
@@ -299,6 +432,30 @@ public actor ANNSIndex {
         return index
     }
 
+    public static func loadMmap(from url: URL) async throws -> ANNSIndex {
+        let persistedMetadata = try loadPersistedMetadataIfPresent(from: url)
+        let initialConfiguration = persistedMetadata?.configuration ?? .default
+        let index = ANNSIndex(configuration: initialConfiguration)
+        let loaded = try MmapIndexLoader.load(from: url, device: await index.currentDevice())
+
+        var resolvedConfiguration = persistedMetadata?.configuration ?? .default
+        resolvedConfiguration.metric = loaded.metric
+        resolvedConfiguration.useFloat16 = loaded.vectors.isFloat16
+
+        await index.applyLoadedState(
+            configuration: resolvedConfiguration,
+            vectors: loaded.vectors,
+            graph: loaded.graph,
+            idMap: loaded.idMap,
+            entryPoint: loaded.entryPoint,
+            softDeletion: persistedMetadata?.softDeletion ?? SoftDeletion(),
+            isReadOnlyLoadedIndex: true,
+            mmapLifetime: loaded.mmapLifetime
+        )
+
+        return index
+    }
+
     public var count: Int {
         max(0, idMap.count - softDeletion.deletedCount)
     }
@@ -313,7 +470,9 @@ public actor ANNSIndex {
         graph: GraphBuffer,
         idMap: IDMap,
         entryPoint: UInt32,
-        softDeletion: SoftDeletion
+        softDeletion: SoftDeletion,
+        isReadOnlyLoadedIndex: Bool = false,
+        mmapLifetime: AnyObject? = nil
     ) {
         self.configuration = configuration
         self.vectors = vectors
@@ -322,6 +481,8 @@ public actor ANNSIndex {
         self.entryPoint = entryPoint
         self.softDeletion = softDeletion
         self.isBuilt = true
+        self.isReadOnlyLoadedIndex = isReadOnlyLoadedIndex
+        self.mmapLifetime = mmapLifetime
     }
 
     private func extractVectors(from vectors: any VectorStorage) -> [[Float]] {

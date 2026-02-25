@@ -44,6 +44,40 @@ public final class GraphBuffer: @unchecked Sendable {
         }
     }
 
+    /// Creates a graph view over pre-existing Metal buffers (e.g. mmap-backed bytesNoCopy buffers).
+    /// Buffers must contain `capacity * degree` entries each.
+    public init(
+        adjacencyBuffer: MTLBuffer,
+        distanceBuffer: MTLBuffer,
+        capacity: Int,
+        degree: Int,
+        nodeCount: Int
+    ) throws {
+        guard capacity >= 0, degree > 0 else {
+            throw ANNSError.constructionFailed("GraphBuffer requires capacity >= 0 and degree > 0")
+        }
+        guard nodeCount >= 0, nodeCount <= capacity else {
+            throw ANNSError.constructionFailed("Node count is out of bounds for capacity")
+        }
+
+        let slotCount = capacity * degree
+        let adjacencyBytes = slotCount * MemoryLayout<UInt32>.stride
+        let distanceBytes = slotCount * MemoryLayout<Float>.stride
+
+        guard adjacencyBuffer.length >= max(adjacencyBytes, 4),
+              distanceBuffer.length >= max(distanceBytes, 4) else {
+            throw ANNSError.constructionFailed("Provided buffers are too small for GraphBuffer layout")
+        }
+
+        self.adjacencyBuffer = adjacencyBuffer
+        self.distanceBuffer = distanceBuffer
+        self.degree = degree
+        self.capacity = capacity
+        self.nodeCount = nodeCount
+        self.idPointer = adjacencyBuffer.contents().bindMemory(to: UInt32.self, capacity: max(slotCount, 1))
+        self.distPointer = distanceBuffer.contents().bindMemory(to: Float.self, capacity: max(slotCount, 1))
+    }
+
     public func setCount(_ newCount: Int) {
         nodeCount = newCount
     }
