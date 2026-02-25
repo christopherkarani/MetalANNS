@@ -350,7 +350,7 @@ public actor ANNSIndex {
         let effectiveEf = max(configuration.efSearch, effectiveK)
 
         let rawResults: [SearchResult]
-        if let context {
+        if let context, supportsGPUSearch(for: vectors) {
             rawResults = try await FullGPUSearch.search(
                 context: context,
                 query: query,
@@ -413,7 +413,7 @@ public actor ANNSIndex {
         let searchEf = min(vectors.count, max(configuration.efSearch, searchK * 2))
 
         let rawResults: [SearchResult]
-        if let context {
+        if let context, supportsGPUSearch(for: vectors) {
             rawResults = try await FullGPUSearch.search(
                 context: context,
                 query: query,
@@ -592,12 +592,42 @@ public actor ANNSIndex {
         return index
     }
 
+    public static func loadDiskBacked(from url: URL) async throws -> ANNSIndex {
+        let persistedMetadata = try loadPersistedMetadataIfPresent(from: url)
+        let initialConfiguration = persistedMetadata?.configuration ?? .default
+        let index = ANNSIndex(configuration: initialConfiguration)
+
+        let diskBacked = try DiskBackedIndexLoader.load(from: url, device: await index.currentDevice())
+
+        var resolvedConfiguration = persistedMetadata?.configuration ?? .default
+        resolvedConfiguration.metric = diskBacked.metric
+        resolvedConfiguration.useFloat16 = diskBacked.vectors.isFloat16
+
+        await index.applyLoadedState(
+            configuration: resolvedConfiguration,
+            vectors: diskBacked.vectors,
+            graph: diskBacked.graph,
+            idMap: diskBacked.idMap,
+            entryPoint: diskBacked.entryPoint,
+            softDeletion: persistedMetadata?.softDeletion ?? SoftDeletion(),
+            metadataStore: persistedMetadata?.metadataStore ?? MetadataStore(),
+            isReadOnlyLoadedIndex: true,
+            mmapLifetime: diskBacked.mmapLifetime
+        )
+
+        return index
+    }
+
     public var count: Int {
         max(0, idMap.count - softDeletion.deletedCount)
     }
 
     private func currentDevice() -> MTLDevice? {
         context?.device
+    }
+
+    private func supportsGPUSearch(for vectors: any VectorStorage) -> Bool {
+        !(vectors is DiskBackedVectorBuffer)
     }
 
     private func applyLoadedState(
