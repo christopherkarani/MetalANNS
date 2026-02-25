@@ -1,6 +1,6 @@
 import MetalANNSCore
 
-public struct IndexConfiguration: Sendable {
+public struct IndexConfiguration: Sendable, Codable {
     public var degree: Int
     public var metric: Metric
     public var efConstruction: Int
