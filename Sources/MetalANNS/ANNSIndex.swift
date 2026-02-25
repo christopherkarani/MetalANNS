@@ -205,13 +205,44 @@ public actor ANNSIndex {
     }
 
     public func batchSearch(queries: [[Float]], k: Int) async throws -> [[SearchResult]] {
-        var allResults: [[SearchResult]] = []
-        allResults.reserveCapacity(queries.count)
-        for query in queries {
-            let results = try await search(query: query, k: k)
-            allResults.append(results)
+        guard isBuilt else {
+            throw ANNSError.indexEmpty
         }
-        return allResults
+        guard !queries.isEmpty else {
+            return []
+        }
+
+        let maxConcurrency = context != nil ? 4 : max(1, ProcessInfo.processInfo.activeProcessorCount)
+
+        return try await withThrowingTaskGroup(of: (Int, [SearchResult]).self) { group in
+            var orderedResults = Array<[SearchResult]?>(repeating: nil, count: queries.count)
+            var nextIndex = 0
+
+            for _ in 0..<min(maxConcurrency, queries.count) {
+                let idx = nextIndex
+                let query = queries[idx]
+                nextIndex += 1
+                group.addTask { [self] in
+                    let result = try await self.search(query: query, k: k)
+                    return (idx, result)
+                }
+            }
+
+            for try await (idx, result) in group {
+                orderedResults[idx] = result
+                if nextIndex < queries.count {
+                    let idx = nextIndex
+                    let query = queries[idx]
+                    nextIndex += 1
+                    group.addTask { [self] in
+                        let result = try await self.search(query: query, k: k)
+                        return (idx, result)
+                    }
+                }
+            }
+
+            return orderedResults.map { $0! }
+        }
     }
 
     public func save(to url: URL) async throws {
