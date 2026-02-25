@@ -3,7 +3,7 @@
 > **Status**: NOT STARTED
 > **Owner**: Subagent (dispatched by orchestrator)
 > **Reviewer**: Orchestrator (main session)
-> **Last Updated**: —
+> **Last Updated**: 2026-02-25 19:59:18 EAT
 
 ---
 
@@ -256,3 +256,52 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
   - Full xcodebuild run reports the known baseline `MmapTests` failure (`Index capacity exceeded; rebuild with larger capacity`) and no additional regressions.
 
 > Last Updated: 2026-02-25 (Tasks 31-35 implemented and committed)
+
+---
+
+## Phase 13 — Swift 6.2 Modernization
+
+> **Status**: IN PROGRESS
+> **Owner**: Subagent (dispatched by orchestrator)
+> **Reviewer**: Orchestrator (main session)
+> **Last Updated**: 2026-02-25 19:59:18 EAT
+
+- [x] 1 — Bump to Swift 6.2 (`Package.swift`)
+> Notes (Task 1): Updated `swift-tools-version` to 6.2. `xcodebuild build -scheme MetalANNS` succeeded. `xcodebuild test` on runnable package scheme (`MetalANNS-Package`) is currently failing on baseline `BatchInsertTests` recall threshold.
+
+- [ ] 2 — Expand `ANNSError` with `serializationFailed`, `metalError`, `invalidArgument`
+> Notes (Task 2): Pending.
+
+- [ ] 3 — Add `throws(ANNSError)` to public API surface (`ANNSIndex`, `ShardedIndex`)
+> Notes (Task 3): Pending.
+
+- [ ] 4 — Add `throws(ANNSError)` to internal/core throw chain (bottom-up)
+> Notes (Task 4): Pending.
+
+- [ ] 5 — Add `@concurrent` to read-only actor methods
+> Notes (Task 5): Pending.
+
+- [ ] 6 — Evaluate `InlineArray` and record defer rationale
+> Notes (Task 6): Pending.
+
+- [ ] 7 — Add `Swift62ModernizationTests` and pass full suite
+> Notes (Task 7): Pending.
+
+### Required Commit Messages
+
+1. `feat(package): bump swift-tools-version to 6.2`
+2. `feat(errors): add serializationFailed, metalError, invalidArgument cases to ANNSError`
+3. `refactor(throws): add typed throws(ANNSError) to public and internal API surface`
+4. `feat(concurrent): add @concurrent to read-only actor methods for parallel search`
+5. `test(swift62): add typed throws and concurrent access verification tests`
+
+### Phase 13 Complete — Signal
+
+```
+STATUS: PENDING
+FINAL BUILD RESULT: PENDING
+FINAL TEST RESULT: PENDING
+TOTAL COMMITS: PENDING
+ISSUES ENCOUNTERED: PENDING
+DECISIONS MADE: PENDING
+```
