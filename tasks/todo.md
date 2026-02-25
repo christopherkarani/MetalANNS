@@ -224,12 +224,12 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 - [x] 31.4 Add `FilteredSearchTests` and pass them
 - [ ] 31.5 Commit Task 31
 
-- [ ] 32.1 Add `rangeSearch` with optional filter/metric override
-- [ ] 32.2 Add `RangeSearchTests` and pass them
+- [x] 32.1 Add `rangeSearch` with optional filter/metric override
+- [x] 32.2 Add `RangeSearchTests` and pass them
 - [ ] 32.3 Commit Task 32
 
-- [ ] 33.1 Add runtime metric override to `search`, `batchSearch`, `rangeSearch`
-- [ ] 33.2 Add `RuntimeMetricTests` and pass them
+- [x] 33.1 Add runtime metric override to `search`, `batchSearch`, `rangeSearch`
+- [x] 33.2 Add `RuntimeMetricTests` and pass them
 - [ ] 33.3 Commit Task 33
 
 - [ ] 34.1 Add `DiskBackedVectorBuffer` + `DiskBackedIndexLoader` (v1/v2/v3)
@@ -245,4 +245,4 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 - [ ] V.1 Run full suite and confirm no new regressions (allow known Mmap baseline failure)
 - [ ] V.2 Add Phase 12 review notes to this file
 
-> Last Updated: 2026-02-25 (Task 31 in progress)
+> Last Updated: 2026-02-25 (Tasks 31-33 in progress)

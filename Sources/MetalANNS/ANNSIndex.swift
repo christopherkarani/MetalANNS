@@ -322,7 +322,12 @@ public actor ANNSIndex {
         metadataStore.set(column, intValue: value, for: internalID)
     }
 
-    public func search(query: [Float], k: Int, filter: SearchFilter? = nil) async throws -> [SearchResult] {
+    public func search(
+        query: [Float],
+        k: Int,
+        filter: SearchFilter? = nil,
+        metric: Metric? = nil
+    ) async throws -> [SearchResult] {
         guard isBuilt, let vectors, let graph else {
             throw ANNSError.indexEmpty
         }
@@ -333,6 +338,7 @@ public actor ANNSIndex {
             return []
         }
 
+        let searchMetric = metric ?? configuration.metric
         let hasFilter = filter != nil
         let deletedCount = softDeletion.deletedCount
         let effectiveK: Int
@@ -353,7 +359,7 @@ public actor ANNSIndex {
                 entryPoint: Int(entryPoint),
                 k: max(1, effectiveK),
                 ef: max(1, effectiveEf),
-                metric: configuration.metric
+                metric: searchMetric
             )
         } else {
             rawResults = try await BeamSearchCPU.search(
@@ -363,7 +369,7 @@ public actor ANNSIndex {
                 entryPoint: Int(entryPoint),
                 k: max(1, effectiveK),
                 ef: max(1, effectiveEf),
-                metric: configuration.metric
+                metric: searchMetric
             )
         }
 
@@ -381,7 +387,76 @@ public actor ANNSIndex {
         return Array(mapped.prefix(k))
     }
 
-    public func batchSearch(queries: [[Float]], k: Int) async throws -> [[SearchResult]] {
+    public func rangeSearch(
+        query: [Float],
+        maxDistance: Float,
+        limit: Int = 1000,
+        filter: SearchFilter? = nil,
+        metric: Metric? = nil
+    ) async throws -> [SearchResult] {
+        guard isBuilt, let vectors, let graph else {
+            throw ANNSError.indexEmpty
+        }
+        guard query.count == vectors.dim else {
+            throw ANNSError.dimensionMismatch(expected: vectors.dim, got: query.count)
+        }
+        guard maxDistance > 0 else {
+            return []
+        }
+        guard limit > 0 else {
+            return []
+        }
+
+        let searchMetric = metric ?? configuration.metric
+        let deletedCount = softDeletion.deletedCount
+        let searchK = min(vectors.count, limit + deletedCount)
+        let searchEf = min(vectors.count, max(configuration.efSearch, searchK * 2))
+
+        let rawResults: [SearchResult]
+        if let context {
+            rawResults = try await FullGPUSearch.search(
+                context: context,
+                query: query,
+                vectors: vectors,
+                graph: graph,
+                entryPoint: Int(entryPoint),
+                k: max(1, searchK),
+                ef: max(1, searchEf),
+                metric: searchMetric
+            )
+        } else {
+            rawResults = try await BeamSearchCPU.search(
+                query: query,
+                vectors: extractVectors(from: vectors),
+                graph: extractGraph(from: graph),
+                entryPoint: Int(entryPoint),
+                k: max(1, searchK),
+                ef: max(1, searchEf),
+                metric: searchMetric
+            )
+        }
+
+        var filtered = softDeletion.filterResults(rawResults)
+        if let filter {
+            filtered = filtered.filter { metadataStore.matches(id: $0.internalID, filter: filter) }
+        }
+        let withinRange = filtered.filter { $0.score <= maxDistance }
+
+        let mapped = withinRange.compactMap { result -> SearchResult? in
+            guard let externalID = idMap.externalID(for: result.internalID) else {
+                return nil
+            }
+            return SearchResult(id: externalID, score: result.score, internalID: result.internalID)
+        }
+        return Array(mapped.prefix(limit))
+    }
+
+    public func batchSearch(
+        queries: [[Float]],
+        k: Int,
+        filter: SearchFilter? = nil,
+        metric: Metric? = nil
+    ) async throws -> [[SearchResult]] {
         guard isBuilt else {
             throw ANNSError.indexEmpty
         }
@@ -400,7 +475,7 @@ public actor ANNSIndex {
                 let query = queries[idx]
                 nextIndex += 1
                 group.addTask { [self] in
-                    let result = try await self.search(query: query, k: k)
+                    let result = try await self.search(query: query, k: k, filter: filter, metric: metric)
                     return (idx, result)
                 }
             }
@@ -412,7 +487,7 @@ public actor ANNSIndex {
                     let query = queries[idx]
                     nextIndex += 1
                     group.addTask { [self] in
-                        let result = try await self.search(query: query, k: k)
+                        let result = try await self.search(query: query, k: k, filter: filter, metric: metric)
                         return (idx, result)
                     }
                 }
