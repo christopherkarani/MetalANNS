@@ -9,4 +9,7 @@ public enum ANNSError: Error, Sendable {
     case constructionFailed(String)
     case searchFailed(String)
     case indexEmpty
+    case serializationFailed(String)
+    case metalError(String)
+    case invalidArgument(String)
 }

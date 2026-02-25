@@ -3,7 +3,7 @@
 > **Status**: NOT STARTED
 > **Owner**: Subagent (dispatched by orchestrator)
 > **Reviewer**: Orchestrator (main session)
-> **Last Updated**: 2026-02-25 19:59:18 EAT
+> **Last Updated**: 2026-02-25 20:00:11 EAT
 
 ---
 
@@ -264,13 +264,13 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 > **Status**: IN PROGRESS
 > **Owner**: Subagent (dispatched by orchestrator)
 > **Reviewer**: Orchestrator (main session)
-> **Last Updated**: 2026-02-25 19:59:18 EAT
+> **Last Updated**: 2026-02-25 20:00:11 EAT
 
 - [x] 1 — Bump to Swift 6.2 (`Package.swift`)
 > Notes (Task 1): Updated `swift-tools-version` to 6.2. `xcodebuild build -scheme MetalANNS` succeeded. `xcodebuild test` on runnable package scheme (`MetalANNS-Package`) is currently failing on baseline `BatchInsertTests` recall threshold.
 
-- [ ] 2 — Expand `ANNSError` with `serializationFailed`, `metalError`, `invalidArgument`
-> Notes (Task 2): Pending.
+- [x] 2 — Expand `ANNSError` with `serializationFailed`, `metalError`, `invalidArgument`
+> Notes (Task 2): Added the three new error cases in `MetalANNSCore.ANNSError`. Build succeeded. Full package test run shows the same baseline failure in `BatchInsertTests` recall threshold and no new failure signatures.
 
 - [ ] 3 — Add `throws(ANNSError)` to public API surface (`ANNSIndex`, `ShardedIndex`)
 > Notes (Task 3): Pending.
