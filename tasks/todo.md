@@ -183,3 +183,11 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 - [ ] R10 — No Phase 2+ code leaked in (no VectorBuffer, GraphBuffer, NN-Descent)
 - [ ] R11 — Agent notes are filled in for Tasks 3.6 and 5.6 decisions
 - [ ] R12 — Placeholder test from Task 1.5 was cleaned up or is harmless
+
+---
+
+## Phase 9 Float16 Planning
+
+- [ ] 1 — Collect current signatures/kernels/serialization data from the key MetalANNS files
+- [ ] 2 — Summarize the APIs, kernel dispatch names, serialization layout, and divergence risks
+- [ ] 3 — Draft recommended edit map per file to guide Float16 integration work
