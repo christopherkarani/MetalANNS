@@ -119,40 +119,43 @@ public actor ShardedIndex {
         self.isBuilt = true
     }
 
+    @concurrent
     public func search(
         query: [Float],
         k: Int,
         filter: SearchFilter? = nil,
         metric: Metric? = nil
     ) async throws(ANNSError) -> [SearchResult] {
-        guard isBuilt, !shards.isEmpty, !centroids.isEmpty else {
+        let snapshot = await searchSnapshot()
+
+        guard snapshot.isBuilt, !snapshot.shards.isEmpty, !snapshot.centroids.isEmpty else {
             throw ANNSError.indexEmpty
         }
         guard k > 0 else {
             return []
         }
 
-        guard let firstCentroid = centroids.first else {
+        guard let firstCentroid = snapshot.centroids.first else {
             throw ANNSError.indexEmpty
         }
         guard query.count == firstCentroid.count else {
             throw ANNSError.dimensionMismatch(expected: firstCentroid.count, got: query.count)
         }
 
-        let searchMetric = metric ?? configuration.metric
+        let searchMetric = metric ?? snapshot.metric
 
-        let centroidDistances = centroids.enumerated().map { (index, centroid) in
+        let centroidDistances = snapshot.centroids.enumerated().map { (index, centroid) in
             (index, SIMDDistance.distance(query, centroid, metric: searchMetric))
         }.sorted { $0.1 < $1.1 }
 
-        let probeCount = min(nprobe, shards.count)
+        let probeCount = min(snapshot.nprobe, snapshot.shards.count)
         let probeIndices = centroidDistances.prefix(probeCount).map { $0.0 }
 
         var mergedResults: [SearchResult] = []
         mergedResults.reserveCapacity(probeCount * k)
 
         for shardIndex in probeIndices {
-            let shardResults = try await shards[shardIndex].search(
+            let shardResults = try await snapshot.shards[shardIndex].search(
                 query: query,
                 k: k,
                 filter: filter,
@@ -165,8 +168,10 @@ public actor ShardedIndex {
         return Array(mergedResults.prefix(k))
     }
 
+    @concurrent
     public var count: Int {
         get async {
+            let shards = await shardsSnapshot()
             var total = 0
             for shard in shards {
                 total += await shard.count
@@ -184,5 +189,25 @@ public actor ShardedIndex {
         }
 
         return sizes
+    }
+
+    private func searchSnapshot() -> (
+        isBuilt: Bool,
+        shards: [ANNSIndex],
+        centroids: [[Float]],
+        nprobe: Int,
+        metric: Metric
+    ) {
+        (
+            isBuilt: isBuilt,
+            shards: shards,
+            centroids: centroids,
+            nprobe: nprobe,
+            metric: configuration.metric
+        )
+    }
+
+    private func shardsSnapshot() -> [ANNSIndex] {
+        shards
     }
 }

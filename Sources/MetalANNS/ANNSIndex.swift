@@ -9,6 +9,17 @@ public actor ANNSIndex {
         let metadataStore: MetadataStore?
     }
 
+    private struct ReadSnapshot: Sendable {
+        let configuration: IndexConfiguration
+        let context: MetalContext?
+        let vectors: any VectorStorage
+        let graph: GraphBuffer
+        let idMap: IDMap
+        let softDeletion: SoftDeletion
+        let metadataStore: MetadataStore
+        let entryPoint: UInt32
+    }
+
     private var configuration: IndexConfiguration
     private var context: MetalContext?
     private var vectors: (any VectorStorage)?
@@ -322,41 +333,42 @@ public actor ANNSIndex {
         metadataStore.set(column, intValue: value, for: internalID)
     }
 
+    @concurrent
     public func search(
         query: [Float],
         k: Int,
         filter: SearchFilter? = nil,
         metric: Metric? = nil
     ) async throws(ANNSError) -> [SearchResult] {
-        guard isBuilt, let vectors, let graph else {
+        guard let snapshot = await readSnapshot() else {
             throw ANNSError.indexEmpty
         }
-        guard query.count == vectors.dim else {
-            throw ANNSError.dimensionMismatch(expected: vectors.dim, got: query.count)
+        guard query.count == snapshot.vectors.dim else {
+            throw ANNSError.dimensionMismatch(expected: snapshot.vectors.dim, got: query.count)
         }
         guard k > 0 else {
             return []
         }
 
-        let searchMetric = metric ?? configuration.metric
+        let searchMetric = metric ?? snapshot.configuration.metric
         let hasFilter = filter != nil
-        let deletedCount = softDeletion.deletedCount
+        let deletedCount = snapshot.softDeletion.deletedCount
         let effectiveK: Int
         if hasFilter {
-            effectiveK = min(vectors.count, k * 4 + deletedCount)
+            effectiveK = min(snapshot.vectors.count, k * 4 + deletedCount)
         } else {
-            effectiveK = min(vectors.count, k + deletedCount)
+            effectiveK = min(snapshot.vectors.count, k + deletedCount)
         }
-        let effectiveEf = max(configuration.efSearch, effectiveK)
+        let effectiveEf = max(snapshot.configuration.efSearch, effectiveK)
 
         let rawResults: [SearchResult]
-        if let context, supportsGPUSearch(for: vectors) {
+        if let context = snapshot.context, Self.supportsGPUSearch(for: snapshot.vectors) {
             rawResults = try await FullGPUSearch.search(
                 context: context,
                 query: query,
-                vectors: vectors,
-                graph: graph,
-                entryPoint: Int(entryPoint),
+                vectors: snapshot.vectors,
+                graph: snapshot.graph,
+                entryPoint: Int(snapshot.entryPoint),
                 k: max(1, effectiveK),
                 ef: max(1, effectiveEf),
                 metric: searchMetric
@@ -364,22 +376,22 @@ public actor ANNSIndex {
         } else {
             rawResults = try await BeamSearchCPU.search(
                 query: query,
-                vectors: extractVectors(from: vectors),
-                graph: extractGraph(from: graph),
-                entryPoint: Int(entryPoint),
+                vectors: Self.extractVectors(from: snapshot.vectors),
+                graph: Self.extractGraph(from: snapshot.graph),
+                entryPoint: Int(snapshot.entryPoint),
                 k: max(1, effectiveK),
                 ef: max(1, effectiveEf),
                 metric: searchMetric
             )
         }
 
-        var filtered = softDeletion.filterResults(rawResults)
+        var filtered = snapshot.softDeletion.filterResults(rawResults)
         if let filter {
-            filtered = filtered.filter { metadataStore.matches(id: $0.internalID, filter: filter) }
+            filtered = filtered.filter { snapshot.metadataStore.matches(id: $0.internalID, filter: filter) }
         }
 
         let mapped = filtered.compactMap { result -> SearchResult? in
-            guard let externalID = idMap.externalID(for: result.internalID) else {
+            guard let externalID = snapshot.idMap.externalID(for: result.internalID) else {
                 return nil
             }
             return SearchResult(id: externalID, score: result.score, internalID: result.internalID)
@@ -387,6 +399,7 @@ public actor ANNSIndex {
         return Array(mapped.prefix(k))
     }
 
+    @concurrent
     public func rangeSearch(
         query: [Float],
         maxDistance: Float,
@@ -394,11 +407,11 @@ public actor ANNSIndex {
         filter: SearchFilter? = nil,
         metric: Metric? = nil
     ) async throws(ANNSError) -> [SearchResult] {
-        guard isBuilt, let vectors, let graph else {
+        guard let snapshot = await readSnapshot() else {
             throw ANNSError.indexEmpty
         }
-        guard query.count == vectors.dim else {
-            throw ANNSError.dimensionMismatch(expected: vectors.dim, got: query.count)
+        guard query.count == snapshot.vectors.dim else {
+            throw ANNSError.dimensionMismatch(expected: snapshot.vectors.dim, got: query.count)
         }
         guard maxDistance > 0 else {
             return []
@@ -407,19 +420,19 @@ public actor ANNSIndex {
             return []
         }
 
-        let searchMetric = metric ?? configuration.metric
-        let deletedCount = softDeletion.deletedCount
-        let searchK = min(vectors.count, limit + deletedCount)
-        let searchEf = min(vectors.count, max(configuration.efSearch, searchK * 2))
+        let searchMetric = metric ?? snapshot.configuration.metric
+        let deletedCount = snapshot.softDeletion.deletedCount
+        let searchK = min(snapshot.vectors.count, limit + deletedCount)
+        let searchEf = min(snapshot.vectors.count, max(snapshot.configuration.efSearch, searchK * 2))
 
         let rawResults: [SearchResult]
-        if let context, supportsGPUSearch(for: vectors) {
+        if let context = snapshot.context, Self.supportsGPUSearch(for: snapshot.vectors) {
             rawResults = try await FullGPUSearch.search(
                 context: context,
                 query: query,
-                vectors: vectors,
-                graph: graph,
-                entryPoint: Int(entryPoint),
+                vectors: snapshot.vectors,
+                graph: snapshot.graph,
+                entryPoint: Int(snapshot.entryPoint),
                 k: max(1, searchK),
                 ef: max(1, searchEf),
                 metric: searchMetric
@@ -427,23 +440,23 @@ public actor ANNSIndex {
         } else {
             rawResults = try await BeamSearchCPU.search(
                 query: query,
-                vectors: extractVectors(from: vectors),
-                graph: extractGraph(from: graph),
-                entryPoint: Int(entryPoint),
+                vectors: Self.extractVectors(from: snapshot.vectors),
+                graph: Self.extractGraph(from: snapshot.graph),
+                entryPoint: Int(snapshot.entryPoint),
                 k: max(1, searchK),
                 ef: max(1, searchEf),
                 metric: searchMetric
             )
         }
 
-        var filtered = softDeletion.filterResults(rawResults)
+        var filtered = snapshot.softDeletion.filterResults(rawResults)
         if let filter {
-            filtered = filtered.filter { metadataStore.matches(id: $0.internalID, filter: filter) }
+            filtered = filtered.filter { snapshot.metadataStore.matches(id: $0.internalID, filter: filter) }
         }
         let withinRange = filtered.filter { $0.score <= maxDistance }
 
         let mapped = withinRange.compactMap { result -> SearchResult? in
-            guard let externalID = idMap.externalID(for: result.internalID) else {
+            guard let externalID = snapshot.idMap.externalID(for: result.internalID) else {
                 return nil
             }
             return SearchResult(id: externalID, score: result.score, internalID: result.internalID)
@@ -451,20 +464,21 @@ public actor ANNSIndex {
         return Array(mapped.prefix(limit))
     }
 
+    @concurrent
     public func batchSearch(
         queries: [[Float]],
         k: Int,
         filter: SearchFilter? = nil,
         metric: Metric? = nil
     ) async throws(ANNSError) -> [[SearchResult]] {
-        guard isBuilt else {
+        guard await hasBuiltIndex() else {
             throw ANNSError.indexEmpty
         }
         guard !queries.isEmpty else {
             return []
         }
 
-        let maxConcurrency = context != nil ? 4 : max(1, ProcessInfo.processInfo.activeProcessorCount)
+        let maxConcurrency = await batchSearchConcurrency()
 
         do {
             return try await withThrowingTaskGroup(of: (Int, [SearchResult]).self) { group in
@@ -503,24 +517,25 @@ public actor ANNSIndex {
         }
     }
 
+    @concurrent
     public func save(to url: URL) async throws(ANNSError) {
-        guard isBuilt, let vectors, let graph else {
+        guard let snapshot = await readSnapshot() else {
             throw ANNSError.indexEmpty
         }
 
         try IndexSerializer.save(
-            vectors: vectors,
-            graph: graph,
-            idMap: idMap,
-            entryPoint: entryPoint,
-            metric: configuration.metric,
+            vectors: snapshot.vectors,
+            graph: snapshot.graph,
+            idMap: snapshot.idMap,
+            entryPoint: snapshot.entryPoint,
+            metric: snapshot.configuration.metric,
             to: url
         )
 
         let metadata = PersistedMetadata(
-            configuration: configuration,
-            softDeletion: softDeletion,
-            metadataStore: metadataStore
+            configuration: snapshot.configuration,
+            softDeletion: snapshot.softDeletion,
+            metadataStore: snapshot.metadataStore
         )
         let metadataData: Data
         do {
@@ -535,24 +550,25 @@ public actor ANNSIndex {
         }
     }
 
+    @concurrent
     public func saveMmapCompatible(to url: URL) async throws(ANNSError) {
-        guard isBuilt, let vectors, let graph else {
+        guard let snapshot = await readSnapshot() else {
             throw ANNSError.indexEmpty
         }
 
         try IndexSerializer.saveMmapCompatible(
-            vectors: vectors,
-            graph: graph,
-            idMap: idMap,
-            entryPoint: entryPoint,
-            metric: configuration.metric,
+            vectors: snapshot.vectors,
+            graph: snapshot.graph,
+            idMap: snapshot.idMap,
+            entryPoint: snapshot.entryPoint,
+            metric: snapshot.configuration.metric,
             to: url
         )
 
         let metadata = PersistedMetadata(
-            configuration: configuration,
-            softDeletion: softDeletion,
-            metadataStore: metadataStore
+            configuration: snapshot.configuration,
+            softDeletion: snapshot.softDeletion,
+            metadataStore: snapshot.metadataStore
         )
         let metadataData: Data
         do {
@@ -642,16 +658,47 @@ public actor ANNSIndex {
         return index
     }
 
+    @concurrent
     public var count: Int {
-        max(0, idMap.count - softDeletion.deletedCount)
+        get async {
+            await visibleCount()
+        }
     }
 
     private func currentDevice() -> MTLDevice? {
         context?.device
     }
 
-    private func supportsGPUSearch(for vectors: any VectorStorage) -> Bool {
+    private nonisolated static func supportsGPUSearch(for vectors: any VectorStorage) -> Bool {
         !(vectors is DiskBackedVectorBuffer)
+    }
+
+    private func readSnapshot() -> ReadSnapshot? {
+        guard isBuilt, let vectors, let graph else {
+            return nil
+        }
+        return ReadSnapshot(
+            configuration: configuration,
+            context: context,
+            vectors: vectors,
+            graph: graph,
+            idMap: idMap,
+            softDeletion: softDeletion,
+            metadataStore: metadataStore,
+            entryPoint: entryPoint
+        )
+    }
+
+    private func hasBuiltIndex() -> Bool {
+        isBuilt
+    }
+
+    private func batchSearchConcurrency() -> Int {
+        context != nil ? 4 : max(1, ProcessInfo.processInfo.activeProcessorCount)
+    }
+
+    private func visibleCount() -> Int {
+        max(0, idMap.count - softDeletion.deletedCount)
     }
 
     private func applyLoadedState(
@@ -677,11 +724,11 @@ public actor ANNSIndex {
         self.mmapLifetime = mmapLifetime
     }
 
-    private func extractVectors(from vectors: any VectorStorage) -> [[Float]] {
+    private nonisolated static func extractVectors(from vectors: any VectorStorage) -> [[Float]] {
         (0..<vectors.count).map { vectors.vector(at: $0) }
     }
 
-    private func extractGraph(from graph: GraphBuffer) -> [[(UInt32, Float)]] {
+    private nonisolated static func extractGraph(from graph: GraphBuffer) -> [[(UInt32, Float)]] {
         (0..<graph.nodeCount).map { nodeID in
             let ids = graph.neighborIDs(of: nodeID)
             let distances = graph.neighborDistances(of: nodeID)

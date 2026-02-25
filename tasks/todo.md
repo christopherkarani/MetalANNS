@@ -3,7 +3,7 @@
 > **Status**: NOT STARTED
 > **Owner**: Subagent (dispatched by orchestrator)
 > **Reviewer**: Orchestrator (main session)
-> **Last Updated**: 2026-02-25 20:05:29 EAT
+> **Last Updated**: 2026-02-25 20:09:37 EAT
 
 ---
 
@@ -264,7 +264,7 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 > **Status**: IN PROGRESS
 > **Owner**: Subagent (dispatched by orchestrator)
 > **Reviewer**: Orchestrator (main session)
-> **Last Updated**: 2026-02-25 20:05:29 EAT
+> **Last Updated**: 2026-02-25 20:09:37 EAT
 
 - [x] 1 — Bump to Swift 6.2 (`Package.swift`)
 > Notes (Task 1): Updated `swift-tools-version` to 6.2. `xcodebuild build -scheme MetalANNS` succeeded. `xcodebuild test` on runnable package scheme (`MetalANNS-Package`) is currently failing on baseline `BatchInsertTests` recall threshold.
@@ -278,8 +278,8 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 - [x] 4 — Add `throws(ANNSError)` to internal/core throw chain (bottom-up)
 > Notes (Task 4): Propagated typed throws through core components (`VectorStorage`/buffers, serializers/loaders, builders, search paths, compactor, Metal context/pipeline). Added explicit JSON/file I/O mapping (`serializationFailed`/`corruptFile`) at typed boundaries. Build succeeded; full package suite shows unchanged baseline failure in `BatchInsertTests` recall threshold.
 
-- [ ] 5 — Add `@concurrent` to read-only actor methods
-> Notes (Task 5): Pending.
+- [x] 5 — Add `@concurrent` to read-only actor methods
+> Notes (Task 5): Added `@concurrent` to read-only actor methods on `ANNSIndex` and `ShardedIndex`, with actor-state snapshot helpers to satisfy isolation while preserving behavior. Build succeeded; full package test run shows the same baseline `BatchInsertTests` recall failure.
 
 - [ ] 6 — Evaluate `InlineArray` and record defer rationale
 > Notes (Task 6): Pending.
