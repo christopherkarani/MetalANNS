@@ -207,6 +207,49 @@ public enum NNDescentGPU {
             }
         }
 
+        try await sortNeighborLists(context: context, graph: graph, nodeCount: nodeCount)
         graph.setCount(nodeCount)
+    }
+
+    public static func sortNeighborLists(
+        context: MetalContext,
+        graph: GraphBuffer,
+        nodeCount: Int
+    ) async throws {
+        guard nodeCount > 0, nodeCount <= graph.capacity else {
+            throw ANNSError.constructionFailed("nodeCount out of bounds for graph capacity")
+        }
+
+        let degree = graph.degree
+        if degree <= 1 {
+            return
+        }
+        guard (degree & (degree - 1)) == 0 else {
+            throw ANNSError.constructionFailed("Bitonic sort requires degree to be a power of two")
+        }
+
+        let pipeline = try await context.pipelineCache.pipeline(for: "bitonic_sort_neighbors")
+        let threadgroupWidth = degree / 2
+        guard threadgroupWidth <= pipeline.maxTotalThreadsPerThreadgroup else {
+            throw ANNSError.constructionFailed("Degree \(degree) exceeds bitonic sort threadgroup capacity")
+        }
+
+        var degreeValue = UInt32(degree)
+
+        try await context.execute { commandBuffer in
+            guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+                throw ANNSError.constructionFailed("Failed to create compute command encoder")
+            }
+
+            encoder.setComputePipelineState(pipeline)
+            encoder.setBuffer(graph.adjacencyBuffer, offset: 0, index: 0)
+            encoder.setBuffer(graph.distanceBuffer, offset: 0, index: 1)
+            encoder.setBytes(&degreeValue, length: MemoryLayout<UInt32>.stride, index: 2)
+
+            let threadgroups = MTLSize(width: nodeCount, height: 1, depth: 1)
+            let threadsPerThreadgroup = MTLSize(width: threadgroupWidth, height: 1, depth: 1)
+            encoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
+            encoder.endEncoding()
+        }
     }
 }

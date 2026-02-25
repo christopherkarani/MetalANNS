@@ -3,7 +3,7 @@
 > **Status**: NOT STARTED
 > **Owner**: Subagent (dispatched by orchestrator)
 > **Reviewer**: Orchestrator (main session)
-> **Last Updated**: 2026-02-25 04:46:00 EAT
+> **Last Updated**: 2026-02-25 04:48:34 EAT
 
 ---
 
@@ -131,7 +131,7 @@ This file is the **shared communication layer** between the orchestrator and exe
 - [x] 12.6 — If recall is borderline, try increasing `maxIterations` or adjusting threshold. Document any tuning in notes.
 - [x] 12.7 — **CONVERGENCE DECISION**: For 200 nodes with degree 8, the threshold is `0.001 * 8 * 200 = 1.6` updates. Verify this allows convergence within `maxIterations=15`. **Write your observation in the notes below.**
 - [x] 12.8 — **REGRESSION**: All prior tests still pass
-- [ ] 12.9 — **GIT**: `git add Sources/MetalANNSCore/Shaders/NNDescent.metal Sources/MetalANNSCore/NNDescentGPU.swift Tests/MetalANNSTests/NNDescentGPUTests.swift && git commit -m "feat: implement GPU NN-Descent with reverse edges, local join, and convergence"`
+- [x] 12.9 — **GIT**: `git add Sources/MetalANNSCore/Shaders/NNDescent.metal Sources/MetalANNSCore/NNDescentGPU.swift Tests/MetalANNSTests/NNDescentGPUTests.swift && git commit -m "feat: implement GPU NN-Descent with reverse edges, local join, and convergence"`
 
 > **Agent notes** _(REQUIRED — document 12.7 convergence observation and any recall tuning)_:
 > No recall tuning was needed; the `fullGPUConstruction` test passed with `maxIterations = 15`.
@@ -143,31 +143,33 @@ This file is the **shared communication layer** between the orchestrator and exe
 
 **Acceptance**: `BitonicSortTests/sortNeighborLists` passes. Fourteenth commit.
 
-- [ ] 13.1 — Create `Tests/MetalANNSTests/BitonicSortTests.swift` — 1 test:
+- [x] 13.1 — Create `Tests/MetalANNSTests/BitonicSortTests.swift` — 1 test:
   - `sortNeighborLists` — 100 nodes, degree=32, fill with random IDs and distances
   - Call `NNDescentGPU.sortNeighborLists(context:graph:nodeCount:)`
   - Verify every node's distance list is sorted ascending: `dists[j] >= dists[j-1]` for all j
   - Guard with `guard MTLCreateSystemDefaultDevice() != nil else { return }`
-- [ ] 13.2 — **RED**: Test fails (`sortNeighborLists` not defined)
-- [ ] 13.3 — Create `Sources/MetalANNSCore/Shaders/Sort.metal`:
+- [x] 13.2 — **RED**: Test fails (`sortNeighborLists` not defined)
+- [x] 13.3 — Create `Sources/MetalANNSCore/Shaders/Sort.metal`:
   - `bitonic_sort_neighbors` kernel
   - One threadgroup per node, `degree/2` threads per threadgroup
   - Uses threadgroup shared memory: `threadgroup float sharedDists[MAX_DEGREE]` and `threadgroup uint sharedIDs[MAX_DEGREE]`
   - Bitonic sort: outer loop over `k` (2, 4, 8, ..., degree), inner loop over `j` (k/2, k/4, ..., 1)
   - When swapping distances, must also swap corresponding IDs
   - **degree must be power of 2** (32 in test)
-- [ ] 13.4 — Add `NNDescentGPU.sortNeighborLists(context:graph:nodeCount:)` to `NNDescentGPU.swift`:
+- [x] 13.4 — Add `NNDescentGPU.sortNeighborLists(context:graph:nodeCount:)` to `NNDescentGPU.swift`:
   - Get pipeline for "bitonic_sort_neighbors"
   - Set buffers: adjacencyBuffer(0), distanceBuffer(1), degree(2)
   - Dispatch: `nodeCount` threadgroups, `degree/2` threads per threadgroup
-- [ ] 13.5 — **SORT TIMING DECISION**: Should the sort be called per NN-Descent iteration or once at the end? **Document your decision in the notes below.** Recommended: once at end — less overhead, final ordering is what search needs.
-- [ ] 13.6 — **GREEN**: Sort test passes — every node's distances are ascending
-- [ ] 13.7 — **REGRESSION**: All prior tests still pass (26 + 3 Task 10 + 1 Task 11 + 1 Task 12)
-- [ ] 13.8 — **FULL SUITE**: `xcodebuild test -scheme MetalANNS-Package -destination 'platform=macOS' 2>&1 | grep -E '(Test Suite|passed|failed)'` → **zero failures**
+- [x] 13.5 — **SORT TIMING DECISION**: Should the sort be called per NN-Descent iteration or once at the end? **Document your decision in the notes below.** Recommended: once at end — less overhead, final ordering is what search needs.
+- [x] 13.6 — **GREEN**: Sort test passes — every node's distances are ascending
+- [x] 13.7 — **REGRESSION**: All prior tests still pass (26 + 3 Task 10 + 1 Task 11 + 1 Task 12)
+- [x] 13.8 — **FULL SUITE**: `xcodebuild test -scheme MetalANNS-Package -destination 'platform=macOS' 2>&1 | grep -E '(Test Suite|passed|failed)'` → **zero failures**
 - [ ] 13.9 — **GIT LOG**: `git log --oneline` shows exactly 14 commits
 - [ ] 13.10 — **GIT**: `git add Sources/MetalANNSCore/Shaders/Sort.metal Sources/MetalANNSCore/NNDescentGPU.swift Tests/MetalANNSTests/BitonicSortTests.swift && git commit -m "feat: add bitonic sort kernel for neighbor list ordering"`
 
 > **Agent notes** _(REQUIRED — document your 13.5 decision here)_:
+> Chosen approach: sort once at the end of `NNDescentGPU.build()` (not per-iteration).
+> Rationale: it avoids repeated sort overhead during convergence while still guaranteeing final neighbor ordering for search.
 
 ---
 
