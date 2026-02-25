@@ -9,7 +9,7 @@ public enum NNDescentGPU {
         graph: GraphBuffer,
         nodeCount: Int,
         seed: UInt32 = 42
-    ) async throws {
+    ) async throws(ANNSError) {
         guard nodeCount > 0, nodeCount <= graph.capacity else {
             throw ANNSError.constructionFailed("nodeCount out of bounds for graph capacity")
         }
@@ -20,7 +20,7 @@ public enum NNDescentGPU {
         var degree = UInt32(graph.degree)
         var seedValue = seed
 
-        try await context.execute { commandBuffer in
+        try await context.execute { (commandBuffer: MTLCommandBuffer) throws(ANNSError) in
             guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
                 throw ANNSError.constructionFailed("Failed to create compute command encoder")
             }
@@ -47,7 +47,7 @@ public enum NNDescentGPU {
         graph: GraphBuffer,
         nodeCount: Int,
         metric: Metric
-    ) async throws {
+    ) async throws(ANNSError) {
         guard nodeCount > 0, nodeCount <= graph.capacity, nodeCount <= vectors.capacity else {
             throw ANNSError.constructionFailed("nodeCount out of bounds for graph/vector capacity")
         }
@@ -66,7 +66,7 @@ public enum NNDescentGPU {
 
         let totalThreads = nodeCount * graph.degree
 
-        try await context.execute { commandBuffer in
+        try await context.execute { (commandBuffer: MTLCommandBuffer) throws(ANNSError) in
             guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
                 throw ANNSError.constructionFailed("Failed to create compute command encoder")
             }
@@ -96,7 +96,7 @@ public enum NNDescentGPU {
         metric: Metric,
         maxIterations: Int = 20,
         convergenceThreshold: Float = 0.001
-    ) async throws {
+    ) async throws(ANNSError) {
         guard nodeCount > 0, nodeCount <= graph.capacity, nodeCount <= vectors.capacity else {
             throw ANNSError.constructionFailed("nodeCount out of bounds for graph/vector capacity")
         }
@@ -155,7 +155,7 @@ public enum NNDescentGPU {
             updateCountPointer.pointee = 0
 
             let reverseThreads = nodeCount * degree
-            try await context.execute { commandBuffer in
+            try await context.execute { (commandBuffer: MTLCommandBuffer) throws(ANNSError) in
                 guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
                     throw ANNSError.constructionFailed("Failed to create compute command encoder")
                 }
@@ -175,7 +175,7 @@ public enum NNDescentGPU {
                 encoder.endEncoding()
             }
 
-            try await context.execute { commandBuffer in
+            try await context.execute { (commandBuffer: MTLCommandBuffer) throws(ANNSError) in
                 guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
                     throw ANNSError.constructionFailed("Failed to create compute command encoder")
                 }
@@ -217,7 +217,7 @@ public enum NNDescentGPU {
         context: MetalContext,
         graph: GraphBuffer,
         nodeCount: Int
-    ) async throws {
+    ) async throws(ANNSError) {
         guard nodeCount > 0, nodeCount <= graph.capacity else {
             throw ANNSError.constructionFailed("nodeCount out of bounds for graph capacity")
         }
@@ -238,7 +238,7 @@ public enum NNDescentGPU {
 
         var degreeValue = UInt32(degree)
 
-        try await context.execute { commandBuffer in
+        try await context.execute { (commandBuffer: MTLCommandBuffer) throws(ANNSError) in
             guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
                 throw ANNSError.constructionFailed("Failed to create compute command encoder")
             }

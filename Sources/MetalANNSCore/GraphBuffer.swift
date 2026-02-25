@@ -13,7 +13,7 @@ public final class GraphBuffer: @unchecked Sendable {
     private let idPointer: UnsafeMutablePointer<UInt32>
     private let distPointer: UnsafeMutablePointer<Float>
 
-    public init(capacity: Int, degree: Int, device: MTLDevice? = nil) throws {
+    public init(capacity: Int, degree: Int, device: MTLDevice? = nil) throws(ANNSError) {
         guard capacity >= 0, degree > 0 else {
             throw ANNSError.constructionFailed("GraphBuffer requires capacity >= 0 and degree > 0")
         }
@@ -52,7 +52,7 @@ public final class GraphBuffer: @unchecked Sendable {
         capacity: Int,
         degree: Int,
         nodeCount: Int
-    ) throws {
+    ) throws(ANNSError) {
         guard capacity >= 0, degree > 0 else {
             throw ANNSError.constructionFailed("GraphBuffer requires capacity >= 0 and degree > 0")
         }
@@ -82,7 +82,7 @@ public final class GraphBuffer: @unchecked Sendable {
         nodeCount = newCount
     }
 
-    public func setNeighbors(of nodeID: Int, ids: [UInt32], distances: [Float]) throws {
+    public func setNeighbors(of nodeID: Int, ids: [UInt32], distances: [Float]) throws(ANNSError) {
         guard ids.count == degree, distances.count == degree else {
             throw ANNSError.constructionFailed("Neighbor count must equal degree \(degree)")
         }

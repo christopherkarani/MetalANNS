@@ -3,7 +3,7 @@
 > **Status**: NOT STARTED
 > **Owner**: Subagent (dispatched by orchestrator)
 > **Reviewer**: Orchestrator (main session)
-> **Last Updated**: 2026-02-25 20:00:11 EAT
+> **Last Updated**: 2026-02-25 20:05:29 EAT
 
 ---
 
@@ -264,7 +264,7 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 > **Status**: IN PROGRESS
 > **Owner**: Subagent (dispatched by orchestrator)
 > **Reviewer**: Orchestrator (main session)
-> **Last Updated**: 2026-02-25 20:00:11 EAT
+> **Last Updated**: 2026-02-25 20:05:29 EAT
 
 - [x] 1 — Bump to Swift 6.2 (`Package.swift`)
 > Notes (Task 1): Updated `swift-tools-version` to 6.2. `xcodebuild build -scheme MetalANNS` succeeded. `xcodebuild test` on runnable package scheme (`MetalANNS-Package`) is currently failing on baseline `BatchInsertTests` recall threshold.
@@ -272,11 +272,11 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 - [x] 2 — Expand `ANNSError` with `serializationFailed`, `metalError`, `invalidArgument`
 > Notes (Task 2): Added the three new error cases in `MetalANNSCore.ANNSError`. Build succeeded. Full package test run shows the same baseline failure in `BatchInsertTests` recall threshold and no new failure signatures.
 
-- [ ] 3 — Add `throws(ANNSError)` to public API surface (`ANNSIndex`, `ShardedIndex`)
-> Notes (Task 3): Pending.
+- [x] 3 — Add `throws(ANNSError)` to public API surface (`ANNSIndex`, `ShardedIndex`)
+> Notes (Task 3): Added typed throws to all throwing public methods in `ANNSIndex` and `ShardedIndex`, including static load APIs and metadata helper mapping. Wrapped `batchSearch` task-group error boundary to map non-`ANNSError` failures into `ANNSError.searchFailed`.
 
-- [ ] 4 — Add `throws(ANNSError)` to internal/core throw chain (bottom-up)
-> Notes (Task 4): Pending.
+- [x] 4 — Add `throws(ANNSError)` to internal/core throw chain (bottom-up)
+> Notes (Task 4): Propagated typed throws through core components (`VectorStorage`/buffers, serializers/loaders, builders, search paths, compactor, Metal context/pipeline). Added explicit JSON/file I/O mapping (`serializationFailed`/`corruptFile`) at typed boundaries. Build succeeded; full package suite shows unchanged baseline failure in `BatchInsertTests` recall threshold.
 
 - [ ] 5 — Add `@concurrent` to read-only actor methods
 > Notes (Task 5): Pending.

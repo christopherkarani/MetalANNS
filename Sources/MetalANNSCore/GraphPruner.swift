@@ -9,7 +9,7 @@ public enum GraphPruner {
         vectors: any VectorStorage,
         nodeCount: Int,
         metric: Metric
-    ) throws {
+    ) throws(ANNSError) {
         guard nodeCount >= 0, nodeCount <= graph.nodeCount, nodeCount <= vectors.count else {
             throw ANNSError.constructionFailed("nodeCount is out of bounds for graph/vector counts")
         }

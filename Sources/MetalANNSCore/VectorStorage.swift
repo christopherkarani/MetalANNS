@@ -11,7 +11,7 @@ public protocol VectorStorage: AnyObject, Sendable {
     var isFloat16: Bool { get }
 
     func setCount(_ newCount: Int)
-    func insert(vector: [Float], at index: Int) throws
-    func batchInsert(vectors: [[Float]], startingAt start: Int) throws
+    func insert(vector: [Float], at index: Int) throws(ANNSError)
+    func batchInsert(vectors: [[Float]], startingAt start: Int) throws(ANNSError)
     func vector(at index: Int) -> [Float]
 }

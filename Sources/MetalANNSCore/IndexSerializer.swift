@@ -15,7 +15,7 @@ public enum IndexSerializer {
         entryPoint: UInt32,
         metric: Metric,
         to fileURL: URL
-    ) throws {
+    ) throws(ANNSError) {
         let nodeCount = vectors.count
         let degree = graph.degree
 
@@ -44,13 +44,29 @@ public enum IndexSerializer {
         filePayload.append(Data(bytes: graph.adjacencyBuffer.contents(), count: adjacencyByteCount))
         filePayload.append(Data(bytes: graph.distanceBuffer.contents(), count: distanceByteCount))
 
-        let idMapData = try JSONEncoder().encode(idMap)
+        let idMapData: Data
+        do {
+            idMapData = try JSONEncoder().encode(idMap)
+        } catch {
+            throw ANNSError.serializationFailed("Failed to encode IDMap: \(error)")
+        }
         append(uint32: UInt32(idMapData.count), to: &filePayload)
         filePayload.append(idMapData)
         append(uint32: entryPoint, to: &filePayload)
 
-        try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try filePayload.write(to: fileURL)
+        do {
+            try FileManager.default.createDirectory(
+                at: fileURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+        } catch {
+            throw ANNSError.serializationFailed("Failed to create index directory: \(error)")
+        }
+        do {
+            try filePayload.write(to: fileURL)
+        } catch {
+            throw ANNSError.serializationFailed("Failed to write index payload: \(error)")
+        }
     }
 
     public static func saveMmapCompatible(
@@ -60,7 +76,7 @@ public enum IndexSerializer {
         entryPoint: UInt32,
         metric: Metric,
         to fileURL: URL
-    ) throws {
+    ) throws(ANNSError) {
         let nodeCount = vectors.count
         let degree = graph.degree
 
@@ -94,23 +110,44 @@ public enum IndexSerializer {
         filePayload.append(Data(bytes: graph.distanceBuffer.contents(), count: distanceByteCount))
         appendPagePadding(to: &filePayload)
 
-        let idMapData = try JSONEncoder().encode(idMap)
+        let idMapData: Data
+        do {
+            idMapData = try JSONEncoder().encode(idMap)
+        } catch {
+            throw ANNSError.serializationFailed("Failed to encode IDMap: \(error)")
+        }
         append(uint32: UInt32(idMapData.count), to: &filePayload)
         filePayload.append(idMapData)
         append(uint32: entryPoint, to: &filePayload)
 
-        try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try filePayload.write(to: fileURL)
+        do {
+            try FileManager.default.createDirectory(
+                at: fileURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+        } catch {
+            throw ANNSError.serializationFailed("Failed to create index directory: \(error)")
+        }
+        do {
+            try filePayload.write(to: fileURL)
+        } catch {
+            throw ANNSError.serializationFailed("Failed to write index payload: \(error)")
+        }
     }
 
-    public static func load(from fileURL: URL, device: MTLDevice? = nil) throws -> (
+    public static func load(from fileURL: URL, device: MTLDevice? = nil) throws(ANNSError) -> (
         vectors: any VectorStorage,
         graph: GraphBuffer,
         idMap: IDMap,
         entryPoint: UInt32,
         metric: Metric
     ) {
-        let payload = try Data(contentsOf: fileURL)
+        let payload: Data
+        do {
+            payload = try Data(contentsOf: fileURL)
+        } catch {
+            throw ANNSError.corruptFile("Failed to read index payload: \(error)")
+        }
 
         guard payload.count >= 24 else {
             throw ANNSError.corruptFile("File is too small")
@@ -243,7 +280,7 @@ public enum IndexSerializer {
         }
     }
 
-    private static func metric(from code: UInt32) throws -> Metric {
+    private static func metric(from code: UInt32) throws(ANNSError) -> Metric {
         switch code {
         case 0:
             return .cosine
@@ -280,7 +317,7 @@ public enum IndexSerializer {
         return value + (pageSize - remainder)
     }
 
-    private static func readUInt32(_ payload: Data, _ cursor: inout Int) throws -> UInt32 {
+    private static func readUInt32(_ payload: Data, _ cursor: inout Int) throws(ANNSError) -> UInt32 {
         guard cursor + MemoryLayout<UInt32>.size <= payload.count else {
             throw ANNSError.corruptFile("Unexpected EOF")
         }

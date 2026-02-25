@@ -15,7 +15,7 @@ public enum IncrementalBuilder {
         entryPoint: UInt32,
         metric: Metric,
         degree: Int
-    ) throws {
+    ) throws(ANNSError) {
         guard internalID >= 0 && internalID < vectors.capacity else {
             throw ANNSError.constructionFailed("Internal ID out of bounds")
         }

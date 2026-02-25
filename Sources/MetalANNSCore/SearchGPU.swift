@@ -197,7 +197,7 @@ public enum SearchGPU {
         var dim = UInt32(vectors.dim)
         var count = UInt32(neighborIDs.count)
 
-        try await context.execute { commandBuffer in
+        try await context.execute { (commandBuffer: MTLCommandBuffer) throws(ANNSError) in
             guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
                 throw ANNSError.searchFailed("Failed to create compute command encoder")
             }

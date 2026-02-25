@@ -13,7 +13,7 @@ public enum FullGPUSearch {
         k: Int,
         ef: Int,
         metric: Metric
-    ) async throws -> [SearchResult] {
+    ) async throws(ANNSError) -> [SearchResult] {
         let nodeCount = graph.nodeCount > 0
             ? min(graph.nodeCount, vectors.count)
             : min(graph.capacity, vectors.count)
@@ -76,7 +76,7 @@ public enum FullGPUSearch {
             2
         }
 
-        try await context.execute { commandBuffer in
+        try await context.execute { (commandBuffer: MTLCommandBuffer) throws(ANNSError) in
             guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
                 throw ANNSError.searchFailed("Failed to create compute command encoder")
             }

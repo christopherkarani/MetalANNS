@@ -21,7 +21,7 @@ public actor ShardedIndex {
         self.configuration = configuration
     }
 
-    public func build(vectors: [[Float]], ids: [String]) async throws {
+    public func build(vectors: [[Float]], ids: [String]) async throws(ANNSError) {
         guard !vectors.isEmpty else {
             throw ANNSError.constructionFailed("Cannot build sharded index with empty vectors")
         }
@@ -124,7 +124,7 @@ public actor ShardedIndex {
         k: Int,
         filter: SearchFilter? = nil,
         metric: Metric? = nil
-    ) async throws -> [SearchResult] {
+    ) async throws(ANNSError) -> [SearchResult] {
         guard isBuilt, !shards.isEmpty, !centroids.isEmpty else {
             throw ANNSError.indexEmpty
         }

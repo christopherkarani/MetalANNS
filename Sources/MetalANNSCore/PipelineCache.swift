@@ -13,7 +13,7 @@ public actor PipelineCache {
         self.library = library
     }
 
-    public func pipeline(for functionName: String) throws -> MTLComputePipelineState {
+    public func pipeline(for functionName: String) throws(ANNSError) -> MTLComputePipelineState {
         if let cached = cache[functionName] {
             return cached
         }
@@ -22,7 +22,12 @@ public actor PipelineCache {
             throw ANNSError.constructionFailed("Metal function '\(functionName)' not found")
         }
 
-        let pipeline = try device.makeComputePipelineState(function: function)
+        let pipeline: MTLComputePipelineState
+        do {
+            pipeline = try device.makeComputePipelineState(function: function)
+        } catch {
+            throw ANNSError.constructionFailed("Failed to compile Metal function '\(functionName)': \(error)")
+        }
         cache[functionName] = pipeline
         logger.debug("Compiled pipeline: \(functionName)")
         return pipeline

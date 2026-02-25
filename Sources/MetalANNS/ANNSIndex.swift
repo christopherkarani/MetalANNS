@@ -35,7 +35,7 @@ public actor ANNSIndex {
         self.mmapLifetime = nil
     }
 
-    public func build(vectors inputVectors: [[Float]], ids: [String]) async throws {
+    public func build(vectors inputVectors: [[Float]], ids: [String]) async throws(ANNSError) {
         guard !inputVectors.isEmpty else {
             throw ANNSError.constructionFailed("Cannot build index with empty vectors")
         }
@@ -130,7 +130,7 @@ public actor ANNSIndex {
         self.mmapLifetime = nil
     }
 
-    public func insert(_ vector: [Float], id: String) async throws {
+    public func insert(_ vector: [Float], id: String) async throws(ANNSError) {
         guard isBuilt, let vectors, let graph else {
             throw ANNSError.indexEmpty
         }
@@ -173,7 +173,7 @@ public actor ANNSIndex {
         }
     }
 
-    public func batchInsert(_ vectors: [[Float]], ids: [String]) async throws {
+    public func batchInsert(_ vectors: [[Float]], ids: [String]) async throws(ANNSError) {
         guard isBuilt, let vectorStorage = self.vectors, let graph else {
             throw ANNSError.indexEmpty
         }
@@ -242,7 +242,7 @@ public actor ANNSIndex {
         }
     }
 
-    public func delete(id: String) throws {
+    public func delete(id: String) throws(ANNSError) {
         guard !isReadOnlyLoadedIndex else {
             throw ANNSError.constructionFailed("Index is read-only (mmap-loaded)")
         }
@@ -253,7 +253,7 @@ public actor ANNSIndex {
         metadataStore.remove(id: internalID)
     }
 
-    public func compact() async throws {
+    public func compact() async throws(ANNSError) {
         guard !isReadOnlyLoadedIndex else {
             throw ANNSError.constructionFailed("Index is read-only (mmap-loaded)")
         }
@@ -301,21 +301,21 @@ public actor ANNSIndex {
         self.mmapLifetime = nil
     }
 
-    public func setMetadata(_ column: String, value: String, for id: String) throws {
+    public func setMetadata(_ column: String, value: String, for id: String) throws(ANNSError) {
         guard let internalID = idMap.internalID(for: id) else {
             throw ANNSError.idNotFound(id)
         }
         metadataStore.set(column, stringValue: value, for: internalID)
     }
 
-    public func setMetadata(_ column: String, value: Float, for id: String) throws {
+    public func setMetadata(_ column: String, value: Float, for id: String) throws(ANNSError) {
         guard let internalID = idMap.internalID(for: id) else {
             throw ANNSError.idNotFound(id)
         }
         metadataStore.set(column, floatValue: value, for: internalID)
     }
 
-    public func setMetadata(_ column: String, value: Int64, for id: String) throws {
+    public func setMetadata(_ column: String, value: Int64, for id: String) throws(ANNSError) {
         guard let internalID = idMap.internalID(for: id) else {
             throw ANNSError.idNotFound(id)
         }
@@ -327,7 +327,7 @@ public actor ANNSIndex {
         k: Int,
         filter: SearchFilter? = nil,
         metric: Metric? = nil
-    ) async throws -> [SearchResult] {
+    ) async throws(ANNSError) -> [SearchResult] {
         guard isBuilt, let vectors, let graph else {
             throw ANNSError.indexEmpty
         }
@@ -393,7 +393,7 @@ public actor ANNSIndex {
         limit: Int = 1000,
         filter: SearchFilter? = nil,
         metric: Metric? = nil
-    ) async throws -> [SearchResult] {
+    ) async throws(ANNSError) -> [SearchResult] {
         guard isBuilt, let vectors, let graph else {
             throw ANNSError.indexEmpty
         }
@@ -456,7 +456,7 @@ public actor ANNSIndex {
         k: Int,
         filter: SearchFilter? = nil,
         metric: Metric? = nil
-    ) async throws -> [[SearchResult]] {
+    ) async throws(ANNSError) -> [[SearchResult]] {
         guard isBuilt else {
             throw ANNSError.indexEmpty
         }
@@ -466,23 +466,12 @@ public actor ANNSIndex {
 
         let maxConcurrency = context != nil ? 4 : max(1, ProcessInfo.processInfo.activeProcessorCount)
 
-        return try await withThrowingTaskGroup(of: (Int, [SearchResult]).self) { group in
-            var orderedResults = Array<[SearchResult]?>(repeating: nil, count: queries.count)
-            var nextIndex = 0
+        do {
+            return try await withThrowingTaskGroup(of: (Int, [SearchResult]).self) { group in
+                var orderedResults = Array<[SearchResult]?>(repeating: nil, count: queries.count)
+                var nextIndex = 0
 
-            for _ in 0..<min(maxConcurrency, queries.count) {
-                let idx = nextIndex
-                let query = queries[idx]
-                nextIndex += 1
-                group.addTask { [self] in
-                    let result = try await self.search(query: query, k: k, filter: filter, metric: metric)
-                    return (idx, result)
-                }
-            }
-
-            for try await (idx, result) in group {
-                orderedResults[idx] = result
-                if nextIndex < queries.count {
+                for _ in 0..<min(maxConcurrency, queries.count) {
                     let idx = nextIndex
                     let query = queries[idx]
                     nextIndex += 1
@@ -491,13 +480,30 @@ public actor ANNSIndex {
                         return (idx, result)
                     }
                 }
-            }
 
-            return orderedResults.map { $0! }
+                for try await (idx, result) in group {
+                    orderedResults[idx] = result
+                    if nextIndex < queries.count {
+                        let idx = nextIndex
+                        let query = queries[idx]
+                        nextIndex += 1
+                        group.addTask { [self] in
+                            let result = try await self.search(query: query, k: k, filter: filter, metric: metric)
+                            return (idx, result)
+                        }
+                    }
+                }
+
+                return orderedResults.map { $0! }
+            }
+        } catch let error as ANNSError {
+            throw error
+        } catch {
+            throw ANNSError.searchFailed("Batch search failed: \(error)")
         }
     }
 
-    public func save(to url: URL) async throws {
+    public func save(to url: URL) async throws(ANNSError) {
         guard isBuilt, let vectors, let graph else {
             throw ANNSError.indexEmpty
         }
@@ -516,11 +522,20 @@ public actor ANNSIndex {
             softDeletion: softDeletion,
             metadataStore: metadataStore
         )
-        let metadataData = try JSONEncoder().encode(metadata)
-        try metadataData.write(to: Self.metadataURL(for: url), options: .atomic)
+        let metadataData: Data
+        do {
+            metadataData = try JSONEncoder().encode(metadata)
+        } catch {
+            throw ANNSError.serializationFailed("Failed to encode metadata: \(error)")
+        }
+        do {
+            try metadataData.write(to: Self.metadataURL(for: url), options: .atomic)
+        } catch {
+            throw ANNSError.serializationFailed("Failed to write metadata: \(error)")
+        }
     }
 
-    public func saveMmapCompatible(to url: URL) async throws {
+    public func saveMmapCompatible(to url: URL) async throws(ANNSError) {
         guard isBuilt, let vectors, let graph else {
             throw ANNSError.indexEmpty
         }
@@ -539,11 +554,20 @@ public actor ANNSIndex {
             softDeletion: softDeletion,
             metadataStore: metadataStore
         )
-        let metadataData = try JSONEncoder().encode(metadata)
-        try metadataData.write(to: Self.metadataURL(for: url), options: .atomic)
+        let metadataData: Data
+        do {
+            metadataData = try JSONEncoder().encode(metadata)
+        } catch {
+            throw ANNSError.serializationFailed("Failed to encode metadata: \(error)")
+        }
+        do {
+            try metadataData.write(to: Self.metadataURL(for: url), options: .atomic)
+        } catch {
+            throw ANNSError.serializationFailed("Failed to write metadata: \(error)")
+        }
     }
 
-    public static func load(from url: URL) async throws -> ANNSIndex {
+    public static func load(from url: URL) async throws(ANNSError) -> ANNSIndex {
         let persistedMetadata = try loadPersistedMetadataIfPresent(from: url)
         let initialConfiguration = persistedMetadata?.configuration ?? .default
         let index = ANNSIndex(configuration: initialConfiguration)
@@ -567,7 +591,7 @@ public actor ANNSIndex {
         return index
     }
 
-    public static func loadMmap(from url: URL) async throws -> ANNSIndex {
+    public static func loadMmap(from url: URL) async throws(ANNSError) -> ANNSIndex {
         let persistedMetadata = try loadPersistedMetadataIfPresent(from: url)
         let initialConfiguration = persistedMetadata?.configuration ?? .default
         let index = ANNSIndex(configuration: initialConfiguration)
@@ -592,7 +616,7 @@ public actor ANNSIndex {
         return index
     }
 
-    public static func loadDiskBacked(from url: URL) async throws -> ANNSIndex {
+    public static func loadDiskBacked(from url: URL) async throws(ANNSError) -> ANNSIndex {
         let persistedMetadata = try loadPersistedMetadataIfPresent(from: url)
         let initialConfiguration = persistedMetadata?.configuration ?? .default
         let index = ANNSIndex(configuration: initialConfiguration)
@@ -671,13 +695,23 @@ public actor ANNSIndex {
         URL(fileURLWithPath: fileURL.path + ".meta.json")
     }
 
-    private nonisolated static func loadPersistedMetadataIfPresent(from fileURL: URL) throws -> PersistedMetadata? {
+    private nonisolated static func loadPersistedMetadataIfPresent(from fileURL: URL) throws(ANNSError) -> PersistedMetadata? {
         let metadataURL = metadataURL(for: fileURL)
         guard FileManager.default.fileExists(atPath: metadataURL.path) else {
             return nil
         }
 
-        let data = try Data(contentsOf: metadataURL)
-        return try JSONDecoder().decode(PersistedMetadata.self, from: data)
+        let data: Data
+        do {
+            data = try Data(contentsOf: metadataURL)
+        } catch {
+            throw ANNSError.corruptFile("Failed to read metadata file: \(error)")
+        }
+
+        do {
+            return try JSONDecoder().decode(PersistedMetadata.self, from: data)
+        } catch {
+            throw ANNSError.corruptFile("Failed to decode metadata: \(error)")
+        }
     }
 }

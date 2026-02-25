@@ -12,7 +12,7 @@ public final class Float16VectorBuffer: @unchecked Sendable {
 
     private let rawPointer: UnsafeMutablePointer<UInt16>
 
-    public init(capacity: Int, dim: Int, device: MTLDevice? = nil) throws {
+    public init(capacity: Int, dim: Int, device: MTLDevice? = nil) throws(ANNSError) {
         guard capacity >= 0, dim > 0 else {
             throw ANNSError.constructionFailed("Float16VectorBuffer requires capacity >= 0 and dim > 0")
         }
@@ -38,7 +38,7 @@ public final class Float16VectorBuffer: @unchecked Sendable {
         count = newCount
     }
 
-    public func insert(vector: [Float], at index: Int) throws {
+    public func insert(vector: [Float], at index: Int) throws(ANNSError) {
         guard vector.count == dim else {
             throw ANNSError.dimensionMismatch(expected: dim, got: vector.count)
         }
@@ -52,7 +52,7 @@ public final class Float16VectorBuffer: @unchecked Sendable {
         }
     }
 
-    public func batchInsert(vectors: [[Float]], startingAt start: Int) throws {
+    public func batchInsert(vectors: [[Float]], startingAt start: Int) throws(ANNSError) {
         for (offset, vector) in vectors.enumerated() {
             try insert(vector: vector, at: start + offset)
         }

@@ -17,7 +17,7 @@ public enum BatchIncrementalBuilder {
         entryPoint: UInt32,
         metric: Metric,
         degree: Int
-    ) throws {
+    ) throws(ANNSError) {
         guard !newVectors.isEmpty else {
             return
         }

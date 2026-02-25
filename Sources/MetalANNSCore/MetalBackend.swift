@@ -70,7 +70,7 @@ public final class MetalBackend: ComputeBackend, @unchecked Sendable {
         var dimU32 = UInt32(dim)
         var nU32 = UInt32(vectorCount)
 
-        try await context.execute { commandBuffer in
+        try await context.execute { (commandBuffer: MTLCommandBuffer) throws(ANNSError) in
             guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
                 throw ANNSError.constructionFailed("Failed to create compute command encoder")
             }

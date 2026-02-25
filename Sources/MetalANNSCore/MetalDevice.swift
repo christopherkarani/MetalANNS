@@ -10,7 +10,7 @@ public final class MetalContext: @unchecked Sendable {
     public let library: MTLLibrary
     public let pipelineCache: PipelineCache
 
-    public init() throws {
+    public init() throws(ANNSError) {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw ANNSError.deviceNotSupported
         }
@@ -33,7 +33,7 @@ public final class MetalContext: @unchecked Sendable {
         logger.debug("MetalContext initialized: \(device.name)")
     }
 
-    public func execute(_ encode: (MTLCommandBuffer) throws -> Void) async throws {
+    public func execute(_ encode: (MTLCommandBuffer) throws(ANNSError) -> Void) async throws(ANNSError) {
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             throw ANNSError.constructionFailed("Failed to create command buffer")
         }

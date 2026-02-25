@@ -17,7 +17,7 @@ public enum KMeans {
         maxIterations: Int = 20,
         metric: Metric = .l2,
         seed: UInt64 = 42
-    ) throws -> Result {
+    ) throws(ANNSError) -> Result {
         guard !vectors.isEmpty else {
             throw ANNSError.constructionFailed("Cannot cluster empty vectors")
         }

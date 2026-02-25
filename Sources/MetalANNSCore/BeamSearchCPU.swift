@@ -14,7 +14,7 @@ public enum BeamSearchCPU {
         k: Int,
         ef: Int,
         metric: Metric
-    ) async throws -> [SearchResult] {
+    ) async throws(ANNSError) -> [SearchResult] {
         guard !vectors.isEmpty else {
             throw ANNSError.indexEmpty
         }

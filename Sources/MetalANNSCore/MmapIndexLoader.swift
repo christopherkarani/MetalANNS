@@ -32,7 +32,7 @@ public enum MmapIndexLoader {
         }
     }
 
-    public static func load(from fileURL: URL, device: MTLDevice? = nil) throws -> MmapLoadResult {
+    public static func load(from fileURL: URL, device: MTLDevice? = nil) throws(ANNSError) -> MmapLoadResult {
         let region = try MmapRegion(fileURL: fileURL)
 
         guard let metalDevice = device ?? MTLCreateSystemDefaultDevice() else {
@@ -160,7 +160,7 @@ public enum MmapIndexLoader {
         )
     }
 
-    private static func metric(from code: UInt32) throws -> Metric {
+    private static func metric(from code: UInt32) throws(ANNSError) -> Metric {
         switch code {
         case 0:
             return .cosine
@@ -178,7 +178,7 @@ public enum MmapIndexLoader {
         length: Int,
         offset: Int,
         count: Int
-    ) throws -> [UInt8] {
+    ) throws(ANNSError) -> [UInt8] {
         guard offset >= 0, count >= 0, offset + count <= length else {
             throw ANNSError.corruptFile("Unexpected EOF")
         }
@@ -190,7 +190,7 @@ public enum MmapIndexLoader {
         from pointer: UnsafeMutableRawPointer,
         length: Int,
         cursor: inout Int
-    ) throws -> UInt32 {
+    ) throws(ANNSError) -> UInt32 {
         guard cursor + MemoryLayout<UInt32>.size <= length else {
             throw ANNSError.corruptFile("Unexpected EOF")
         }
@@ -225,7 +225,7 @@ private final class MmapRegion: @unchecked Sendable {
     let length: Int
     private let descriptor: Int32
 
-    init(fileURL: URL) throws {
+    init(fileURL: URL) throws(ANNSError) {
         let fd = open(fileURL.path, O_RDONLY)
         guard fd >= 0 else {
             throw ANNSError.corruptFile("Unable to open mmap file")
@@ -279,11 +279,11 @@ private final class MmapVectorStorage: VectorStorage, @unchecked Sendable {
         count = min(max(0, newCount), capacity)
     }
 
-    func insert(vector: [Float], at index: Int) throws {
+    func insert(vector: [Float], at index: Int) throws(ANNSError) {
         throw ANNSError.constructionFailed("Mmap-loaded vectors are read-only")
     }
 
-    func batchInsert(vectors: [[Float]], startingAt start: Int) throws {
+    func batchInsert(vectors: [[Float]], startingAt start: Int) throws(ANNSError) {
         throw ANNSError.constructionFailed("Mmap-loaded vectors are read-only")
     }
 

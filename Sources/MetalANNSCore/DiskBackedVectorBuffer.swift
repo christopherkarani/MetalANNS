@@ -26,7 +26,7 @@ public final class DiskBackedVectorBuffer: @unchecked Sendable {
         isFloat16: Bool,
         device: MTLDevice,
         cacheCapacity: Int = 1024
-    ) throws {
+    ) throws(ANNSError) {
         self.mmapPointer = mmapPointer
         self.dataOffset = dataOffset
         self.dim = dim
@@ -91,13 +91,13 @@ extension DiskBackedVectorBuffer: VectorStorage {
         _ = newCount
     }
 
-    public func insert(vector: [Float], at index: Int) throws {
+    public func insert(vector: [Float], at index: Int) throws(ANNSError) {
         _ = vector
         _ = index
         throw ANNSError.constructionFailed("Disk-backed vectors are read-only")
     }
 
-    public func batchInsert(vectors: [[Float]], startingAt start: Int) throws {
+    public func batchInsert(vectors: [[Float]], startingAt start: Int) throws(ANNSError) {
         _ = vectors
         _ = start
         throw ANNSError.constructionFailed("Disk-backed vectors are read-only")
@@ -139,7 +139,7 @@ public enum DiskBackedIndexLoader {
         }
     }
 
-    public static func load(from fileURL: URL, device: MTLDevice? = nil) throws -> LoadResult {
+    public static func load(from fileURL: URL, device: MTLDevice? = nil) throws(ANNSError) -> LoadResult {
         let region = try DiskBackedMmapRegion(fileURL: fileURL)
 
         guard let metalDevice = device ?? MTLCreateSystemDefaultDevice() else {
@@ -289,7 +289,7 @@ public enum DiskBackedIndexLoader {
         )
     }
 
-    private static func metric(from code: UInt32) throws -> Metric {
+    private static func metric(from code: UInt32) throws(ANNSError) -> Metric {
         switch code {
         case 0:
             return .cosine
@@ -302,7 +302,7 @@ public enum DiskBackedIndexLoader {
         }
     }
 
-    private static func checkedMultiply(_ lhs: Int, _ rhs: Int) throws -> Int {
+    private static func checkedMultiply(_ lhs: Int, _ rhs: Int) throws(ANNSError) -> Int {
         let (result, overflow) = lhs.multipliedReportingOverflow(by: rhs)
         if overflow {
             throw ANNSError.corruptFile("Index payload overflows Int bounds")
@@ -310,7 +310,7 @@ public enum DiskBackedIndexLoader {
         return result
     }
 
-    private static func checkedAdd(_ lhs: Int, _ rhs: Int) throws -> Int {
+    private static func checkedAdd(_ lhs: Int, _ rhs: Int) throws(ANNSError) -> Int {
         let (result, overflow) = lhs.addingReportingOverflow(rhs)
         if overflow {
             throw ANNSError.corruptFile("Index payload overflows Int bounds")
@@ -331,7 +331,7 @@ public enum DiskBackedIndexLoader {
         length: Int,
         offset: Int,
         count: Int
-    ) throws -> [UInt8] {
+    ) throws(ANNSError) -> [UInt8] {
         guard offset >= 0, count >= 0, offset + count <= length else {
             throw ANNSError.corruptFile("Unexpected EOF")
         }
@@ -344,7 +344,7 @@ public enum DiskBackedIndexLoader {
         from pointer: UnsafeRawPointer,
         length: Int,
         cursor: inout Int
-    ) throws -> UInt32 {
+    ) throws(ANNSError) -> UInt32 {
         guard cursor + MemoryLayout<UInt32>.size <= length else {
             throw ANNSError.corruptFile("Unexpected EOF")
         }
@@ -364,7 +364,7 @@ private final class DiskBackedMmapRegion: @unchecked Sendable {
     let length: Int
     private let descriptor: Int32
 
-    init(fileURL: URL) throws {
+    init(fileURL: URL) throws(ANNSError) {
         let fd = open(fileURL.path, O_RDONLY)
         guard fd >= 0 else {
             throw ANNSError.corruptFile("Unable to open disk-backed index file")

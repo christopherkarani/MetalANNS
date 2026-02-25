@@ -32,7 +32,7 @@ public enum IndexCompactor {
         maxIterations: Int,
         convergenceThreshold: Float,
         useFloat16: Bool
-    ) async throws -> CompactionResult {
+    ) async throws(ANNSError) -> CompactionResult {
         _ = graph
 
         let deletedIDs = softDeletion.allDeletedIDs
@@ -134,7 +134,7 @@ public enum IndexCompactor {
         maxIterations: Int,
         convergenceThreshold: Float,
         context: MetalContext?
-    ) async throws -> UInt32 {
+    ) async throws(ANNSError) -> UInt32 {
         let nodeCount = denseVectors.count
         let entryPoint: UInt32
 
@@ -174,7 +174,7 @@ public enum IndexCompactor {
         return entryPoint
     }
 
-    private static func populate(graph: GraphBuffer, from graphData: [[(UInt32, Float)]]) throws {
+    private static func populate(graph: GraphBuffer, from graphData: [[(UInt32, Float)]]) throws(ANNSError) {
         let degree = graph.degree
         for node in 0..<graphData.count {
             let neighbors = graphData[node]
@@ -192,7 +192,7 @@ public enum IndexCompactor {
         from reduced: GraphBuffer,
         into expanded: GraphBuffer,
         nodeCount: Int
-    ) throws {
+    ) throws(ANNSError) {
         for nodeID in 0..<nodeCount {
             let reducedIDs = reduced.neighborIDs(of: nodeID)
             let reducedDistances = reduced.neighborDistances(of: nodeID)

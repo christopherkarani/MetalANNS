@@ -10,7 +10,7 @@ public enum NNDescentCPU {
         metric: Metric,
         maxIterations: Int = 20,
         convergenceThreshold: Float = 0.001
-    ) async throws -> (graph: [[(UInt32, Float)]], entryPoint: UInt32) {
+    ) async throws(ANNSError) -> (graph: [[(UInt32, Float)]], entryPoint: UInt32) {
         let nodeCount = vectors.count
         guard nodeCount > 1 else {
             throw ANNSError.constructionFailed("NNDescentCPU requires at least 2 vectors")
