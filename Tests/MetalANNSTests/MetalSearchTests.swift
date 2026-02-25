@@ -1,0 +1,154 @@
+import Metal
+import Testing
+@testable import MetalANNSCore
+@testable import MetalANNS
+
+@Suite("Metal Search Tests")
+struct MetalSearchTests {
+    private func withVectorBuffer<T>(
+        _ values: [Float],
+        _ body: (UnsafeBufferPointer<Float>) async throws -> T
+    ) async throws -> T {
+        let buffer = UnsafeMutableBufferPointer<Float>.allocate(capacity: values.count)
+        buffer.initialize(from: values)
+        defer {
+            buffer.deinitialize()
+            buffer.deallocate()
+        }
+        return try await body(UnsafeBufferPointer(buffer))
+    }
+
+    private func entryPoint(for graph: GraphBuffer, nodeCount: Int) -> Int {
+        var bestNode = 0
+        var bestMean = Float.greatestFiniteMagnitude
+
+        for node in 0..<nodeCount {
+            let distances = graph.neighborDistances(of: node)
+            guard !distances.isEmpty else { continue }
+            let mean = distances.reduce(Float(0), +) / Float(distances.count)
+            if mean < bestMean {
+                bestMean = mean
+                bestNode = node
+            }
+        }
+
+        return bestNode
+    }
+
+    @Test("GPU beam search returns k results")
+    func gpuSearchReturnsK() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            return
+        }
+
+        let nodeCount = 100
+        let dim = 16
+        let degree = 8
+        let k = 5
+        let ef = 32
+        let vectors = (0..<nodeCount).map { _ in (0..<dim).map { _ in Float.random(in: -1...1) } }
+
+        let context = try MetalContext()
+        let vectorBuffer = try VectorBuffer(capacity: nodeCount, dim: dim, device: context.device)
+        try vectorBuffer.batchInsert(vectors: vectors, startingAt: 0)
+        vectorBuffer.setCount(nodeCount)
+
+        let graph = try GraphBuffer(capacity: nodeCount, degree: degree, device: context.device)
+        try await NNDescentGPU.build(
+            context: context,
+            vectors: vectorBuffer,
+            graph: graph,
+            nodeCount: nodeCount,
+            metric: .cosine,
+            maxIterations: 15
+        )
+
+        let query = (0..<dim).map { _ in Float.random(in: -1...1) }
+        let results = try await SearchGPU.search(
+            context: context,
+            query: query,
+            vectors: vectorBuffer,
+            graph: graph,
+            entryPoint: entryPoint(for: graph, nodeCount: nodeCount),
+            k: k,
+            ef: ef,
+            metric: .cosine
+        )
+
+        #expect(results.count == k)
+        for index in 1..<results.count {
+            #expect(results[index].score >= results[index - 1].score)
+        }
+    }
+
+    @Test("GPU search recall > 0.85 on 500 vectors")
+    func gpuSearchRecall() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            return
+        }
+
+        let nodeCount = 500
+        let dim = 32
+        let degree = 16
+        let k = 10
+        let ef = 64
+        let queryCount = 10
+        let vectors = (0..<nodeCount).map { _ in (0..<dim).map { _ in Float.random(in: -1...1) } }
+
+        let context = try MetalContext()
+        let vectorBuffer = try VectorBuffer(capacity: nodeCount, dim: dim, device: context.device)
+        try vectorBuffer.batchInsert(vectors: vectors, startingAt: 0)
+        vectorBuffer.setCount(nodeCount)
+
+        let graph = try GraphBuffer(capacity: nodeCount, degree: degree, device: context.device)
+        try await NNDescentGPU.build(
+            context: context,
+            vectors: vectorBuffer,
+            graph: graph,
+            nodeCount: nodeCount,
+            metric: .cosine,
+            maxIterations: 15
+        )
+
+        let backend = AccelerateBackend()
+        let flat = vectors.flatMap { $0 }
+        var totalRecall: Float = 0
+
+        for _ in 0..<queryCount {
+            let query = (0..<dim).map { _ in Float.random(in: -1...1) }
+            let results = try await SearchGPU.search(
+                context: context,
+                query: query,
+                vectors: vectorBuffer,
+                graph: graph,
+                entryPoint: entryPoint(for: graph, nodeCount: nodeCount),
+                k: k,
+                ef: ef,
+                metric: .cosine
+            )
+
+            let exactDistances = try await withVectorBuffer(flat) { pointer in
+                try await backend.computeDistances(
+                    query: query,
+                    vectors: pointer,
+                    vectorCount: nodeCount,
+                    dim: dim,
+                    metric: .cosine
+                )
+            }
+
+            let exactTopK = Set(
+                exactDistances.enumerated()
+                    .sorted { $0.element < $1.element }
+                    .prefix(k)
+                    .map { UInt32($0.offset) }
+            )
+            let approxTopK = Set(results.map(\.internalID))
+            let overlap = exactTopK.intersection(approxTopK).count
+            totalRecall += Float(overlap) / Float(k)
+        }
+
+        let averageRecall = totalRecall / Float(queryCount)
+        #expect(averageRecall > 0.85, "Average recall \\(averageRecall) below 0.85")
+    }
+}
