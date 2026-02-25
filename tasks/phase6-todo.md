@@ -3,7 +3,7 @@
 > **Status**: PENDING
 > **Owner**: Subagent (dispatched by orchestrator)
 > **Reviewer**: Orchestrator (main session)
-> **Last Updated**: 2026-02-25 09:13
+> **Last Updated**: 2026-02-25 09:16
 
 ---
 
@@ -74,7 +74,7 @@ This file is the **shared communication layer** between the orchestrator and exe
   - `deleteAndSearch` shows no deleted IDs in results
   - `saveAndLoadLifecycle` round-trips correctly including deletions
 - [x] 19.9 — **REGRESSION**: All Phase 1–5 tests still pass (44 prior tests)
-- [ ] 19.10 — **GIT**: `git add -A && git commit -m "feat: implement ANNSIndex actor as public API facade"`
+- [x] 19.10 — **GIT**: `git add -A && git commit -m "feat: implement ANNSIndex actor as public API facade"`
   _(Use `git add -A` here since multiple files may be touched — verify no unwanted files staged)_
 
 > **Agent notes** _(REQUIRED — document decisions 19.5, 19.6, 19.7 and any Phase 1–5 file modifications)_:
@@ -90,7 +90,7 @@ This file is the **shared communication layer** between the orchestrator and exe
 
 **Acceptance**: `IntegrationTests` suite passes (2 tests), BenchmarkRunner builds. Twenty-third commit.
 
-- [ ] 20.1 — Create `Tests/MetalANNSTests/IntegrationTests.swift` — 2 tests using Swift Testing:
+- [x] 20.1 — Create `Tests/MetalANNSTests/IntegrationTests.swift` — 2 tests using Swift Testing:
   - `fullLifecycleIntegration`:
     - ANNSIndex with degree=16, metric=.cosine, maxIterations=15
     - Build with 500 random 64-dim vectors
@@ -106,25 +106,26 @@ This file is the **shared communication layer** between the orchestrator and exe
     - 50 queries, compute brute-force ground truth, measure recall@10
     - Assert: recall@10 > 0.90
     - Guard with `guard MTLCreateSystemDefaultDevice() != nil else { return }`
-- [ ] 20.2 — **RED**: `xcodebuild test -scheme MetalANNS-Package -destination 'platform=macOS' -only-testing MetalANNSTests/IntegrationTests 2>&1 | grep -E '(PASS|FAIL|error:)'` → confirms FAIL (tests reference ANNSIndex which should now compile, but test logic validates new assertions)
-- [ ] 20.3 — Create `Sources/MetalANNSBenchmarks/BenchmarkRunner.swift`:
+- [x] 20.2 — **RED**: `xcodebuild test -scheme MetalANNS-Package -destination 'platform=macOS' -only-testing MetalANNSTests/IntegrationTests 2>&1 | grep -E '(PASS|FAIL|error:)'` → confirms FAIL (tests reference ANNSIndex which should now compile, but test logic validates new assertions)
+- [x] 20.3 — Create `Sources/MetalANNSBenchmarks/BenchmarkRunner.swift`:
   - `struct BenchmarkRunner` with `Config` and `Results` nested types
   - `static func run(config:) async throws -> Results`
   - Measures: build time, query latency p50/p95/p99, recall@1/10/100
   - Uses `ANNSIndex` public API (not internal types)
-- [ ] 20.4 — Modify `Sources/MetalANNSBenchmarks/main.swift`:
+- [x] 20.4 — Modify `Sources/MetalANNSBenchmarks/main.swift`:
   - Replace placeholder with actual benchmark execution
   - Print formatted results table
   - Handle the executable entry point correctly (either `@main` struct or top-level code)
-- [ ] 20.5 — **DECISION POINT (20.3)**: Recall threshold. Plan says >0.92 on 1000 vectors. Test uses 500 vectors with degree 16. **Using 0.90 as threshold — document if adjusted.**
-- [ ] 20.6 — **GREEN**: Both integration tests pass. Specifically confirm `recallAtTenOverNinetyPercent` achieves > 0.90.
-- [ ] 20.7 — **BUILD CHECK**: `xcodebuild -scheme MetalANNSBenchmarks -destination 'platform=macOS' build 2>&1 | tail -5` → BUILD SUCCEEDED
-- [ ] 20.8 — **REGRESSION**: All prior tests still pass (44 + 5 from Task 19 = 49)
+- [x] 20.5 — **DECISION POINT (20.3)**: Recall threshold. Plan says >0.92 on 1000 vectors. Test uses 500 vectors with degree 16. **Using 0.90 as threshold — document if adjusted.**
+- [x] 20.6 — **GREEN**: Both integration tests pass. Specifically confirm `recallAtTenOverNinetyPercent` achieves > 0.90.
+- [x] 20.7 — **BUILD CHECK**: `xcodebuild -scheme MetalANNSBenchmarks -destination 'platform=macOS' build 2>&1 | tail -5` → BUILD SUCCEEDED
+- [x] 20.8 — **REGRESSION**: All prior tests still pass (44 + 5 from Task 19 = 49)
 - [ ] 20.9 — **GIT**: `git add Sources/MetalANNSBenchmarks/BenchmarkRunner.swift Sources/MetalANNSBenchmarks/main.swift Tests/MetalANNSTests/IntegrationTests.swift && git commit -m "feat: add integration tests and benchmark runner"`
 
 > **Agent notes** _(REQUIRED — document 20.3 recall threshold decision and any test adjustments)_:
 >
-> _[fill in]_
+> - 20.3 decision: adjusted recall assertion to `recall@10 > 0.90` for 500 vectors with degree 16.
+> - Integration tests passed after threshold alignment and benchmark target compile fix in `main.swift` (removed `@main` and used top-level async task with semaphore).
 
 ---
 
