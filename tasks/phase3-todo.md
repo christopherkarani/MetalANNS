@@ -3,7 +3,7 @@
 > **Status**: NOT STARTED
 > **Owner**: Subagent (dispatched by orchestrator)
 > **Reviewer**: Orchestrator (main session)
-> **Last Updated**: 2026-02-25 04:44:19 EAT
+> **Last Updated**: 2026-02-25 04:46:00 EAT
 
 ---
 
@@ -83,7 +83,7 @@ This file is the **shared communication layer** between the orchestrator and exe
 - [x] 11.5 — **GREEN**: `randomInitValid` test passes
 - [x] 11.6 — **METRIC MAPPING DECISION**: Verify that the `metric_type` UInt32 mapping (cosine=0, l2=1, innerProduct=2) is consistent between the Metal shader's `if/else` chain and the Swift wrapper. **Write confirmation in the notes below.**
 - [x] 11.7 — **REGRESSION**: All prior tests still pass
-- [ ] 11.8 — **GIT**: `git add Sources/MetalANNSCore/Shaders/NNDescent.metal Sources/MetalANNSCore/NNDescentGPU.swift Tests/MetalANNSTests/NNDescentGPUTests.swift && git commit -m "feat: add Metal random_init and compute_initial_distances kernels"`
+- [x] 11.8 — **GIT**: `git add Sources/MetalANNSCore/Shaders/NNDescent.metal Sources/MetalANNSCore/NNDescentGPU.swift Tests/MetalANNSTests/NNDescentGPUTests.swift && git commit -m "feat: add Metal random_init and compute_initial_distances kernels"`
 
 > **Agent notes** _(REQUIRED — document your 11.6 confirmation here)_:
 > Metric mapping verified as consistent in both layers:
@@ -99,15 +99,15 @@ This file is the **shared communication layer** between the orchestrator and exe
 
 **This is the most complex task in the project. Read the plan code carefully.**
 
-- [ ] 12.1 — Add integration test to `Tests/MetalANNSTests/NNDescentGPUTests.swift`:
+- [x] 12.1 — Add integration test to `Tests/MetalANNSTests/NNDescentGPUTests.swift`:
   - `fullGPUConstruction` — 200 nodes, dim=16, degree=8, maxIter=15
   - Generate random vectors, load into VectorBuffer, create GraphBuffer
   - Call `NNDescentGPU.build(context:vectors:graph:nodeCount:metric:maxIterations:)`
   - Compute brute-force recall via AccelerateBackend
   - Assert `avgRecall > 0.80`
   - Guard with `guard MTLCreateSystemDefaultDevice() != nil else { return }`
-- [ ] 12.2 — **RED**: Test fails (`NNDescentGPU.build` not implemented)
-- [ ] 12.3 — Add 2 kernels to `Sources/MetalANNSCore/Shaders/NNDescent.metal`:
+- [x] 12.2 — **RED**: Test fails (`NNDescentGPU.build` not implemented)
+- [x] 12.3 — Add 2 kernels to `Sources/MetalANNSCore/Shaders/NNDescent.metal`:
   - `build_reverse_list`:
     - Buffers: adjacency(0), reverse_list(1), reverse_counts(2, atomic_uint), node_count(3), degree(4), max_reverse(5)
     - One thread per edge (total = nodeCount * degree)
@@ -121,19 +121,21 @@ This file is the **shared communication layer** between the orchestrator and exe
     - For each (fwd, rev) pair: compute distance, CAS update on both a's and b's lists
     - **CAS pattern**: find worst slot → `as_type<uint>(distance)` → check not already neighbor → `atomic_compare_exchange_weak_explicit` on distance bits → store ID
     - Symmetric update: tries to insert into both a and b
-- [ ] 12.4 — Add `NNDescentGPU.build()` to `Sources/MetalANNSCore/NNDescentGPU.swift`:
+- [x] 12.4 — Add `NNDescentGPU.build()` to `Sources/MetalANNSCore/NNDescentGPU.swift`:
   - Full orchestration: randomInit → computeInitialDistances → iteration loop
   - Allocate 3 extra buffers: reverseListBuffer (nodeCount * maxReverse * 4), reverseCountBuffer (nodeCount * 4), updateCountBuffer (4 bytes)
   - Each iteration: memset reverse counts + update counter → build_reverse_list → local_join → read back updateCount → check convergence
   - `maxReverse = degree * 2`
   - After loop: `graph.setCount(nodeCount)`
-- [ ] 12.5 — **GREEN**: `fullGPUConstruction` test passes with recall > 0.80
-- [ ] 12.6 — If recall is borderline, try increasing `maxIterations` or adjusting threshold. Document any tuning in notes.
-- [ ] 12.7 — **CONVERGENCE DECISION**: For 200 nodes with degree 8, the threshold is `0.001 * 8 * 200 = 1.6` updates. Verify this allows convergence within `maxIterations=15`. **Write your observation in the notes below.**
-- [ ] 12.8 — **REGRESSION**: All prior tests still pass
+- [x] 12.5 — **GREEN**: `fullGPUConstruction` test passes with recall > 0.80
+- [x] 12.6 — If recall is borderline, try increasing `maxIterations` or adjusting threshold. Document any tuning in notes.
+- [x] 12.7 — **CONVERGENCE DECISION**: For 200 nodes with degree 8, the threshold is `0.001 * 8 * 200 = 1.6` updates. Verify this allows convergence within `maxIterations=15`. **Write your observation in the notes below.**
+- [x] 12.8 — **REGRESSION**: All prior tests still pass
 - [ ] 12.9 — **GIT**: `git add Sources/MetalANNSCore/Shaders/NNDescent.metal Sources/MetalANNSCore/NNDescentGPU.swift Tests/MetalANNSTests/NNDescentGPUTests.swift && git commit -m "feat: implement GPU NN-Descent with reverse edges, local join, and convergence"`
 
 > **Agent notes** _(REQUIRED — document 12.7 convergence observation and any recall tuning)_:
+> No recall tuning was needed; the `fullGPUConstruction` test passed with `maxIterations = 15`.
+> Convergence threshold kept at `0.001 * degree * nodeCount` (1.6 updates for 200x8), and this setting was sufficient for the test target.
 
 ---
 
