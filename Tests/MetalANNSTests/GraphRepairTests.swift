@@ -47,10 +47,132 @@ struct GraphRepairTests {
 
         #expect(updates >= 0)
     }
+
+    @Test("Repair improves recall after inserts")
+    func repairImprovesRecall() async throws {
+        let initialCount = 200
+        let insertCount = 100
+        let dim = 16
+        let degree = 8
+        let metric: Metric = .cosine
+
+        let initialVectors = (0..<initialCount).map { i in
+            (0..<dim).map { d in
+                sin(Float(i * dim + d) * 0.173) + cos(Float(i * dim + d) * 0.071)
+            }
+        }
+
+        let (graphData, entryPoint) = try await NNDescentCPU.build(
+            vectors: initialVectors,
+            degree: degree,
+            metric: metric,
+            maxIterations: 10
+        )
+
+        let vectorBuffer = try makeVectorBuffer(initialVectors, extraCapacity: insertCount)
+        let graphBuffer = try makeGraphBuffer(graphData, degree: degree, extraCapacity: insertCount)
+
+        var allVectors = initialVectors
+        var insertedIDs: [UInt32] = []
+        for i in 0..<insertCount {
+            let newVector = (0..<dim).map { d in
+                sin(Float((initialCount + i) * dim + d) * 0.173)
+            }
+            let slot = initialCount + i
+
+            try vectorBuffer.insert(vector: newVector, at: slot)
+            vectorBuffer.setCount(slot + 1)
+
+            try IncrementalBuilder.insert(
+                vector: newVector,
+                at: slot,
+                into: graphBuffer,
+                vectors: vectorBuffer,
+                entryPoint: entryPoint,
+                metric: metric,
+                degree: degree
+            )
+            graphBuffer.setCount(slot + 1)
+
+            allVectors.append(newVector)
+            insertedIDs.append(UInt32(slot))
+        }
+
+        let queries = Array(allVectors.prefix(20))
+        let recallBefore = try await averageRecall(
+            queries: queries,
+            vectors: allVectors,
+            graph: graphBuffer,
+            entryPoint: Int(entryPoint),
+            k: 10,
+            ef: 64,
+            metric: metric
+        )
+
+        let updates = try GraphRepairer.repair(
+            recentIDs: insertedIDs,
+            vectors: vectorBuffer,
+            graph: graphBuffer,
+            config: RepairConfiguration(repairDepth: 2, repairIterations: 5),
+            metric: metric
+        )
+
+        let recallAfter = try await averageRecall(
+            queries: queries,
+            vectors: allVectors,
+            graph: graphBuffer,
+            entryPoint: Int(entryPoint),
+            k: 10,
+            ef: 64,
+            metric: metric
+        )
+
+        #expect(recallAfter >= recallBefore - 0.01, "Repair degraded recall: \(recallAfter) < \(recallBefore)")
+        #expect(updates > 0, "Repair should have found some improvements")
+    }
 }
 
-private func makeGraphBuffer(_ graphData: [[(UInt32, Float)]], degree: Int) throws -> GraphBuffer {
-    let graphBuffer = try GraphBuffer(capacity: graphData.count + 8, degree: degree)
+private func averageRecall(
+    queries: [[Float]],
+    vectors: [[Float]],
+    graph: GraphBuffer,
+    entryPoint: Int,
+    k: Int,
+    ef: Int,
+    metric: Metric
+) async throws -> Float {
+    let graphData = (0..<graph.nodeCount).map { nodeID in
+        let ids = graph.neighborIDs(of: nodeID)
+        let distances = graph.neighborDistances(of: nodeID)
+        return zip(ids, distances).filter { $0.0 != UInt32.max }.map { ($0.0, $0.1) }
+    }
+
+    var totalRecall: Float = 0
+    for query in queries {
+        let approxResults = try await BeamSearchCPU.search(
+            query: query,
+            vectors: vectors,
+            graph: graphData,
+            entryPoint: entryPoint,
+            k: k,
+            ef: ef,
+            metric: metric
+        )
+
+        let exact = vectors.enumerated().map { index, vector in
+            (UInt32(index), SIMDDistance.distance(query, vector, metric: metric))
+        }.sorted { $0.1 < $1.1 }
+
+        let exactTopK = Set(exact.prefix(k).map(\.0))
+        let approxTopK = Set(approxResults.map(\.internalID))
+        totalRecall += Float(exactTopK.intersection(approxTopK).count) / Float(k)
+    }
+
+    return totalRecall / Float(queries.count)
+}
+
+private func makeGraphBuffer(_ graphData: [[(UInt32, Float)]], degree: Int, extraCapacity: Int = 8) throws -> GraphBuffer {
+    let graphBuffer = try GraphBuffer(capacity: graphData.count + extraCapacity, degree: degree)
     for node in 0..<graphData.count {
         var ids = Array(repeating: UInt32.max, count: degree)
         var distances = Array(repeating: Float.greatestFiniteMagnitude, count: degree)
@@ -68,12 +190,12 @@ private func makeGraphBuffer(_ graphData: [[(UInt32, Float)]], degree: Int) thro
     return graphBuffer
 }
 
-private func makeVectorBuffer(_ vectors: [[Float]]) throws -> VectorBuffer {
+private func makeVectorBuffer(_ vectors: [[Float]], extraCapacity: Int = 0) throws -> VectorBuffer {
     guard let first = vectors.first else {
         throw ANNSError.constructionFailed("Vector list cannot be empty")
     }
 
-    let vectorBuffer = try VectorBuffer(capacity: vectors.count, dim: first.count)
+    let vectorBuffer = try VectorBuffer(capacity: vectors.count + extraCapacity, dim: first.count)
     for (index, vector) in vectors.enumerated() {
         try vectorBuffer.insert(vector: vector, at: index)
     }

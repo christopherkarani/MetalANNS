@@ -206,7 +206,7 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 - [x] Task 1.1 — Add `Sources/MetalANNSCore/RepairConfiguration.swift` with defaults/clamping
 - [x] Task 1.2 — Add `repairConfigDefaults`/`repairConfigClamping` tests
 - [x] Task 2 — Implement `GraphRepairer` and neighborhood collection
-- [ ] Task 3 — Verify recall improvement with targeted inserts
+- [x] Task 3 — Verify recall improvement with targeted inserts
 - [ ] Task 4 — Verify repair disabled behavior
 - [ ] Task 5 — Verify deletion edge case handling
 - [ ] Task 6 — Integrate repair flow into `ANNSIndex` and config
@@ -225,6 +225,11 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 - Added `Sources/MetalANNSCore/GraphRepairer.swift` with repair orchestration + NN-Descent helpers.
 - Added `neighborhoodCollection` in `GraphRepairTests.swift` with `makeGraphBuffer`/`makeVectorBuffer` helpers.
 - Environment validation for this task was blocked by missing Metal toolchain (`CompileMetalFile ... cannot execute tool 'metal'`), so full `xcodebuild test/build` verification for this repository could not complete in this execution environment.
+
+### Task 3 Notes
+
+- Added `repairImprovesRecall` in `GraphRepairTests.swift` with 200-node initial + 100 inserts via `IncrementalBuilder`, then recall before/after repair comparison.
+- Added `averageRecall` helper that performs brute-force exact top-k overlap against BeamSearch-based results.
 
 ### Phase 14 Complete — Signal
 
