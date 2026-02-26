@@ -207,7 +207,7 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 - [x] Task 1.2 — Add `repairConfigDefaults`/`repairConfigClamping` tests
 - [x] Task 2 — Implement `GraphRepairer` and neighborhood collection
 - [x] Task 3 — Verify recall improvement with targeted inserts
-- [ ] Task 4 — Verify repair disabled behavior
+- [x] Task 4 — Verify repair disabled behavior
 - [ ] Task 5 — Verify deletion edge case handling
 - [ ] Task 6 — Integrate repair flow into `ANNSIndex` and config
 - [ ] Task 7 — Add ANNSIndex repair integration tests
@@ -230,6 +230,10 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 
 - Added `repairImprovesRecall` in `GraphRepairTests.swift` with 200-node initial + 100 inserts via `IncrementalBuilder`, then recall before/after repair comparison.
 - Added `averageRecall` helper that performs brute-force exact top-k overlap against BeamSearch-based results.
+
+### Task 5 Notes
+
+- Added `repairDisabled` test to `GraphRepairTests.swift` verifying `enabled = false` produces zero updates and no graph mutations.
 
 ### Phase 14 Complete — Signal
 

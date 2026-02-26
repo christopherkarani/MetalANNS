@@ -130,6 +130,39 @@ struct GraphRepairTests {
         #expect(recallAfter >= recallBefore - 0.01, "Repair degraded recall: \(recallAfter) < \(recallBefore)")
         #expect(updates > 0, "Repair should have found some improvements")
     }
+
+    @Test("Repair does nothing when disabled")
+    func repairDisabled() async throws {
+        let vectors = (0..<50).map { i in
+            (0..<8).map { d in
+                Float(i * 8 + d)
+            }
+        }
+
+        let (graphData, _) = try await NNDescentCPU.build(
+            vectors: vectors,
+            degree: 4,
+            metric: .l2,
+            maxIterations: 5
+        )
+
+        let graphBuffer = try makeGraphBuffer(graphData, degree: 4)
+        let originalNeighbors = (0..<50).map { graphBuffer.neighborIDs(of: $0) }
+
+        let config = RepairConfiguration(enabled: false)
+        let updates = try GraphRepairer.repair(
+            recentIDs: [0, 1, 2, 3, 4],
+            vectors: try makeVectorBuffer(vectors),
+            graph: graphBuffer,
+            config: config,
+            metric: .l2
+        )
+
+        #expect(updates == 0)
+        for nodeID in 0..<50 {
+            #expect(graphBuffer.neighborIDs(of: nodeID) == originalNeighbors[nodeID])
+        }
+    }
 }
 
 private func averageRecall(
