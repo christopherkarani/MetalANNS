@@ -205,7 +205,7 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 - [x] Task 1 — Add `RepairConfiguration` struct and tests
 - [x] Task 1.1 — Add `Sources/MetalANNSCore/RepairConfiguration.swift` with defaults/clamping
 - [x] Task 1.2 — Add `repairConfigDefaults`/`repairConfigClamping` tests
-- [ ] Task 2 — Implement `GraphRepairer` and neighborhood collection
+- [x] Task 2 — Implement `GraphRepairer` and neighborhood collection
 - [ ] Task 3 — Verify recall improvement with targeted inserts
 - [ ] Task 4 — Verify repair disabled behavior
 - [ ] Task 5 — Verify deletion edge case handling
@@ -219,6 +219,12 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 - Added `Tests/MetalANNSTests/GraphRepairTests.swift` containing:
   - `repairConfigDefaults`
   - `repairConfigClamping`
+
+### Task 2 Notes
+
+- Added `Sources/MetalANNSCore/GraphRepairer.swift` with repair orchestration + NN-Descent helpers.
+- Added `neighborhoodCollection` in `GraphRepairTests.swift` with `makeGraphBuffer`/`makeVectorBuffer` helpers.
+- Environment validation for this task was blocked by missing Metal toolchain (`CompileMetalFile ... cannot execute tool 'metal'`), so full `xcodebuild test/build` verification for this repository could not complete in this execution environment.
 
 ### Phase 14 Complete — Signal
 
