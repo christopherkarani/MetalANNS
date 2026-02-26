@@ -210,7 +210,7 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 - [x] Task 4 — Verify repair disabled behavior
 - [x] Task 5 — Verify deletion edge case handling
 - [x] Task 6 — Integrate repair flow into `ANNSIndex` and config
-- [ ] Task 7 — Add ANNSIndex repair integration tests
+- [x] Task 7 — Add ANNSIndex repair integration tests
 - [ ] Task 8 — Run full suite and mark completion signal
 
 ### Task 1 Notes
@@ -248,6 +248,12 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 ### Phase 14 Complete — Signal
 
 - _Pending completion after Task 8._
+
+### Task 7 Notes
+
+- Added `ANNSIndex` integration tests to `GraphRepairTests.swift`:
+  - `indexIntegrationRepair` validates auto-triggered repair after `repairInterval` inserts.
+  - `manualRepair` validates the new public `ANNSIndex.repair()` API when auto-repair is disabled.
 
 ---
 

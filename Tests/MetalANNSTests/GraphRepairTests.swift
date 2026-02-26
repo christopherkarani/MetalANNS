@@ -1,4 +1,5 @@
 import Testing
+import MetalANNS
 @testable import MetalANNSCore
 
 @Suite("Graph Repair Tests")
@@ -220,6 +221,77 @@ struct GraphRepairTests {
         )
 
         #expect(updates >= 0)
+    }
+
+    @Test("ANNSIndex triggers repair after repairInterval inserts")
+    func indexIntegrationRepair() async throws {
+        var config = IndexConfiguration(degree: 8, metric: .cosine)
+        config.repairConfiguration = RepairConfiguration(
+            repairInterval: 10,
+            repairDepth: 2,
+            repairIterations: 3
+        )
+
+        let index = ANNSIndex(configuration: config)
+        let initialVectors = (0..<50).map { i in
+            (0..<16).map { d in
+                sin(Float(i * 16 + d) * 0.173)
+            }
+        }
+        let initialIDs = (0..<50).map { "v_\($0)" }
+        try await index.build(vectors: initialVectors, ids: initialIDs)
+
+        for i in 50..<65 {
+            let vector = (0..<16).map { d in
+                sin(Float(i * 16 + d) * 0.173)
+            }
+            try await index.insert(vector, id: "v_\(i)")
+        }
+
+        for i in 50..<65 {
+            let query = (0..<16).map { d in
+                sin(Float(i * 16 + d) * 0.173)
+            }
+            let results = try await index.search(query: query, k: 1)
+            #expect(!results.isEmpty)
+            #expect(results[0].id == "v_\(i)")
+        }
+
+        let count = await index.count
+        #expect(count == 65)
+    }
+
+    @Test("Manual repair via public API")
+    func manualRepair() async throws {
+        var config = IndexConfiguration(degree: 8, metric: .l2)
+        config.repairConfiguration = RepairConfiguration(repairInterval: 0, enabled: true)
+
+        let index = ANNSIndex(configuration: config)
+        let initialVectors = (0..<50).map { i in
+            (0..<8).map { d in
+                Float(i * 8 + d) * 0.01
+            }
+        }
+        let initialIDs = (0..<50).map { "v_\($0)" }
+        try await index.build(vectors: initialVectors, ids: initialIDs)
+
+        for i in 50..<55 {
+            let vector = (0..<8).map { d in
+                Float(i * 8 + d) * 0.01
+            }
+            try await index.insert(vector, id: "v_\(i)")
+        }
+
+        try await index.repair()
+
+        for i in 50..<55 {
+            let query = (0..<8).map { d in
+                Float(i * 8 + d) * 0.01
+            }
+            let results = try await index.search(query: query, k: 1)
+            #expect(!results.isEmpty)
+            #expect(results[0].id == "v_\(i)")
+        }
     }
 }
 
