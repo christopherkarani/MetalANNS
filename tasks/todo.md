@@ -209,7 +209,7 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 - [x] Task 3 — Verify recall improvement with targeted inserts
 - [x] Task 4 — Verify repair disabled behavior
 - [x] Task 5 — Verify deletion edge case handling
-- [ ] Task 6 — Integrate repair flow into `ANNSIndex` and config
+- [x] Task 6 — Integrate repair flow into `ANNSIndex` and config
 - [ ] Task 7 — Add ANNSIndex repair integration tests
 - [ ] Task 8 — Run full suite and mark completion signal
 
@@ -238,6 +238,12 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 ### Task 4 Notes
 
 - Added `repairWithDeletions` test in `GraphRepairTests.swift` with additional inserted nodes and repair invocation to confirm non-throwing behavior when graph size grows and neighborhoods are revisited.
+
+### Task 6 Notes
+
+- Added `repairConfiguration` to `IndexConfiguration` with backward-compatible decoding (`decodeIfPresent(RepairConfiguration.self, forKey: .repairConfiguration) ?? .default`).
+- Wired automatic repair tracking to `ANNSIndex.insert` and `batchInsert` with `pendingRepairIDs` accumulation and automatic interval-based `triggerRepair()`.
+- Added public `ANNSIndex.repair()` + private `triggerRepair()`, and ensured `pendingRepairIDs` is reset in both `build()` and `compact()`.
 
 ### Phase 14 Complete — Signal
 

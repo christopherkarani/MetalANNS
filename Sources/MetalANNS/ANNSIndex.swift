@@ -20,6 +20,7 @@ public actor ANNSIndex {
     private var isBuilt: Bool
     private var isReadOnlyLoadedIndex: Bool
     private var mmapLifetime: AnyObject?
+    private var pendingRepairIDs: [UInt32] = []
 
     public init(configuration: IndexConfiguration = .default) {
         self.configuration = configuration
@@ -128,6 +129,7 @@ public actor ANNSIndex {
         self.isBuilt = true
         self.isReadOnlyLoadedIndex = false
         self.mmapLifetime = nil
+        self.pendingRepairIDs.removeAll()
     }
 
     public func insert(_ vector: [Float], id: String) async throws {
@@ -170,6 +172,14 @@ public actor ANNSIndex {
         )
         if graph.nodeCount < slot + 1 {
             graph.setCount(slot + 1)
+        }
+
+        let repairConfig = configuration.repairConfiguration
+        if repairConfig.enabled && repairConfig.repairInterval > 0 {
+            pendingRepairIDs.append(UInt32(slot))
+            if pendingRepairIDs.count >= repairConfig.repairInterval {
+                try triggerRepair()
+            }
         }
     }
 
@@ -240,6 +250,49 @@ public actor ANNSIndex {
         if graph.nodeCount < newMaxCount {
             graph.setCount(newMaxCount)
         }
+
+        let repairConfig = configuration.repairConfiguration
+        if repairConfig.enabled && repairConfig.repairInterval > 0 {
+            for slot in slots {
+                pendingRepairIDs.append(UInt32(slot))
+            }
+            if pendingRepairIDs.count >= repairConfig.repairInterval {
+                try triggerRepair()
+            }
+        }
+    }
+
+    public func repair() throws(ANNSError) {
+        guard !isReadOnlyLoadedIndex else {
+            throw ANNSError.constructionFailed("Index is read-only (mmap-loaded)")
+        }
+        guard isBuilt, let vectors, let graph else {
+            throw ANNSError.indexEmpty
+        }
+        guard !pendingRepairIDs.isEmpty else {
+            return
+        }
+        try triggerRepair()
+    }
+
+    private func triggerRepair() throws(ANNSError) {
+        guard let vectors, let graph else {
+            return
+        }
+        guard !pendingRepairIDs.isEmpty else {
+            return
+        }
+
+        let idsToRepair = pendingRepairIDs
+        pendingRepairIDs.removeAll(keepingCapacity: true)
+
+        _ = try GraphRepairer.repair(
+            recentIDs: idsToRepair,
+            vectors: vectors,
+            graph: graph,
+            config: configuration.repairConfiguration,
+            metric: configuration.metric
+        )
     }
 
     public func delete(id: String) throws {
@@ -299,6 +352,7 @@ public actor ANNSIndex {
         self.metadataStore = metadataStore.remapped(using: remapping)
         self.isReadOnlyLoadedIndex = false
         self.mmapLifetime = nil
+        self.pendingRepairIDs.removeAll()
     }
 
     public func setMetadata(_ column: String, value: String, for id: String) throws {
