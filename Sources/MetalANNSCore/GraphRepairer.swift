@@ -170,7 +170,7 @@ public enum GraphRepairer {
                             metric: metric
                         )
 
-                        if tryImproveEdge(
+                        if try tryImproveEdge(
                             node: a,
                             candidate: b,
                             distance: distance,
@@ -179,7 +179,7 @@ public enum GraphRepairer {
                             iterationUpdates += 1
                         }
 
-                        if tryImproveEdge(
+                        if try tryImproveEdge(
                             node: b,
                             candidate: a,
                             distance: distance,
@@ -222,7 +222,7 @@ public enum GraphRepairer {
             return false
         }
 
-        var neighborDistances = graph.neighborDistances(of: node)
+        let neighborDistances = graph.neighborDistances(of: node)
         var updatedIDs = neighborIDs
         var updatedDistances = neighborDistances
 
@@ -245,11 +245,15 @@ public enum GraphRepairer {
         updatedDistances[worstIndex] = distance
 
         let sorted = zip(updatedIDs, updatedDistances).sorted { $0.1 < $1.1 }
-        try graph.setNeighbors(
-            of: node,
-            ids: sorted.map(\.0),
-            distances: sorted.map(\.1)
-        )
+        do {
+            try graph.setNeighbors(
+                of: node,
+                ids: sorted.map(\.0),
+                distances: sorted.map(\.1)
+            )
+        } catch {
+            throw ANNSError.constructionFailed("Failed to update graph neighbors: \(error)")
+        }
 
         return true
     }
