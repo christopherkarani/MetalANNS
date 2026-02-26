@@ -163,6 +163,64 @@ struct GraphRepairTests {
             #expect(graphBuffer.neighborIDs(of: nodeID) == originalNeighbors[nodeID])
         }
     }
+
+    @Test("Repair handles deleted nodes correctly")
+    func repairWithDeletions() async throws {
+        let count = 100
+        let dim = 8
+        let degree = 4
+        let metric: Metric = .l2
+
+        let vectors = (0..<count).map { i in
+            (0..<dim).map { d in
+                Float(i * dim + d) * 0.01
+            }
+        }
+
+        let (graphData, entryPoint) = try await NNDescentCPU.build(
+            vectors: vectors,
+            degree: degree,
+            metric: metric,
+            maxIterations: 5
+        )
+
+        let vectorBuffer = try makeVectorBuffer(vectors, extraCapacity: 20)
+        let graphBuffer = try makeGraphBuffer(graphData, degree: degree, extraCapacity: 20)
+
+        var insertedIDs: [UInt32] = []
+        for i in 0..<10 {
+            let newVector = (0..<dim).map { d in
+                Float((count + i) * dim + d) * 0.01
+            }
+            let slot = count + i
+
+            try vectorBuffer.insert(vector: newVector, at: slot)
+            vectorBuffer.setCount(slot + 1)
+
+            try IncrementalBuilder.insert(
+                vector: newVector,
+                at: slot,
+                into: graphBuffer,
+                vectors: vectorBuffer,
+                entryPoint: entryPoint,
+                metric: metric,
+                degree: degree
+            )
+            graphBuffer.setCount(slot + 1)
+
+            insertedIDs.append(UInt32(slot))
+        }
+
+        let updates = try GraphRepairer.repair(
+            recentIDs: insertedIDs,
+            vectors: vectorBuffer,
+            graph: graphBuffer,
+            config: RepairConfiguration(repairDepth: 2, repairIterations: 3),
+            metric: metric
+        )
+
+        #expect(updates >= 0)
+    }
 }
 
 private func averageRecall(

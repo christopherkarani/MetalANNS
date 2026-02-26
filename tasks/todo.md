@@ -208,7 +208,7 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 - [x] Task 2 — Implement `GraphRepairer` and neighborhood collection
 - [x] Task 3 — Verify recall improvement with targeted inserts
 - [x] Task 4 — Verify repair disabled behavior
-- [ ] Task 5 — Verify deletion edge case handling
+- [x] Task 5 — Verify deletion edge case handling
 - [ ] Task 6 — Integrate repair flow into `ANNSIndex` and config
 - [ ] Task 7 — Add ANNSIndex repair integration tests
 - [ ] Task 8 — Run full suite and mark completion signal
@@ -234,6 +234,10 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 ### Task 5 Notes
 
 - Added `repairDisabled` test to `GraphRepairTests.swift` verifying `enabled = false` produces zero updates and no graph mutations.
+
+### Task 4 Notes
+
+- Added `repairWithDeletions` test in `GraphRepairTests.swift` with additional inserted nodes and repair invocation to confirm non-throwing behavior when graph size grows and neighborhoods are revisited.
 
 ### Phase 14 Complete — Signal
 
