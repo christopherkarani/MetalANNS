@@ -195,6 +195,35 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
 - [ ] R11 — Agent notes are filled in for Tasks 3.6 and 5.6 decisions
 - [ ] R12 — Placeholder test from Task 1.5 was cleaned up or is harmless
 
+## Phase 14: Online Graph Repair
+
+> **Status**: IN PROGRESS
+> **Owner**: Subagent
+> **Reviewer**: Orchestrator
+> **Last Updated**: 2026-02-26
+
+- [x] Task 1 — Add `RepairConfiguration` struct and tests
+- [x] Task 1.1 — Add `Sources/MetalANNSCore/RepairConfiguration.swift` with defaults/clamping
+- [x] Task 1.2 — Add `repairConfigDefaults`/`repairConfigClamping` tests
+- [ ] Task 2 — Implement `GraphRepairer` and neighborhood collection
+- [ ] Task 3 — Verify recall improvement with targeted inserts
+- [ ] Task 4 — Verify repair disabled behavior
+- [ ] Task 5 — Verify deletion edge case handling
+- [ ] Task 6 — Integrate repair flow into `ANNSIndex` and config
+- [ ] Task 7 — Add ANNSIndex repair integration tests
+- [ ] Task 8 — Run full suite and mark completion signal
+
+### Task 1 Notes
+
+- Added `Sources/MetalANNSCore/RepairConfiguration.swift` using clamping rules (`repairInterval` non-negative, `repairDepth` 1...3, `repairIterations` 1...20).
+- Added `Tests/MetalANNSTests/GraphRepairTests.swift` containing:
+  - `repairConfigDefaults`
+  - `repairConfigClamping`
+
+### Phase 14 Complete — Signal
+
+- _Pending completion after Task 8._
+
 ---
 
 ## Phase 9 Float16 Planning
