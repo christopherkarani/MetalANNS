@@ -32,4 +32,18 @@ struct QuantizedHNSWConfigurationTests {
         let decoded = try JSONDecoder().decode(QuantizedHNSWConfiguration.self, from: encoded)
         #expect(decoded == config)
     }
+
+    @Test("Decode clamps non-positive pqSubspaces")
+    func decodeClampsSubspaces() throws {
+        let payload = """
+        {
+          "base": { "enabled": true, "M": 8, "maxLayers": 6 },
+          "useQuantizedEdges": true,
+          "pqSubspaces": 0
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(QuantizedHNSWConfiguration.self, from: payload)
+        #expect(decoded.pqSubspaces == 1)
+    }
 }

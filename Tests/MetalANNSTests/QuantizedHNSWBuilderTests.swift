@@ -97,6 +97,34 @@ struct QuantizedHNSWBuilderTests {
         #expect(q.quantizedLayers[0].pq?.numSubspaces == 5)
     }
 
+    @Test("Rejects malformed skip-layer mappings")
+    func rejectsMalformedSkipLayerMappings() {
+        let vectors = makeVectors(count: 300, dim: 128)
+        let malformed = SkipLayer(
+            nodeToLayerIndex: [0: 9],
+            layerIndexToNode: [0],
+            adjacency: [[0]]
+        )
+        let hnsw = HNSWLayers(layers: [malformed], maxLayer: 1, entryPoint: 0)
+
+        do {
+            _ = try QuantizedHNSWBuilder.build(
+                from: hnsw,
+                vectors: vectors,
+                config: .default,
+                metric: .cosine
+            )
+            #expect(Bool(false), "Expected malformed skip-layer mapping to throw")
+        } catch let error as ANNSError {
+            if case .constructionFailed = error { }
+            else {
+                #expect(Bool(false), "Expected constructionFailed, got \(error)")
+            }
+        } catch {
+            #expect(Bool(false), "Expected ANNSError.constructionFailed, got \(error)")
+        }
+    }
+
     private func makeVectors(count: Int, dim: Int) -> [[Float]] {
         (0..<count).map { row in
             (0..<dim).map { col in

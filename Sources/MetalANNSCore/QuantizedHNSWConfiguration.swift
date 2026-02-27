@@ -28,6 +28,20 @@ public struct QuantizedHNSWConfiguration: Sendable, Codable, Equatable {
         self.pqSubspaces = max(1, pqSubspaces)
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case base
+        case useQuantizedEdges
+        case pqSubspaces
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        base = try container.decode(HNSWConfiguration.self, forKey: .base)
+        useQuantizedEdges = try container.decode(Bool.self, forKey: .useQuantizedEdges)
+        let decodedSubspaces = try container.decode(Int.self, forKey: .pqSubspaces)
+        pqSubspaces = max(1, decodedSubspaces)
+    }
+
     public static func == (lhs: QuantizedHNSWConfiguration, rhs: QuantizedHNSWConfiguration) -> Bool {
         lhs.base.enabled == rhs.base.enabled &&
             lhs.base.M == rhs.base.M &&

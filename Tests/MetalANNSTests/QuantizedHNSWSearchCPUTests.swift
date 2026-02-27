@@ -107,6 +107,40 @@ struct QuantizedHNSWSearchCPUTests {
         }
     }
 
+    @Test("Malformed layer mapping throws instead of crashing")
+    func malformedLayerMappingThrows() {
+        let vectors = makeVectors(count: 4, dim: 8)
+        let badSkip = SkipLayer(
+            nodeToLayerIndex: [0: 3],
+            layerIndexToNode: [0],
+            adjacency: [[0]]
+        )
+        let quantized = QuantizedHNSWLayers(
+            quantizedLayers: [QuantizedSkipLayer(base: badSkip, pq: nil, codes: [])],
+            maxLayer: 1,
+            entryPoint: 0
+        )
+
+        do {
+            _ = try QuantizedHNSWSearchCPU.greedySearchLayer(
+                query: vectors[0],
+                vectors: vectors,
+                hnsw: quantized,
+                layer: 1,
+                entryPoint: 0,
+                metric: .cosine
+            )
+            #expect(Bool(false), "Expected malformed layer mapping to throw")
+        } catch let error as ANNSError {
+            if case .searchFailed = error { }
+            else {
+                #expect(Bool(false), "Expected searchFailed, got \(error)")
+            }
+        } catch {
+            #expect(Bool(false), "Expected ANNSError.searchFailed, got \(error)")
+        }
+    }
+
     private struct Fixture {
         let vectors: [[Float]]
         let graph: [[(UInt32, Float)]]

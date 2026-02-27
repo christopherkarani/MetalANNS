@@ -65,6 +65,23 @@ struct QuantizedHNSWLayersTests {
         #expect(q.quantizedLayer(at: 2) != nil)
     }
 
+    @Test("Layer lookup handles maxLayer count mismatch safely")
+    func layerLookupHandlesMismatchSafely() {
+        let base = SkipLayer(
+            nodeToLayerIndex: [0: 0],
+            layerIndexToNode: [0],
+            adjacency: [[]]
+        )
+        let q = QuantizedHNSWLayers(
+            quantizedLayers: [QuantizedSkipLayer(base: base, pq: nil, codes: [])],
+            maxLayer: 2,
+            entryPoint: 0
+        )
+
+        #expect(q.quantizedLayer(at: 1) != nil)
+        #expect(q.quantizedLayer(at: 2) == nil)
+    }
+
     @Test("Codable round trip")
     func codableRoundTrip() throws {
         let base = SkipLayer(

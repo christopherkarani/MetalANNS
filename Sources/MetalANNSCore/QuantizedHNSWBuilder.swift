@@ -8,6 +8,7 @@ public enum QuantizedHNSWBuilder {
         config: QuantizedHNSWConfiguration,
         metric: Metric
     ) throws(ANNSError) -> QuantizedHNSWLayers {
+        _ = metric
         guard hnsw.maxLayer > 0 else {
             return QuantizedHNSWLayers(
                 quantizedLayers: [],
@@ -27,6 +28,14 @@ public enum QuantizedHNSWBuilder {
         for vector in vectors where vector.count != dim {
             throw ANNSError.dimensionMismatch(expected: dim, got: vector.count)
         }
+        guard Int(hnsw.entryPoint) < vectors.count else {
+            throw ANNSError.constructionFailed("HNSW entry point out of vector bounds")
+        }
+        guard hnsw.layers.count == hnsw.maxLayer else {
+            throw ANNSError.constructionFailed(
+                "HNSW layer count mismatch: layers=\(hnsw.layers.count), maxLayer=\(hnsw.maxLayer)"
+            )
+        }
 
         let effectiveSubspaces = largestDivisorOf(dim, atMost: config.pqSubspaces)
         guard effectiveSubspaces > 0 else {
@@ -39,6 +48,7 @@ public enum QuantizedHNSWBuilder {
         quantizedLayers.reserveCapacity(hnsw.layers.count)
 
         for skipLayer in hnsw.layers {
+            try validate(skipLayer: skipLayer, vectorCount: vectors.count)
             let nodeCount = skipLayer.layerIndexToNode.count
             if nodeCount >= 256, config.useQuantizedEdges {
                 let layerVectors: [[Float]]
@@ -95,5 +105,29 @@ public enum QuantizedHNSWBuilder {
             }
         }
         return 0
+    }
+
+    private static func validate(skipLayer: SkipLayer, vectorCount: Int) throws(ANNSError) {
+        let nodeCount = skipLayer.layerIndexToNode.count
+        guard skipLayer.adjacency.count == nodeCount else {
+            throw ANNSError.constructionFailed("Skip-layer adjacency count does not match layer node count")
+        }
+
+        for (globalNodeID, layerIndexRaw) in skipLayer.nodeToLayerIndex {
+            let layerIndex = Int(layerIndexRaw)
+            guard layerIndex >= 0, layerIndex < nodeCount else {
+                throw ANNSError.constructionFailed("Skip-layer node mapping index out of bounds")
+            }
+            guard Int(globalNodeID) < vectorCount else {
+                throw ANNSError.constructionFailed("Skip-layer node ID out of vector bounds")
+            }
+            guard skipLayer.layerIndexToNode[layerIndex] == globalNodeID else {
+                throw ANNSError.constructionFailed("Skip-layer node mappings are inconsistent")
+            }
+        }
+
+        for nodeID in skipLayer.layerIndexToNode where Int(nodeID) >= vectorCount {
+            throw ANNSError.constructionFailed("Skip-layer layerIndexToNode contains out-of-bounds node ID")
+        }
     }
 }

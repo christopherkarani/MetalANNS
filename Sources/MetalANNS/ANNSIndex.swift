@@ -7,6 +7,13 @@ public actor ANNSIndex {
         let configuration: IndexConfiguration
         let softDeletion: SoftDeletion
         let metadataStore: MetadataStore?
+        let quantizedSidecarSignature: String?
+    }
+
+    private struct PersistedQuantizedHNSW: Codable, Sendable {
+        let schemaVersion: Int
+        let signature: String
+        let layers: QuantizedHNSWLayers
     }
 
     private var configuration: IndexConfiguration
@@ -455,7 +462,7 @@ public actor ANNSIndex {
                 metric: searchMetric
             )
         } else {
-            if configuration.hnswConfiguration.enabled, hnsw == nil {
+            if configuration.hnswConfiguration.enabled, hnsw == nil, quantizedHNSW == nil {
                 try rebuildHNSWFromCurrentState()
             }
 
@@ -547,7 +554,7 @@ public actor ANNSIndex {
                 metric: searchMetric
             )
         } else {
-            if configuration.hnswConfiguration.enabled, hnsw == nil {
+            if configuration.hnswConfiguration.enabled, hnsw == nil, quantizedHNSW == nil {
                 try rebuildHNSWFromCurrentState()
             }
 
@@ -668,6 +675,7 @@ public actor ANNSIndex {
         guard isBuilt, let vectors, let graph else {
             throw ANNSError.indexEmpty
         }
+        let sidecarSignature = UUID().uuidString
 
         try IndexSerializer.save(
             vectors: vectors,
@@ -681,14 +689,25 @@ public actor ANNSIndex {
         let metadata = PersistedMetadata(
             configuration: configuration,
             softDeletion: softDeletion,
-            metadataStore: metadataStore
+            metadataStore: metadataStore,
+            quantizedSidecarSignature: sidecarSignature
         )
         let metadataData = try JSONEncoder().encode(metadata)
         try metadataData.write(to: Self.metadataURL(for: url), options: .atomic)
 
         if let quantizedHNSW {
-            let quantizedData = try JSONEncoder().encode(quantizedHNSW)
+            let persisted = PersistedQuantizedHNSW(
+                schemaVersion: 1,
+                signature: sidecarSignature,
+                layers: quantizedHNSW
+            )
+            let quantizedData = try JSONEncoder().encode(persisted)
             try quantizedData.write(to: Self.qhnswURL(for: url), options: .atomic)
+        } else {
+            let sidecarURL = Self.qhnswURL(for: url)
+            if FileManager.default.fileExists(atPath: sidecarURL.path) {
+                try FileManager.default.removeItem(at: sidecarURL)
+            }
         }
     }
 
@@ -696,6 +715,7 @@ public actor ANNSIndex {
         guard isBuilt, let vectors, let graph else {
             throw ANNSError.indexEmpty
         }
+        let sidecarSignature = UUID().uuidString
 
         try IndexSerializer.saveMmapCompatible(
             vectors: vectors,
@@ -709,14 +729,25 @@ public actor ANNSIndex {
         let metadata = PersistedMetadata(
             configuration: configuration,
             softDeletion: softDeletion,
-            metadataStore: metadataStore
+            metadataStore: metadataStore,
+            quantizedSidecarSignature: sidecarSignature
         )
         let metadataData = try JSONEncoder().encode(metadata)
         try metadataData.write(to: Self.metadataURL(for: url), options: .atomic)
 
         if let quantizedHNSW {
-            let quantizedData = try JSONEncoder().encode(quantizedHNSW)
+            let persisted = PersistedQuantizedHNSW(
+                schemaVersion: 1,
+                signature: sidecarSignature,
+                layers: quantizedHNSW
+            )
+            let quantizedData = try JSONEncoder().encode(persisted)
             try quantizedData.write(to: Self.qhnswURL(for: url), options: .atomic)
+        } else {
+            let sidecarURL = Self.qhnswURL(for: url)
+            if FileManager.default.fileExists(atPath: sidecarURL.path) {
+                try FileManager.default.removeItem(at: sidecarURL)
+            }
         }
     }
 
@@ -741,7 +772,10 @@ public actor ANNSIndex {
             metadataStore: persistedMetadata?.metadataStore ?? MetadataStore()
         )
         try await index.rebuildHNSWFromCurrentState()
-        await index.loadQuantizedHNSWSidecarIfPresent(from: url)
+        await index.loadQuantizedHNSWSidecarIfPresent(
+            from: url,
+            expectedSignature: persistedMetadata?.quantizedSidecarSignature
+        )
 
         return index
     }
@@ -768,7 +802,10 @@ public actor ANNSIndex {
             mmapLifetime: loaded.mmapLifetime
         )
         try await index.rebuildHNSWFromCurrentState()
-        await index.loadQuantizedHNSWSidecarIfPresent(from: url)
+        await index.loadQuantizedHNSWSidecarIfPresent(
+            from: url,
+            expectedSignature: persistedMetadata?.quantizedSidecarSignature
+        )
 
         return index
     }
@@ -796,7 +833,10 @@ public actor ANNSIndex {
             mmapLifetime: diskBacked.mmapLifetime
         )
         try await index.rebuildHNSWFromCurrentState()
-        await index.loadQuantizedHNSWSidecarIfPresent(from: url)
+        await index.loadQuantizedHNSWSidecarIfPresent(
+            from: url,
+            expectedSignature: persistedMetadata?.quantizedSidecarSignature
+        )
 
         return index
     }
@@ -857,7 +897,7 @@ public actor ANNSIndex {
             quantizedHNSW = nil
             return
         }
-        if context != nil {
+        if context != nil, supportsGPUSearch(for: vectors) {
             hnsw = nil
             quantizedHNSW = nil
             return
@@ -906,7 +946,7 @@ public actor ANNSIndex {
         }
     }
 
-    private func loadQuantizedHNSWSidecarIfPresent(from indexURL: URL) {
+    private func loadQuantizedHNSWSidecarIfPresent(from indexURL: URL, expectedSignature: String?) {
         guard configuration.quantizedHNSWConfiguration.useQuantizedEdges else {
             return
         }
@@ -915,12 +955,24 @@ public actor ANNSIndex {
         guard FileManager.default.fileExists(atPath: sidecarURL.path) else {
             return
         }
-        guard let data = try? Data(contentsOf: sidecarURL),
-              let decoded = try? JSONDecoder().decode(QuantizedHNSWLayers.self, from: data) else {
+        guard let data = try? Data(contentsOf: sidecarURL) else {
             return
         }
 
-        guard isQuantizedSidecarCompatible(decoded) else {
+        if let persisted = try? JSONDecoder().decode(PersistedQuantizedHNSW.self, from: data) {
+            if let expectedSignature, persisted.signature != expectedSignature {
+                return
+            }
+            guard isQuantizedSidecarCompatible(persisted.layers) else {
+                return
+            }
+            quantizedHNSW = persisted.layers
+            return
+        }
+
+        guard expectedSignature == nil,
+              let decoded = try? JSONDecoder().decode(QuantizedHNSWLayers.self, from: data),
+              isQuantizedSidecarCompatible(decoded) else {
             return
         }
         quantizedHNSW = decoded
@@ -943,8 +995,19 @@ public actor ANNSIndex {
                 return false
             }
 
-            for nodeID in layer.base.layerIndexToNode {
+            for (layerLocalIndex, nodeID) in layer.base.layerIndexToNode.enumerated() {
                 if Int(nodeID) >= vectors.count {
+                    return false
+                }
+                guard let mappedLayerIndex = layer.base.nodeToLayerIndex[nodeID],
+                      Int(mappedLayerIndex) == layerLocalIndex else {
+                    return false
+                }
+            }
+
+            for (nodeID, layerLocalIndex) in layer.base.nodeToLayerIndex {
+                guard Int(nodeID) < vectors.count,
+                      Int(layerLocalIndex) < nodeCount else {
                     return false
                 }
             }
@@ -958,6 +1021,17 @@ public actor ANNSIndex {
                 }
             } else if !layer.codes.isEmpty && layer.codes.count != nodeCount {
                 return false
+            }
+
+            for neighbors in layer.base.adjacency {
+                for neighborID in neighbors {
+                    if neighborID == UInt32.max || Int(neighborID) >= vectors.count {
+                        return false
+                    }
+                    if layer.base.nodeToLayerIndex[neighborID] == nil {
+                        return false
+                    }
+                }
             }
         }
 

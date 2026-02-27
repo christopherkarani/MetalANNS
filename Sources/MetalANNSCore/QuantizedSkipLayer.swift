@@ -51,6 +51,10 @@ public final class QuantizedHNSWLayers: Sendable, Codable {
         guard layer > 0, layer <= maxLayer else {
             return nil
         }
-        return quantizedLayers[layer - 1]
+        let index = layer - 1
+        guard index < quantizedLayers.count else {
+            return nil
+        }
+        return quantizedLayers[index]
     }
 }

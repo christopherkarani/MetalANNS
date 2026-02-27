@@ -107,7 +107,11 @@ public enum QuantizedHNSWSearchCPU {
             guard let layerIdxRaw = skipLayer.nodeToLayerIndex[current] else {
                 break
             }
-            let neighbors = skipLayer.adjacency[Int(layerIdxRaw)]
+            let layerIdx = Int(layerIdxRaw)
+            guard layerIdx >= 0, layerIdx < skipLayer.adjacency.count else {
+                throw ANNSError.searchFailed("Invalid skip-layer mapping for node \(current)")
+            }
+            let neighbors = skipLayer.adjacency[layerIdx]
 
             for neighborID in neighbors {
                 if neighborID == UInt32.max || Int(neighborID) >= vectors.count {
