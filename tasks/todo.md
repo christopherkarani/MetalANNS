@@ -651,7 +651,7 @@ DECISIONS MADE: (pending)
   - Commit: `feat(hnsw): implement HNSWBuilder with probabilistic level assignment`
 - [x] Task 3 — Create `HNSWSearchCPU.swift` + layer-by-layer descent
   - Commit: `feat(hnsw): implement HNSWSearchCPU with layer descent and beam search`
-- [ ] Task 4 — Create `HNSWConfiguration.swift`
+- [x] Task 4 — Create `HNSWConfiguration.swift`
   - Commit: `feat(hnsw): add HNSWConfiguration with sensible defaults`
 - [ ] Task 5 — Write comprehensive test suite (`HNSWTests.swift`)
   - Commit: `test(hnsw): add comprehensive layer assignment, build, and search tests`
@@ -689,7 +689,9 @@ DECISIONS MADE: (pending)
 
 ### Task Notes 4
 
-_(Executing agent: fill in after completing Task 4)_
+- Added RED test `hnswtConfigTest`; compile failed with `cannot find 'HNSWConfiguration' in scope`.
+- Implemented `Sources/MetalANNSCore/HNSWConfiguration.swift` with `enabled`, `M`, `maxLayers`, defaults, and clamping.
+- Validation: targeted xcodebuild test command succeeds after adding configuration type.
 
 ### Task Notes 5
 

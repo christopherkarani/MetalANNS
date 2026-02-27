@@ -62,6 +62,14 @@ struct HNSWTests {
         #expect(results.count == 5)
     }
 
+    @Test("HNSWConfiguration has defaults")
+    func hnswtConfigTest() {
+        let config = HNSWConfiguration.default
+        #expect(config.enabled == true)
+        #expect(config.M > 0)
+        #expect(config.maxLayers >= 0)
+    }
+
     private func makeVectorBuffer(_ vectors: [[Float]]) throws -> VectorBuffer {
         guard let first = vectors.first else {
             throw ANNSError.constructionFailed("Empty vectors")
