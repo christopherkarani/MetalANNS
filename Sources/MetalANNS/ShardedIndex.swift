@@ -97,22 +97,35 @@ public actor ShardedIndex {
             }
         }
 
-        var builtShards: [ANNSIndex] = []
-        var builtCentroids: [[Float]] = []
+        var indexedShards: [(index: Int, shard: ANNSIndex)] = []
+        indexedShards.reserveCapacity(effectiveShards)
 
-        for shardIndex in 0..<effectiveShards {
-            guard !shardVectors[shardIndex].isEmpty else {
-                continue
+        try await withThrowingTaskGroup(of: (Int, ANNSIndex).self) { group in
+            for shardIndex in 0..<effectiveShards {
+                guard !shardVectors[shardIndex].isEmpty else {
+                    continue
+                }
+
+                let shardData = shardVectors[shardIndex]
+                let shardDataIDs = shardIDs[shardIndex]
+                var shardConfiguration = configuration
+                shardConfiguration.degree = min(configuration.degree, max(1, shardData.count - 1))
+
+                group.addTask {
+                    let shard = ANNSIndex(configuration: shardConfiguration)
+                    try await shard.build(vectors: shardData, ids: shardDataIDs)
+                    return (shardIndex, shard)
+                }
             }
 
-            var shardConfiguration = configuration
-            shardConfiguration.degree = min(configuration.degree, max(1, shardVectors[shardIndex].count - 1))
-
-            let shard = ANNSIndex(configuration: shardConfiguration)
-            try await shard.build(vectors: shardVectors[shardIndex], ids: shardIDs[shardIndex])
-            builtShards.append(shard)
-            builtCentroids.append(kmeans.centroids[shardIndex])
+            for try await (index, shard) in group {
+                indexedShards.append((index, shard))
+            }
         }
+
+        indexedShards.sort { $0.index < $1.index }
+        let builtShards = indexedShards.map(\.shard)
+        let builtCentroids = indexedShards.map { kmeans.centroids[$0.index] }
 
         self.shards = builtShards
         self.centroids = builtCentroids
