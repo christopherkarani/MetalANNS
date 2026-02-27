@@ -33,18 +33,18 @@ struct BenchmarkReportTests {
             .init(label: "b", recallAt10: 0.92, qps: 3500, buildTimeMs: 110, p50Ms: 1.1, p95Ms: 2.1, p99Ms: 3.1),
             .init(label: "c", recallAt10: 0.91, qps: 3000, buildTimeMs: 120, p50Ms: 1.2, p95Ms: 2.2, p99Ms: 3.2), // dominated by b
             .init(label: "d", recallAt10: 0.95, qps: 2500, buildTimeMs: 130, p50Ms: 1.3, p95Ms: 2.3, p99Ms: 3.3),
-            .init(label: "e", recallAt10: 0.88, qps: 4500, buildTimeMs: 90, p50Ms: 0.9, p95Ms: 1.9, p99Ms: 2.9)
+            .init(label: "e", recallAt10: 0.88, qps: 3900, buildTimeMs: 90, p50Ms: 0.9, p95Ms: 1.9, p99Ms: 2.9) // dominated by a
         ]
 
         let frontier = BenchmarkReport(rows: rows, datasetLabel: "synthetic").paretoFrontier()
         let labels = Set(frontier.map(\.label))
 
-        #expect(frontier.count == 4)
+        #expect(frontier.count == 3)
         #expect(labels.contains("a"))
         #expect(labels.contains("b"))
         #expect(labels.contains("d"))
-        #expect(labels.contains("e"))
         #expect(!labels.contains("c"))
+        #expect(!labels.contains("e"))
     }
 }
 

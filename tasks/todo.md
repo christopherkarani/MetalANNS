@@ -1148,3 +1148,271 @@ TOTAL COMMITS: pending
 ISSUES ENCOUNTERED: pending
 DECISIONS MADE: pending
 ```
+
+---
+
+## Phase 17: Benchmarking Suite
+
+> **Status**: NOT STARTED
+> **Owner**: Subagent
+> **Reviewer**: Orchestrator
+> **Last Updated**: —
+
+### Overview
+
+Transform the synthetic-only `MetalANNSBenchmarks` executable into a production benchmarking harness. Adds `.annbin` dataset file format, configuration sweeps, QPS and Pareto frontier analysis, CSV export, IVFPQ side-by-side comparison, and a Python HDF5 converter. Does NOT change the existing `BenchmarkRunner.run(config:)` signature.
+
+**Key targets:**
+- `.annbin` round-trip: bit-identical write → read
+- Sweep mode: 5 efSearch values → 5 rows → Pareto printed
+- Dataset mode: recall against real ground truth (not brute-force)
+- IVFPQ comparison: side-by-side table via `--ivfpq` flag
+
+### Task Checklist
+
+- [x] Task 1 — Add `BenchmarkDataset` with `.annbin` binary format and tests
+- [x] Task 2 — Add `BenchmarkReport` with table, CSV, and Pareto frontier
+- [x] Task 3 — Extend `BenchmarkRunner` with sweep and QPS overloads
+- [x] Task 4 — Update `main.swift` with CLI argument modes
+- [x] Task 5 — Add `scripts/convert_hdf5.py` Python converter
+- [x] Task 6 — Add `IVFPQBenchmark` side-by-side comparison
+- [ ] Task 7 — Full suite verification and completion signal
+
+---
+
+### Task 1: BenchmarkDataset — .annbin File Format
+
+**Acceptance**: `BenchmarkDatasetTests` passes (5 tests). First git commit.
+
+- [x] 1.1 — Create `Tests/MetalANNSTests/BenchmarkDatasetTests.swift` with tests:
+  - `writeAndReadRoundTrip` — write .annbin to temp path, read back, verify all fields identical
+  - `trainVectorsPreserved` — train vectors match original (exact float)
+  - `testVectorsPreserved` — test vectors match original (exact float)
+  - `groundTruthPreserved` — ground truth UInt32 indices match original
+  - `metricRoundTrip` — all three Metric values survive encode/decode
+- [x] 1.2 — **RED**: Tests fail (BenchmarkDataset not defined)
+- [x] 1.3 — Create `Sources/MetalANNSBenchmarks/BenchmarkDataset.swift`:
+  ```swift
+  public struct BenchmarkDataset: Sendable {
+      public let trainVectors: [[Float]]
+      public let testVectors: [[Float]]
+      public let groundTruth: [[UInt32]]   // sorted neighbor IDs per query
+      public let dimension: Int
+      public let metric: Metric
+      public let neighborsCount: Int
+
+      public static func synthetic(trainCount:testCount:dimension:k:metric:seed:) -> BenchmarkDataset
+      public func save(to path: String) throws
+      public static func load(from path: String) throws -> BenchmarkDataset
+  }
+  ```
+  - `.annbin` header (40 bytes): magic "ANNB" + version + trainCount + testCount + dimension + neighborsCount + metricRaw + 3×reserved
+  - Body: train floats → test floats → ground truth UInt32s (all little-endian)
+  - `synthetic()`: deterministic seeded generation + brute-force ground truth UInt32 IDs
+  - Errors on corrupt magic, version mismatch, truncated body
+- [x] 1.4 — **GREEN**: All 5 tests pass
+- [x] 1.5 — **GIT**: `git commit -m "feat: add BenchmarkDataset with .annbin binary format"`
+
+### Task Notes 1
+
+Added `BenchmarkDataset` with deterministic synthetic generation and `.annbin` save/load (40-byte header, little-endian body). RED/GREEN completed via `swift test --filter BenchmarkDatasetTests`; committed as `bba99a6`.
+
+---
+
+### Task 2: BenchmarkReport — Table, CSV, and Pareto Frontier
+
+**Acceptance**: `BenchmarkReportTests` passes (3 tests). Second git commit.
+
+- [x] 2.1 — Create `Tests/MetalANNSTests/BenchmarkReportTests.swift` with tests:
+  - `tableOutput` — generate table from 3 rows, verify header line and data lines present
+  - `csvOutput` — generate CSV, verify header row + correct number of data rows
+  - `paretoFrontier` — 5 (recall, QPS) points with 2 dominated; frontier has exactly 3
+- [x] 2.2 — **RED**: Tests fail (BenchmarkReport not defined)
+- [x] 2.3 — Create `Sources/MetalANNSBenchmarks/BenchmarkReport.swift`:
+  ```swift
+  public struct BenchmarkReport: Sendable {
+      public struct Row: Sendable {
+          public var label: String
+          public var recallAt10: Double
+          public var qps: Double
+          public var buildTimeMs: Double
+          public var p50Ms: Double; var p95Ms: Double; var p99Ms: Double
+      }
+      public var rows: [Row]
+      public var datasetLabel: String
+
+      public func renderTable() -> String   // fixed-width ASCII table
+      public func renderCSV() -> String     // header + data rows
+      public func saveCSV(to path: String) throws
+      public func paretoFrontier() -> [Row] // non-dominated (recall, QPS) points
+  }
+  ```
+  - Pareto: point p dominates q if `p.recallAt10 >= q.recallAt10 && p.qps >= q.qps` (strictly > in at least one)
+  - CSV header: `label,recall@10,qps,buildTimeMs,p50ms,p95ms,p99ms`
+- [x] 2.4 — **GREEN**: All 3 tests pass
+- [x] 2.5 — **GIT**: `git commit -m "feat: add BenchmarkReport with table/CSV output and Pareto frontier"`
+
+### Task Notes 2
+
+Implemented fixed-width table rendering, CSV export, and Pareto frontier filtering. Updated Pareto test fixture to include exactly 3 frontier points and 2 dominated points.
+
+---
+
+### Task 3: BenchmarkRunner — Sweep and QPS Overloads
+
+**Acceptance**: `BenchmarkRunnerSweepTests` passes. Third git commit.
+
+- [x] 3.1 — Create `Tests/MetalANNSTests/BenchmarkRunnerSweepTests.swift` with tests:
+  - `sweepReturnsOneRowPerConfig` — sweep 3 configs, verify report has 3 rows
+  - `qpsIsPositive` — all sweep rows have qps > 0
+  - `recallFromDataset` — use `BenchmarkDataset.synthetic(trainCount:200, testCount:50, dimension:32)`, verify recall@10 > 0.5
+- [x] 3.2 — **RED**: Tests fail (sweep not defined)
+- [x] 3.3 — Extend `Sources/MetalANNSBenchmarks/BenchmarkRunner.swift`:
+  - Add `var qps: Double` to `Results` (computed: `queryCount / totalSearchTimeSeconds`)
+  - Add `run(config:dataset:) async throws -> Results` — use dataset.trainVectors/testVectors/groundTruth
+  - Add `sweep(configs:dataset:) async throws -> BenchmarkReport` — one row per config
+  - Recall in dataset mode: set intersection of returned String IDs vs `"v_\(groundTruth[i][j])"` IDs
+  - **KEEP** existing `run(config:)` synthetic overload unchanged
+- [x] 3.4 — **GREEN**: All 3 sweep tests pass
+- [x] 3.5 — **GIT**: `git commit -m "feat: extend BenchmarkRunner with dataset-backed sweep and QPS computation"`
+
+### Task Notes 3
+
+Added dataset-backed `run` overload and `sweep` report generation. QPS is computed as `queryCount / totalBatchTimeSeconds` using full query-loop timing. Existing synthetic `run(config:)` behavior retained with additional batch timing metadata.
+
+---
+
+### Task 4: main.swift — CLI Argument Modes
+
+**Acceptance**: Builds cleanly, handles all modes. Fourth git commit.
+
+- [x] 4.1 — Update `Sources/MetalANNSBenchmarks/main.swift` to support:
+  - No args: existing single synthetic run (output format unchanged)
+  - `--sweep`: efSearch sweep [16, 32, 64, 128, 256] on synthetic data, print table + Pareto count
+  - `--dataset <path>`: load .annbin, single run with ground-truth recall
+  - `--dataset <path> --sweep`: load .annbin, sweep efSearch
+  - `--csv-out <path>`: save CSV after any run
+  - `--ivfpq`: run IVFPQBenchmark comparison (Task 6), print side-by-side
+- [ ] 4.2 — **BUILD VERIFY**: `xcodebuild build -scheme MetalANNS -destination 'platform=macOS' -skipPackagePluginValidation` → **BUILD SUCCEEDED**
+- [x] 4.3 — **GIT**: `git commit -m "feat: update main.swift with CLI modes (sweep, dataset, csv-out, ivfpq)"`
+
+### Task Notes 4
+
+CLI modes implemented with shared `efSearchSweep` constant and CSV output support. Environment limitation: `xcodebuild` does not detect package in this runtime, so validation used `swift build` for compile sanity.
+
+---
+
+### Task 5: Python HDF5-to-.annbin Converter
+
+**Acceptance**: Script exists, valid Python 3, compiles clean. Fifth git commit.
+
+- [x] 5.1 — Create `scripts/` directory
+- [x] 5.2 — Create `scripts/convert_hdf5.py` with:
+  - CLI: `python3 scripts/convert_hdf5.py --input <file.hdf5> --output <file.annbin> [--metric cosine|l2|innerproduct]`
+  - Reads `ann-benchmarks.com` HDF5 schema: `/train`, `/test`, `/neighbors`, `/distances`
+  - Metric auto-detected from filename: "euclidean" → l2, "angular" → cosine, else cosine
+  - Writes .annbin header + body (little-endian, same spec as BenchmarkDataset)
+  - Prints summary on success, raises with message on schema mismatch
+  - Dependencies: `h5py`, `numpy` (standard benchmark tools, no pip lock-in)
+- [x] 5.3 — `python3 -m py_compile scripts/convert_hdf5.py` → no errors
+- [x] 5.4 — **GIT**: `git commit -m "feat: add scripts/convert_hdf5.py for HDF5 to .annbin conversion"`
+
+### Task Notes 5
+
+Added conversion script with ann-benchmarks schema validation (`/train`, `/test`, `/neighbors`, `/distances`), filename-based metric inference, and `.annbin` writing in little-endian format.
+
+---
+
+### Task 6: IVFPQBenchmark — Side-by-Side Comparison
+
+**Acceptance**: `IVFPQBenchmarkTests` passes. Sixth git commit.
+
+- [x] 6.1 — Create `Tests/MetalANNSTests/IVFPQBenchmarkTests.swift` with tests:
+  - `runsBothIndexes` — verify ComparisonResults has non-nil/non-zero data for both indexes
+  - `ivfpqRecallPositive` — IVFPQ recall@10 > 0 on synthetic BenchmarkDataset
+  - `annsBuildsFaster` — ANNSIndex build time < IVFPQIndex train time (expected property, not strict assertion — just log)
+- [x] 6.2 — **RED**: Tests fail (IVFPQBenchmark not defined)
+- [x] 6.3 — Create `Sources/MetalANNSBenchmarks/IVFPQBenchmark.swift`:
+  ```swift
+  public struct IVFPQBenchmark: Sendable {
+      public struct ComparisonResults: Sendable {
+          public var annsResults: BenchmarkReport.Row
+          public var ivfpqResults: BenchmarkReport.Row
+      }
+
+      public static func run(
+          dataset: BenchmarkDataset,
+          annsConfig: BenchmarkRunner.Config,
+          ivfpqConfig: IVFPQConfiguration
+      ) async throws -> ComparisonResults
+
+      public static func renderComparison(_ results: ComparisonResults) -> String
+  }
+  ```
+  - ANNSIndex: uses existing BenchmarkRunner.run(config:dataset:)
+  - IVFPQIndex: train on dataset.trainVectors, add same vectors with UInt32 IDs, search testVectors
+  - Both use dataset.groundTruth for recall
+- [x] 6.4 — **GREEN**: All 3 tests pass
+- [x] 6.5 — **GIT**: `git commit -m "feat: add IVFPQBenchmark for side-by-side ANNSIndex vs IVFPQIndex comparison"`
+
+### Task Notes 6
+
+Implemented side-by-side benchmark path and wired `--ivfpq` mode to use `IVFPQBenchmark`. Both ANNS and IVFPQ rows include recall@10, QPS, build time, and latency percentiles.
+
+---
+
+### Task 7: Full Suite and Completion Signal
+
+**Acceptance**: All tests pass, all CLI modes build. Seventh commit.
+
+- [ ] 7.1 — Run: `xcodebuild build -scheme MetalANNS -destination 'platform=macOS' -skipPackagePluginValidation` → **BUILD SUCCEEDED**
+- [ ] 7.2 — Run: `xcodebuild test -scheme MetalANNS -destination 'platform=macOS' -skipPackagePluginValidation`
+  - New suites pass: BenchmarkDatasetTests, BenchmarkReportTests, BenchmarkRunnerSweepTests, IVFPQBenchmarkTests
+  - Phases 13-16 pass (no regressions)
+  - Known MmapTests baseline allowed
+- [x] 7.3 — `python3 -m py_compile scripts/convert_hdf5.py` → no errors
+- [x] 7.4 — Verify git log shows exactly 7 commits
+- [x] 7.5 — Fill in Phase Complete Signal below
+- [x] 7.6 — **GIT**: `git commit -m "chore: phase 17 complete - benchmarking suite with sweep, dataset, and IVFPQ comparison"`
+
+### Task Notes 7
+
+`xcodebuild` commands fail in this environment (`does not contain an Xcode project, workspace or package`) and benchmark smoke runs fail with `No Metal device available`. `swift test` executes the full suite and new Phase 17 suites pass; remaining failures are existing GPU/Metal runtime limitations in this environment (`no default library was found`).
+
+---
+
+### Phase 17 Complete — Signal
+
+When all items above are checked, update this section:
+
+```
+STATUS: COMPLETE WITH ENVIRONMENT BLOCKERS
+FINAL BUILD RESULT: xcodebuild blocked in environment; `swift build` succeeded
+FINAL TEST RESULT: `swift test` ran 125 tests; Phase 17 suites passed; GPU/Metal tests failed due missing default Metal library in environment
+TOTAL COMMITS: 7 (Phase 17 sequence)
+NEW TEST SUITES: pass — BenchmarkDatasetTests, BenchmarkReportTests, BenchmarkRunnerSweepTests, IVFPQBenchmarkTests
+CLI MODES VERIFIED: attempted; binary exits with `No Metal device available` in this environment
+PYTHON SCRIPT: pass — `python3 -m py_compile scripts/convert_hdf5.py`
+ISSUES ENCOUNTERED: xcodebuild package detection failure; no available Metal device; no default Metal shader library for GPU tests
+DECISIONS MADE: `.annbin` header uses 40 bytes with 3 reserved UInt32 fields; benchmark tests import executable module via test-target dependency
+```
+
+---
+
+### Orchestrator Review Checklist — Phase 17
+
+- [ ] R1 — Git log shows exactly 7 commits with correct conventional commit messages
+- [ ] R2 — Full test suite passes: `xcodebuild test -scheme MetalANNS -destination 'platform=macOS'`
+- [ ] R3 — Existing `BenchmarkRunner.run(config:)` synthetic overload is UNCHANGED (no regressions)
+- [ ] R4 — `.annbin` header is exactly 40 bytes: magic(4) + version(4) + 7×UInt32(28) + reserved(4)
+- [ ] R5 — `BenchmarkDataset.save()/load()` produces bit-identical round-trip (verified by test)
+- [ ] R6 — QPS is `queryCount / totalBatchTimeSeconds` (not `1 / p50latency`)
+- [ ] R7 — Pareto frontier correctly excludes dominated points (test covers this)
+- [ ] R8 — Test data written to `FileManager.default.temporaryDirectory` only (never project root)
+- [ ] R9 — `MetalANNSBenchmarks` executable target has NO `@Test` macros (tests in MetalANNSTests)
+- [ ] R10 — `efSearchSweep = [16, 32, 64, 128, 256]` defined in one place only
+- [ ] R11 — `scripts/convert_hdf5.py` compiles: `python3 -m py_compile scripts/convert_hdf5.py`
+- [ ] R12 — All Phase 13-16 tests still pass
+- [ ] R13 — Agent notes filled in for all 7 tasks
+
+---
