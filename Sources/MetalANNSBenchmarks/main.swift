@@ -34,7 +34,7 @@ do {
             )
         }
 
-        let config = BenchmarkRunner.Config(
+        let annsConfig = BenchmarkRunner.Config(
             vectorCount: dataset.trainVectors.count,
             dim: dataset.dimension,
             degree: 32,
@@ -44,23 +44,27 @@ do {
             metric: dataset.metric
         )
 
-        let results = try await BenchmarkRunner.run(config: config, dataset: dataset)
+        let ivfpqConfig = IVFPQConfiguration(
+            numSubspaces: 8,
+            numCentroids: 256,
+            numCoarseCentroids: min(256, max(32, dataset.trainVectors.count / 4)),
+            nprobe: 8,
+            metric: dataset.metric,
+            trainingIterations: 10
+        )
+
+        let comparison = try await IVFPQBenchmark.run(
+            dataset: dataset,
+            annsConfig: annsConfig,
+            ivfpqConfig: ivfpqConfig
+        )
+
         let report = BenchmarkReport(
-            rows: [
-                BenchmarkReport.Row(
-                    label: "ANNSIndex",
-                    recallAt10: results.recallAt10,
-                    qps: results.qps,
-                    buildTimeMs: results.buildTimeMs,
-                    p50Ms: results.queryLatencyP50Ms,
-                    p95Ms: results.queryLatencyP95Ms,
-                    p99Ms: results.queryLatencyP99Ms
-                )
-            ],
+            rows: [comparison.annsResults, comparison.ivfpqResults],
             datasetLabel: datasetPath ?? "synthetic"
         )
 
-        print(report.renderTable())
+        print(IVFPQBenchmark.renderComparison(comparison))
         if let csvOutPath {
             try report.saveCSV(to: csvOutPath)
             print("Saved CSV: \(csvOutPath)")
