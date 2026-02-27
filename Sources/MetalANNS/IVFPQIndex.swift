@@ -3,6 +3,21 @@ import Metal
 import MetalANNSCore
 
 public actor IVFPQIndex: Sendable {
+    private struct PersistedState: Codable, Sendable {
+        let capacity: Int
+        let dimension: Int
+        let config: IVFPQConfiguration
+        let coarseCentroids: [[Float]]
+        let pq: ProductQuantizer
+        let vectorCodes: [[UInt8]]
+        let invertedLists: [[UInt32]]
+        let coarseAssignments: [UInt32]
+        let idMap: IDMap
+    }
+
+    private static let persistenceMagic: [UInt8] = [0x49, 0x56, 0x46, 0x50] // "IVFP"
+    private static let persistenceVersion: UInt32 = 1
+
     private let config: IVFPQConfiguration
     private let capacity: Int
     private let dimension: Int
@@ -203,6 +218,80 @@ public actor IVFPQIndex: Sendable {
         }
         let assignmentBytes = coarseAssignments.count * MemoryLayout<UInt32>.stride
         return coarseBytes + codebookBytes + vectorCodeBytes + invertedListBytes + assignmentBytes
+    }
+
+    public func save(to path: String) async throws {
+        guard isTrained, let pq, let vectorBuffer else {
+            throw ANNSError.indexEmpty
+        }
+
+        let vectorCodes = (0..<count).map { vectorBuffer.code(at: $0) }
+        let state = PersistedState(
+            capacity: capacity,
+            dimension: dimension,
+            config: config,
+            coarseCentroids: coarseCentroids,
+            pq: pq,
+            vectorCodes: vectorCodes,
+            invertedLists: invertedLists,
+            coarseAssignments: coarseAssignments,
+            idMap: idMap
+        )
+
+        let payload = try JSONEncoder().encode(state)
+        var data = Data()
+        data.append(contentsOf: Self.persistenceMagic)
+        Self.appendUInt32(Self.persistenceVersion, to: &data)
+        Self.appendUInt32(UInt32(payload.count), to: &data)
+        data.append(payload)
+
+        let url = URL(fileURLWithPath: path)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try data.write(to: url, options: .atomic)
+    }
+
+    public static func load(from path: String) async throws -> IVFPQIndex {
+        let url = URL(fileURLWithPath: path)
+        let data = try Data(contentsOf: url)
+        guard data.count >= 12 else {
+            throw ANNSError.corruptFile("IVFPQ persistence payload is too small")
+        }
+
+        var cursor = 0
+        let magic = Array(data[cursor..<cursor + 4])
+        cursor += 4
+        guard magic == persistenceMagic else {
+            throw ANNSError.corruptFile("Invalid IVFPQ persistence magic")
+        }
+
+        let version = try readUInt32(from: data, cursor: &cursor)
+        guard version == persistenceVersion else {
+            throw ANNSError.corruptFile("Unsupported IVFPQ persistence version \(version)")
+        }
+
+        let payloadLength = Int(try readUInt32(from: data, cursor: &cursor))
+        guard payloadLength >= 0, cursor + payloadLength <= data.count else {
+            throw ANNSError.corruptFile("Invalid IVFPQ persistence payload length")
+        }
+
+        let payload = data[cursor..<cursor + payloadLength]
+        let state: PersistedState
+        do {
+            state = try JSONDecoder().decode(PersistedState.self, from: payload)
+        } catch {
+            throw ANNSError.corruptFile("Invalid IVFPQ persistence JSON payload")
+        }
+
+        let index = try IVFPQIndex(
+            capacity: state.capacity,
+            dimension: state.dimension,
+            config: state.config
+        )
+        try await index.restore(from: state)
+        return index
     }
 
     func gpuAvailable() -> Bool {
@@ -459,6 +548,41 @@ public actor IVFPQIndex: Sendable {
             }
         }
         return flattened
+    }
+
+    private func restore(from state: PersistedState) throws {
+        let rebuiltBuffer = try PQVectorBuffer(capacity: state.capacity, dim: state.dimension, pq: state.pq)
+        for (index, code) in state.vectorCodes.enumerated() {
+            try rebuiltBuffer.insertEncoded(code: code, at: index)
+        }
+
+        self.coarseCentroids = state.coarseCentroids
+        self.pq = state.pq
+        self.flattenedCodebooks = flattenCodebooks(from: state.pq)
+        self.vectorBuffer = rebuiltBuffer
+        self.invertedLists = state.invertedLists
+        self.coarseAssignments = state.coarseAssignments
+        self.idMap = state.idMap
+        self.isTrained = true
+    }
+
+    private static func appendUInt32(_ value: UInt32, to data: inout Data) {
+        data.append(UInt8(truncatingIfNeeded: value))
+        data.append(UInt8(truncatingIfNeeded: value >> 8))
+        data.append(UInt8(truncatingIfNeeded: value >> 16))
+        data.append(UInt8(truncatingIfNeeded: value >> 24))
+    }
+
+    private static func readUInt32(from data: Data, cursor: inout Int) throws -> UInt32 {
+        guard cursor + 4 <= data.count else {
+            throw ANNSError.corruptFile("Unexpected EOF in IVFPQ persistence data")
+        }
+        let b0 = UInt32(data[cursor])
+        let b1 = UInt32(data[cursor + 1]) << 8
+        let b2 = UInt32(data[cursor + 2]) << 16
+        let b3 = UInt32(data[cursor + 3]) << 24
+        cursor += 4
+        return b0 | b1 | b2 | b3
     }
 
     private func makeDistanceTable(
