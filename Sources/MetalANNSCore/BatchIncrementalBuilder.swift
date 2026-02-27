@@ -40,113 +40,20 @@ public enum BatchIncrementalBuilder {
             throw ANNSError.searchFailed("Entry point is out of bounds")
         }
 
-        let graphDegree = graph.degree
-        var newNodeNeighborLists: [(internalID: UInt32, neighbors: [(nodeID: UInt32, distance: Float)])] = []
-        newNodeNeighborLists.reserveCapacity(newVectors.count)
-
         for (offset, vector) in newVectors.enumerated() {
             guard vector.count == vectorStorage.dim else {
                 throw ANNSError.dimensionMismatch(expected: vectorStorage.dim, got: vector.count)
             }
-
             let internalID = startSlot + offset
-            let nearest = nearestNeighbors(
-                to: vector,
-                graph: graph,
+            try IncrementalBuilder.insert(
+                vector: vector,
+                at: internalID,
+                into: graph,
                 vectors: vectorStorage,
-                entryPoint: Int(entryPoint),
-                degree: graphDegree,
-                metric: metric
+                entryPoint: entryPoint,
+                metric: metric,
+                degree: degree
             )
-
-            var neighborIDs = Array(repeating: UInt32.max, count: graphDegree)
-            var neighborDistances = Array(repeating: Float.greatestFiniteMagnitude, count: graphDegree)
-            for slot in 0..<min(graphDegree, nearest.count) {
-                neighborIDs[slot] = nearest[slot].nodeID
-                neighborDistances[slot] = nearest[slot].distance
-            }
-
-            try graph.setNeighbors(of: internalID, ids: neighborIDs, distances: neighborDistances)
-            if graph.nodeCount < internalID + 1 {
-                graph.setCount(internalID + 1)
-            }
-
-            newNodeNeighborLists.append((UInt32(internalID), nearest))
-        }
-
-        for (offset, newNode) in newNodeNeighborLists.enumerated() {
-            let newVector = newVectors[offset]
-            let newNodeID = newNode.internalID
-            var attached = false
-
-            for neighbor in newNode.neighbors {
-                let neighborIndex = Int(neighbor.nodeID)
-                if neighborIndex < 0 || neighborIndex >= graph.nodeCount {
-                    continue
-                }
-
-                let existingIDs = graph.neighborIDs(of: neighborIndex)
-                var existingDistances = graph.neighborDistances(of: neighborIndex)
-                if existingIDs.contains(newNodeID) {
-                    attached = true
-                    continue
-                }
-
-                let candidateDistance = SIMDDistance.distance(
-                    newVector,
-                    vectorStorage.vector(at: neighborIndex),
-                    metric: metric
-                )
-
-                if let replaceIndex = worstNeighborIndex(in: existingDistances),
-                   candidateDistance < existingDistances[replaceIndex] {
-                    var updatedIDs = existingIDs
-                    updatedIDs[replaceIndex] = newNodeID
-                    existingDistances[replaceIndex] = candidateDistance
-
-                    let sorted = zip(updatedIDs, existingDistances).sorted { lhs, rhs in
-                        lhs.1 < rhs.1
-                    }
-                    try graph.setNeighbors(
-                        of: neighborIndex,
-                        ids: sorted.map(\.0),
-                        distances: sorted.map(\.1)
-                    )
-                    attached = true
-                }
-            }
-
-            if !attached {
-                let fallbackIndex = Int(entryPoint)
-                guard fallbackIndex >= 0 && fallbackIndex < graph.nodeCount else {
-                    throw ANNSError.searchFailed("Fallback index out of bounds")
-                }
-
-                let existingIDs = graph.neighborIDs(of: fallbackIndex)
-                if !existingIDs.contains(newNodeID) {
-                    var existingDistances = graph.neighborDistances(of: fallbackIndex)
-                    if let replaceIndex = worstNeighborIndex(in: existingDistances) {
-                        let fallbackDistance = SIMDDistance.distance(
-                            newVector,
-                            vectorStorage.vector(at: fallbackIndex),
-                            metric: metric
-                        )
-
-                        var updatedIDs = existingIDs
-                        updatedIDs[replaceIndex] = newNodeID
-                        existingDistances[replaceIndex] = fallbackDistance
-
-                        let sorted = zip(updatedIDs, existingDistances).sorted { lhs, rhs in
-                            lhs.1 < rhs.1
-                        }
-                        try graph.setNeighbors(
-                            of: fallbackIndex,
-                            ids: sorted.map(\.0),
-                            distances: sorted.map(\.1)
-                        )
-                    }
-                }
-            }
         }
 
         if graph.nodeCount < startSlot + newVectors.count {

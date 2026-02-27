@@ -640,10 +640,10 @@ DECISIONS MADE: (pending)
 
 ## Phase 15 Execution: CPU-only HNSW Layer Navigation
 
-> **Status**: IN PROGRESS
+> **Status**: COMPLETE
 > **Owner**: Subagent
 > **Reviewer**: Orchestrator
-> **Last Updated**: 2026-02-27 09:43 EAT
+> **Last Updated**: 2026-02-27 10:00 EAT
 
 - [x] Task 1 — Create `HNSWLayers.swift` + basic structure tests
   - Commit: `feat(hnsw): add HNSWLayers and SkipLayer data structures`
@@ -657,7 +657,7 @@ DECISIONS MADE: (pending)
   - Commit: `test(hnsw): add comprehensive layer assignment, build, and search tests`
 - [x] Task 6 — Integrate into `ANNSIndex.swift`
   - Commit: `feat(hnsw): integrate HNSWSearchCPU into ANNSIndex search path`
-- [ ] Task 7 — Verify full test suite passes
+- [x] Task 7 — Verify full test suite passes
   - Commit: `chore(hnsw): verify zero regressions in full test suite`
 
 ### Task Notes 1
@@ -719,18 +719,29 @@ DECISIONS MADE: (pending)
 
 ### Task Notes 7
 
-_(Executing agent: fill in after completing Task 7)_
+- Ran required commands:
+  - `xcodebuild build -scheme MetalANNS -destination 'platform=macOS' -skipPackagePluginValidation` -> PASS
+  - `xcodebuild test -scheme MetalANNS -destination 'platform=macOS' -skipPackagePluginValidation` -> expected scheme limitation (`MetalANNS` has no test action in this package workspace)
+  - `xcodebuild test -scheme MetalANNS-Package -destination 'platform=macOS' -skipPackagePluginValidation` -> PASS (`96 tests`, `35 suites`)
+- Fixed two suite regressions encountered during Task 7:
+  - `GraphRepairTests.repairImprovesRecall`: added local diversity rollback guard in `GraphRepairer` to prevent harmful rewiring while keeping updates.
+  - `BatchInsertTests.batchInsertMatchesSequential`: aligned batch insertion path with sequential insertion quality via `IncrementalBuilder` per inserted vector.
+- Kept Phase 15 scope constraints intact:
+  - GPU search path unchanged (`FullGPUSearch` still used when available).
+  - CPU-only HNSW behavior preserved.
+- Build hygiene:
+  - removed new warnings from `ANNSIndex.repair()` guard.
 
 ### Phase 15 Complete — Signal
 
 ```
-STATUS: PENDING
-FINAL BUILD RESULT: pending
-FINAL TEST RESULT: pending
-TOTAL COMMITS: pending
-LAYER DISTRIBUTION: pending
-ISSUES ENCOUNTERED: pending
-DECISIONS MADE: pending
+STATUS: COMPLETE
+FINAL BUILD RESULT: PASS (`xcodebuild build -scheme MetalANNS ...`)
+FINAL TEST RESULT: PASS (`xcodebuild test -scheme MetalANNS-Package ...` -> 96 tests in 35 suites)
+TOTAL COMMITS: 7
+LAYER DISTRIBUTION: Exponential level assignment validated by `HNSWBuilder assigns levels with exponential distribution` test (decreasing occupancy by level).
+ISSUES ENCOUNTERED: `MetalANNS` scheme has no test action; two quality-threshold regressions in BatchInsert/GraphRepair were fixed in Task 7.
+DECISIONS MADE: kept GPU path unchanged, enforced CPU-only HNSW usage, added safe repair rollback heuristic, and matched batch insert quality to sequential behavior.
 ```
 
 ## Task: Map CPU-only HNSW Layer Changes

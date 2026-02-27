@@ -1,3 +1,4 @@
+import Foundation
 import Metal
 import Testing
 @testable import MetalANNSCore

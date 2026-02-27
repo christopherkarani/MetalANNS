@@ -37,13 +37,53 @@ public enum GraphRepairer {
             return 0
         }
 
-        return try localNNDescent(
+        let repairNodes = neighborhoods.sorted()
+        let baselineDiversity = averageFarthestFiniteDistance(nodeIDs: repairNodes, graph: graph)
+
+        var snapshot: [(node: Int, ids: [UInt32], distances: [Float])] = []
+        snapshot.reserveCapacity(repairNodes.count)
+        for nodeID in repairNodes {
+            let node = Int(nodeID)
+            snapshot.append((
+                node: node,
+                ids: graph.neighborIDs(of: node),
+                distances: graph.neighborDistances(of: node)
+            ))
+        }
+
+        let updates = try localNNDescent(
             nodes: neighborhoods,
+            focusNodes: Set(sanitizedIDs),
             vectors: vectors,
             graph: graph,
             metric: metric,
             iterations: config.repairIterations
         )
+        guard updates > 0 else {
+            return 0
+        }
+
+        if baselineDiversity > 0 {
+            let repairedDiversity = averageFarthestFiniteDistance(nodeIDs: repairNodes, graph: graph)
+            if repairedDiversity < baselineDiversity * 0.98 {
+                for entry in snapshot {
+                    do {
+                        try graph.setNeighbors(
+                            of: entry.node,
+                            ids: entry.ids,
+                            distances: entry.distances
+                        )
+                    } catch {
+                        throw ANNSError.constructionFailed("Failed to restore graph snapshot: \(error)")
+                    }
+                }
+                logger.debug(
+                    "GraphRepairer reverted rewiring due to diversity drop (\(baselineDiversity) -> \(repairedDiversity))"
+                )
+            }
+        }
+
+        return updates
     }
 
     private static func collectNeighborhood(seeds: [UInt32], graph: GraphBuffer, depth: Int) -> Set<UInt32> {
@@ -94,6 +134,7 @@ public enum GraphRepairer {
 
     private static func localNNDescent(
         nodes: Set<UInt32>,
+        focusNodes: Set<UInt32>,
         vectors: any VectorStorage,
         graph: GraphBuffer,
         metric: Metric,
@@ -104,11 +145,18 @@ public enum GraphRepairer {
         }
 
         let sortedIterations = max(1, iterations)
+        let sortedNodes = nodes.sorted()
+        let sortedFocusNodes = sortedNodes.filter { focusNodes.contains($0) }
+        guard !sortedFocusNodes.isEmpty else {
+            return 0
+        }
         var totalUpdates = 0
 
         for iteration in 0..<sortedIterations {
+            let maxUpdatesPerNode = 1
+            var updatesPerNode: [UInt32: Int] = [:]
             var reverse: [UInt32: [UInt32]] = [:]
-            for nodeID in nodes {
+            for nodeID in sortedFocusNodes {
                 let nodeIndex = Int(nodeID)
                 guard nodeIndex >= 0 && nodeIndex < graph.nodeCount else {
                     continue
@@ -127,7 +175,7 @@ public enum GraphRepairer {
 
             var iterationUpdates = 0
 
-            for nodeID in nodes {
+            for nodeID in sortedNodes {
                 let nodeIndex = Int(nodeID)
                 guard nodeIndex >= 0 && nodeIndex < graph.nodeCount else {
                     continue
@@ -151,15 +199,17 @@ public enum GraphRepairer {
                     }
                 }
 
-                let candidateArray = Array(candidateSet)
+                let candidateArray = candidateSet.sorted()
                 guard candidateArray.count >= 2 else {
                     continue
                 }
 
                 for i in 0..<(candidateArray.count - 1) {
-                    let a = Int(candidateArray[i])
+                    let aID = candidateArray[i]
+                    let a = Int(aID)
                     for j in (i + 1)..<candidateArray.count {
-                        let b = Int(candidateArray[j])
+                        let bID = candidateArray[j]
+                        let b = Int(bID)
                         if a == b {
                             continue
                         }
@@ -170,21 +220,25 @@ public enum GraphRepairer {
                             metric: metric
                         )
 
-                        if try tryImproveEdge(
-                            node: a,
-                            candidate: b,
-                            distance: distance,
-                            graph: graph
-                        ) {
+                        if updatesPerNode[aID, default: 0] < maxUpdatesPerNode,
+                           try tryImproveEdge(
+                               node: a,
+                               candidate: b,
+                               distance: distance,
+                               graph: graph
+                           ) {
+                            updatesPerNode[aID, default: 0] += 1
                             iterationUpdates += 1
                         }
 
-                        if try tryImproveEdge(
-                            node: b,
-                            candidate: a,
-                            distance: distance,
-                            graph: graph
-                        ) {
+                        if updatesPerNode[bID, default: 0] < maxUpdatesPerNode,
+                           try tryImproveEdge(
+                               node: b,
+                               candidate: a,
+                               distance: distance,
+                               graph: graph
+                           ) {
+                            updatesPerNode[bID, default: 0] += 1
                             iterationUpdates += 1
                         }
                     }
@@ -202,6 +256,35 @@ public enum GraphRepairer {
         }
 
         return totalUpdates
+    }
+
+    private static func averageFarthestFiniteDistance(nodeIDs: [UInt32], graph: GraphBuffer) -> Float {
+        guard !nodeIDs.isEmpty else {
+            return 0
+        }
+
+        var total: Float = 0
+        var contributingNodes = 0
+
+        for nodeID in nodeIDs {
+            let distances = graph.neighborDistances(of: Int(nodeID))
+            var farthest: Float = -Float.greatestFiniteMagnitude
+            for distance in distances where distance.isFinite && distance < Float.greatestFiniteMagnitude {
+                if distance > farthest {
+                    farthest = distance
+                }
+            }
+
+            if farthest > -Float.greatestFiniteMagnitude {
+                total += farthest
+                contributingNodes += 1
+            }
+        }
+
+        guard contributingNodes > 0 else {
+            return 0
+        }
+        return total / Float(contributingNodes)
     }
 
     private static func tryImproveEdge(

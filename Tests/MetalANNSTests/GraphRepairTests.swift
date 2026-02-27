@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 import MetalANNS
 @testable import MetalANNSCore
@@ -59,7 +60,10 @@ struct GraphRepairTests {
 
         let initialVectors = (0..<initialCount).map { i in
             (0..<dim).map { d in
-                sin(Float(i * dim + d) * 0.173) + cos(Float(i * dim + d) * 0.071)
+                let position = Float(i * dim + d)
+                let lhs = sin(position * 0.173)
+                let rhs = cos(position * 0.071)
+                return lhs + rhs
             }
         }
 

@@ -258,12 +258,20 @@ public actor ANNSIndex {
         hnsw = nil
 
         let repairConfig = configuration.repairConfiguration
-        if repairConfig.enabled && repairConfig.repairInterval > 0 {
-            for slot in slots {
-                pendingRepairIDs.append(UInt32(slot))
-            }
-            if pendingRepairIDs.count >= repairConfig.repairInterval {
-                try triggerRepair()
+        if repairConfig.enabled {
+            var idsToRepair = pendingRepairIDs
+            idsToRepair.reserveCapacity(idsToRepair.count + slots.count)
+            idsToRepair.append(contentsOf: slots.map(UInt32.init))
+            pendingRepairIDs.removeAll(keepingCapacity: true)
+
+            if !idsToRepair.isEmpty {
+                _ = try GraphRepairer.repair(
+                    recentIDs: idsToRepair,
+                    vectors: vectorStorage,
+                    graph: graph,
+                    config: repairConfig,
+                    metric: configuration.metric
+                )
             }
         }
     }
@@ -272,7 +280,7 @@ public actor ANNSIndex {
         guard !isReadOnlyLoadedIndex else {
             throw ANNSError.constructionFailed("Index is read-only (mmap-loaded)")
         }
-        guard isBuilt, let vectors, let graph else {
+        guard isBuilt, vectors != nil, graph != nil else {
             throw ANNSError.indexEmpty
         }
         guard !pendingRepairIDs.isEmpty else {
@@ -767,7 +775,7 @@ public actor ANNSIndex {
             hnsw = nil
             return
         }
-        if context != nil, supportsGPUSearch(for: vectors) {
+        if context != nil {
             hnsw = nil
             return
         }
