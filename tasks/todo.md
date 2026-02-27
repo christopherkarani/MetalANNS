@@ -337,3 +337,378 @@ DECISIONS MADE: (list Task 3.6 and 5.6 decisions)
   - Full xcodebuild run reports the known baseline `MmapTests` failure (`Index capacity exceeded; rebuild with larger capacity`) and no additional regressions.
 
 > Last Updated: 2026-02-25 (Tasks 31-35 implemented and committed)
+
+---
+
+## Phase 15: CPU-only HNSW Layer Navigation
+
+> **Status**: NOT STARTED
+> **Owner**: Subagent
+> **Reviewer**: Orchestrator
+> **Last Updated**: —
+
+### Overview
+
+Add hierarchical skip-list navigation (HNSW) to CPU/Accelerate backend to reduce search complexity from O(N) to O(log N). Layer 0 IS the existing NN-Descent graph (no duplication). GPU search remains flat multi-start (unchanged). This phase requires Swift 6.2 typed throws from Phase 13 and repaired graphs benefit from Phase 14.
+
+### Task Checklist
+
+- [ ] Task 1 — Add `HNSWConfiguration` struct and tests
+- [ ] Task 2 — Implement `HNSWLayers` data structures (SkipLayer + HNSWLayers)
+- [ ] Task 3 — Implement `HNSWBuilder` with probabilistic level assignment
+- [ ] Task 4 — Implement `HNSWSearchCPU` with layer-by-layer descent
+- [ ] Task 5 — Integrate HNSW into `ANNSIndex` (CPU backend only, GPU unchanged)
+- [ ] Task 6 — Add comprehensive `HNSWTests` suite (build, search, recall, layer distribution)
+- [ ] Task 7 — Run full suite and mark completion signal
+
+### Task 1: Add HNSWConfiguration struct and tests
+
+**Acceptance**: `HNSWConfigurationTests` suite passes. First git commit.
+
+- [ ] 1.1 — Create `Tests/MetalANNSTests/HNSWConfigurationTests.swift` with tests:
+  - `defaultConfiguration` — verify defaults: enabled=true, M=5, maxLayers=16, mL=1/ln(2)≈1.443
+  - `configurationClamping` — verify M clamped 1...32, maxLayers clamped 2...20
+  - `codableRoundTrip` — encode/decode HNSWConfiguration
+- [ ] 1.2 — **RED**: Tests fail (type not defined)
+- [ ] 1.3 — Create `Sources/MetalANNSCore/HNSWConfiguration.swift`:
+  - `public struct HNSWConfiguration: Sendable, Codable`
+  - Properties: `enabled: Bool = true`, `M: Int = 5` (max connections per layer), `maxLayers: Int = 16`, `mL: Double = 1.0 / ln(2.0)` (≈1.443)
+  - Implement `Codable` with clamping in `init(from decoder:)`
+- [ ] 1.4 — **GREEN**: All 3 tests pass
+- [ ] 1.5 — Add `hnsw: HNSWConfiguration` to `IndexConfiguration` with backward-compatible decoding
+- [ ] 1.6 — **REGRESSION**: `ConfigurationTests` (Phase 13) and `IndexConfigurationTests` still pass
+- [ ] 1.7 — **GIT**: `git commit -m "feat: add HNSWConfiguration struct with tests and IndexConfiguration integration"`
+
+### Task Notes 1
+
+_(Executing agent: fill in after completing Task 1)_
+
+---
+
+### Task 2: Implement HNSWLayers data structures
+
+**Acceptance**: `HNSWLayersStructureTests` passes. Second git commit.
+
+- [ ] 2.1 — Create `Tests/MetalANNSTests/HNSWLayersStructureTests.swift` with tests:
+  - `skiplayerInit` — create SkipLayer, verify empty adjacency list
+  - `hnswlayersCreation` — create HNSWLayers with 3 layers, verify layer count
+  - `nodeToLayerMapping` — verify nodeToLayerIndex/layerIndexToNode consistency
+- [ ] 2.2 — **RED**: Tests fail (types not defined)
+- [ ] 2.3 — Create `Sources/MetalANNSCore/HNSWLayers.swift`:
+  ```swift
+  public struct SkipLayer: Sendable, Codable {
+      public var nodeToLayerIndex: [UInt32: UInt32]  // graph node ID → layer-local index
+      public var layerIndexToNode: [UInt32]          // layer-local index → graph node ID
+      public var adjacency: [[UInt32]]               // adjacency[i] = neighbor indices in this layer
+
+      public init() {
+          self.nodeToLayerIndex = [:]
+          self.layerIndexToNode = []
+          self.adjacency = []
+      }
+  }
+
+  public final class HNSWLayers: Sendable, Codable {
+      public let layers: [SkipLayer]
+      public let maxLayer: Int
+      public let mL: Double
+      public let entryPoint: UInt32
+
+      public init(layers: [SkipLayer], maxLayer: Int, mL: Double, entryPoint: UInt32) {
+          self.layers = layers
+          self.maxLayer = maxLayer
+          self.mL = mL
+          self.entryPoint = entryPoint
+      }
+  }
+  ```
+- [ ] 2.4 — **GREEN**: All 3 structure tests pass
+- [ ] 2.5 — **GIT**: `git commit -m "feat: implement HNSWLayers and SkipLayer data structures"`
+
+### Task Notes 2
+
+_(Executing agent: fill in after completing Task 2)_
+
+---
+
+### Task 3: Implement HNSWBuilder with probabilistic level assignment
+
+**Acceptance**: `HNSWBuilderTests` passes with layer distribution verification. Third git commit.
+
+- [ ] 3.1 — Create `Tests/MetalANNSTests/HNSWBuilderTests.swift` with tests:
+  - `buildLayers` — build HNSW from 1000-node graph, verify no errors
+  - `levelDistribution` — verify ~63% nodes at layer 0, ~23% at layer 1, ~8.6% at layer 2 (exponential decay)
+  - `layerConnectivity` — verify each skip layer has proper adjacency (non-zero connections)
+  - `layerIndexMapping` — verify nodeToLayerIndex/layerIndexToNode are consistent and complete
+- [ ] 3.2 — **RED**: Tests fail (HNSWBuilder not defined)
+- [ ] 3.3 — Create `Sources/MetalANNSCore/HNSWBuilder.swift`:
+  ```swift
+  public enum HNSWBuilder: Sendable {
+      public static func buildLayers(
+          from graph: GraphBuffer,
+          vectors: any VectorStorage,
+          nodeCount: Int,
+          config: HNSWConfiguration,
+          metric: Metric
+      ) throws(ANNSError) -> HNSWLayers
+  }
+  ```
+  - Helper `assignLevel(mL: Double) -> Int` — return `Int(floor(-log(random()) * mL))`, clamped to [0, maxLayers-1]
+  - Helper `buildSkipLayer(...)` — for each layer L > 0, connect nodes within that layer using nearest-neighbor search
+  - For each node assigned to layer L:
+    1. Find its M nearest neighbors within the same layer
+    2. Store edges in SkipLayer.adjacency
+    3. Update nodeToLayerIndex/layerIndexToNode mappings
+  - Use `SIMDDistance.distance()` for all distance computations
+  - Return HNSWLayers with all layers, maxLayer, mL, and entry point (highest layer node or 0 if all single-layer)
+- [ ] 3.4 — **GREEN**: All 4 builder tests pass
+- [ ] 3.5 — **DISTRIBUTION VERIFY**: Run builder test 10 times, average layer 0 count ≈ 63%, layer 1 ≈ 23%, layer 2 ≈ 8.6%
+- [ ] 3.6 — **GIT**: `git commit -m "feat: implement HNSWBuilder with exponential level assignment and skip layer construction"`
+
+### Task Notes 3
+
+_(Executing agent: fill in after completing Task 3)_
+
+---
+
+### Task 4: Implement HNSWSearchCPU with layer-by-layer descent
+
+**Acceptance**: `HNSWSearchCPUTests` passes with recall comparison. Fourth git commit.
+
+- [ ] 4.1 — Create `Tests/MetalANNSTests/HNSWSearchCPUTests.swift` with tests:
+  - `hierarchicalSearch` — search 100 queries against 1000-node index, verify top-1 matches exist
+  - `recallVsFlatSearch` — compare HNSW recall@10 vs flat beam search (should be within 1-2%)
+  - `layerDescentCorrectness` — verify search correctly descends through layers (spot-check some queries)
+  - `entryPointUsage` — verify search uses HNSWLayers.entryPoint
+- [ ] 4.2 — **RED**: Tests fail (HNSWSearchCPU not defined)
+- [ ] 4.3 — Create `Sources/MetalANNSCore/HNSWSearchCPU.swift`:
+  ```swift
+  public enum HNSWSearchCPU: Sendable {
+      public static func search(
+          query: [Float],
+          hnsw: HNSWLayers,
+          vectors: any VectorStorage,
+          graph: GraphBuffer,
+          k: Int,
+          ef: Int,
+          metric: Metric
+      ) -> [SearchResult]
+  }
+  ```
+  - Main search function:
+    1. Start at entry point
+    2. For each layer from maxLayer down to 1 (skip layers only):
+       - Run `greedySearchLayer(...)` to find nearest node in that layer
+    3. At layer 0, switch to beam search using GraphBuffer (the NN-Descent graph)
+    4. Return top-k results from beam search
+  - Helper `greedySearchLayer(...)`:
+    - Start with entry point's nearest neighbor in current layer
+    - Greedy walk: while improving, move to nearest unvisited neighbor
+    - Stop when no improvement
+    - Return the best node found in this layer
+  - Layer 0 beam search: use existing `BeamSearch` logic (ef = max(k, ef param))
+  - Use `SIMDDistance.distance()` for all distance computations
+- [ ] 4.4 — **GREEN**: All 4 search tests pass (including recall@10 > 0.93 vs flat search)
+- [ ] 4.5 — **GIT**: `git commit -m "feat: implement HNSWSearchCPU with layer-by-layer descent and beam search at layer 0"`
+
+### Task Notes 4
+
+_(Executing agent: fill in after completing Task 4)_
+
+---
+
+### Task 5: Integrate HNSW into ANNSIndex (CPU backend only)
+
+**Acceptance**: `ANNSIndexHNSWIntegrationTests` passes. Fifth git commit.
+
+- [ ] 5.1 — Create `Tests/MetalANNSTests/ANNSIndexHNSWIntegrationTests.swift` with tests:
+  - `buildHNSWAutomatically` — build index on CPU backend with HNSW enabled, verify hnsw property is non-nil
+  - `gpuBackendIgnoresHNSW` — build on GPU backend, verify hnsw is nil (unchanged)
+  - `searchUsesHNSWOnCPU` — build on CPU, search, verify results valid
+  - `persistenceIncludesHNSW` — save index with HNSW, reload, verify HNSW reloaded
+- [ ] 5.2 — **RED**: Tests fail (integration not implemented)
+- [ ] 5.3 — Modify `Sources/MetalANNS/ANNSIndex.swift`:
+  - Add `private var hnsw: HNSWLayers?` property
+  - In `build(...)` method, after NN-Descent completes:
+    - If CPU backend AND `configuration.hnsw.enabled`:
+      - Call `HNSWBuilder.buildLayers(from: graph, vectors: vectors, nodeCount: nodeCount, config: configuration.hnsw, metric: configuration.metric)`
+      - Store result in `self.hnsw`
+    - If GPU backend: set `hnsw = nil`
+  - In `search(...)` method for CPU backend:
+    - If `hnsw != nil`: use `HNSWSearchCPU.search(...)`
+    - Otherwise: use existing beam search (GPU or disabled HNSW)
+  - In `batchSearch(...)`: update similarly
+  - In `rangeSearch(...)`: update similarly if CPU backend
+  - Update `compact(...)` to rebuild HNSW after compaction if needed
+- [ ] 5.4 — Modify `Sources/MetalANNSCore/IndexSerializer.swift`:
+  - Add HNSW section to v4 format (or new v5 format if preferred)
+  - Include HNSWLayers (all skip layers) in serialization
+  - Load HNSW on index load
+- [ ] 5.5 — **GREEN**: All 4 integration tests pass
+- [ ] 5.6 — **REGRESSION**: All Phase 13-14 tests still pass, GPU search unchanged
+- [ ] 5.7 — **GIT**: `git commit -m "feat: integrate HNSWBuilder and HNSWSearchCPU into ANNSIndex CPU path"`
+
+### Task Notes 5
+
+_(Executing agent: fill in after completing Task 5)_
+
+---
+
+### Task 6: Add comprehensive HNSWTests suite
+
+**Acceptance**: Full HNSW test suite passes (12+ tests). Sixth git commit.
+
+- [ ] 6.1 — Create `Tests/MetalANNSTests/HNSWTests.swift` combining/extending earlier tests:
+  - Configuration tests (Task 1)
+  - Structure tests (Task 2)
+  - Builder tests (Task 3) with layer distribution verification
+  - Search tests (Task 4) with recall verification
+  - Memory overhead measurement: HNSW size should be < 30% of base graph size
+  - Serialization round-trip: save HNSW layers, reload, verify search still works
+- [ ] 6.2 — **RED**: Some tests fail if missing implementations
+- [ ] 6.3 — **GREEN**: All tests pass
+- [ ] 6.4 — **PERFORMANCE CHECK**: Measure search time on 100K-node index:
+  - Expected: ~5-10ms with HNSW vs ~50-100ms flat beam search
+  - Document speedup factor in test notes
+- [ ] 6.5 — **COMPATIBILITY**: Verify Phase 13 (@concurrent), Phase 14 (graph repair), Phase 15 (HNSW) all coexist without conflicts
+- [ ] 6.6 — **GIT**: `git commit -m "feat: add comprehensive HNSWTests suite with recall and performance validation"`
+
+### Task Notes 6
+
+_(Executing agent: fill in after completing Task 6)_
+
+---
+
+### Task 7: Run full suite and mark completion signal
+
+**Acceptance**: Full test suite passes. Final commit.
+
+- [ ] 7.1 — Run: `xcodebuild build -scheme MetalANNS -destination 'platform=macOS' -skipPackagePluginValidation`
+  - Expected: **BUILD SUCCEEDED**
+- [ ] 7.2 — Run: `xcodebuild test -scheme MetalANNS -destination 'platform=macOS' -skipPackagePluginValidation`
+  - Expected: All tests pass except known baseline `MmapTests` failure (if present)
+  - Document any new test failures with full error output
+- [ ] 7.3 — Verify git log shows exactly 7 commits with conventional commit messages
+- [ ] 7.4 — Update Phase Complete Signal section below with results
+- [ ] 7.5 — **GIT**: `git commit -m "chore: phase 15 complete - CPU HNSW layer navigation"`
+
+### Phase 15 Complete — Signal
+
+When all items above are checked, update this section:
+
+```
+STATUS: PENDING
+FINAL BUILD RESULT: (pending — await agent completion)
+FINAL TEST RESULT: (pending — await agent completion)
+TOTAL COMMITS: (pending — await agent completion)
+LAYER DISTRIBUTION: (pending — verify exponential decay: ~63% L0, ~23% L1, ~8.6% L2)
+SEARCH SPEEDUP: (pending — measure 100K-node HNSW vs flat beam search)
+ISSUES ENCOUNTERED: (pending)
+DECISIONS MADE: (pending)
+```
+
+---
+
+### Orchestrator Review Checklist — Phase 15
+
+- [ ] R1 — Git log shows exactly 7 commits with correct conventional commit messages
+- [ ] R2 — Full test suite passes: `xcodebuild test -scheme MetalANNS -destination 'platform=macOS'`
+- [ ] R3 — `HNSWConfiguration` struct added to `IndexConfiguration` with backward-compatible Codable
+- [ ] R4 — `HNSWLayers` and `SkipLayer` are `Sendable` and `Codable` for persistence
+- [ ] R5 — `HNSWBuilder.buildLayers()` correctly assigns levels via `floor(-ln(random()) * mL)` and clamping to [0, maxLayers-1]
+- [ ] R6 — Layer distribution test confirms ~63% at layer 0, ~23% layer 1, ~8.6% layer 2 (exponential decay)
+- [ ] R7 — `HNSWSearchCPU.search()` performs layer-by-layer descent and switches to beam search at layer 0
+- [ ] R8 — ANNSIndex only uses HNSW on CPU backend; GPU search unchanged
+- [ ] R9 — HNSW is included in index serialization (v4 or v5 format) and reloaded correctly
+- [ ] R10 — Recall@10 comparison shows HNSW within 1-2% of flat beam search (acceptable loss for O(log N) speedup)
+- [ ] R11 — Memory overhead < 30% of base graph (measured and documented in Task 6.4)
+- [ ] R12 — All Phase 13 (@concurrent) and Phase 14 (graph repair) tests still pass (no regressions)
+- [ ] R13 — Agent notes filled in for all 7 tasks with any blockers, decisions, or surprises
+
+---
+
+## Task: Map CPU-only HNSW Layer Changes
+
+- [ ] 1 — Inventory `IndexConfiguration` encode/decode/usage sites for HNSW and related properties.
+- [ ] 2 — Identify every `ANNSIndex` build/search/compact/load path where HNSW or internal state is set or reset.
+- [ ] 3 — Spot tests asserting configuration defaults or search behavior that might require updates when CPU-only HNSW layers are introduced.
+- [ ] 4 — Record likely regressions from adding the CPU-only HNSW layers.
+
+> Last Updated: —
+
+---
+
+## Phase 15 Execution: CPU-only HNSW Layer Navigation
+
+> **Status**: IN PROGRESS
+> **Owner**: Subagent
+> **Reviewer**: Orchestrator
+> **Last Updated**: 2026-02-27 09:14 EAT
+
+- [x] Task 1 — Create `HNSWLayers.swift` + basic structure tests
+  - Commit: `feat(hnsw): add HNSWLayers and SkipLayer data structures`
+- [ ] Task 2 — Create `HNSWBuilder.swift` + level assignment and layer building
+  - Commit: `feat(hnsw): implement HNSWBuilder with probabilistic level assignment`
+- [ ] Task 3 — Create `HNSWSearchCPU.swift` + layer-by-layer descent
+  - Commit: `feat(hnsw): implement HNSWSearchCPU with layer descent and beam search`
+- [ ] Task 4 — Create `HNSWConfiguration.swift`
+  - Commit: `feat(hnsw): add HNSWConfiguration with sensible defaults`
+- [ ] Task 5 — Write comprehensive test suite (`HNSWTests.swift`)
+  - Commit: `test(hnsw): add comprehensive layer assignment, build, and search tests`
+- [ ] Task 6 — Integrate into `ANNSIndex.swift`
+  - Commit: `feat(hnsw): integrate HNSWSearchCPU into ANNSIndex search path`
+- [ ] Task 7 — Verify full test suite passes
+  - Commit: `chore(hnsw): verify zero regressions in full test suite`
+
+### Task Notes 1
+
+- Added `Tests/MetalANNSTests/HNSWTests.swift` with `hnswtStorageTest` first (RED).
+- RED observed: `SkipLayer`/`HNSWLayers` unresolved in test compile.
+- Added `Sources/MetalANNSCore/HNSWLayers.swift` with `SkipLayer` and `HNSWLayers.neighbors(of:at:)`.
+- GREEN for build path: `xcodebuild build -scheme MetalANNS ...` succeeded after implementation.
+- Note: `xcodebuild test` currently uses `MetalANNS-Package` scheme for test action in this workspace.
+
+### Task Notes 2
+
+_(Executing agent: fill in after completing Task 2)_
+
+### Task Notes 3
+
+_(Executing agent: fill in after completing Task 3)_
+
+### Task Notes 4
+
+_(Executing agent: fill in after completing Task 4)_
+
+### Task Notes 5
+
+_(Executing agent: fill in after completing Task 5)_
+
+### Task Notes 6
+
+_(Executing agent: fill in after completing Task 6)_
+
+### Task Notes 7
+
+_(Executing agent: fill in after completing Task 7)_
+
+### Phase 15 Complete — Signal
+
+```
+STATUS: PENDING
+FINAL BUILD RESULT: pending
+FINAL TEST RESULT: pending
+TOTAL COMMITS: pending
+LAYER DISTRIBUTION: pending
+ISSUES ENCOUNTERED: pending
+DECISIONS MADE: pending
+```
+
+## Task: Map CPU-only HNSW Layer Changes
+
+- [ ] 1 — Inventory `IndexConfiguration` encode/decode/usage sites for HNSW and related properties.
+- [ ] 2 — Identify every `ANNSIndex` build/search/compact/load path where HNSW or internal state is set or reset.
+- [ ] 3 — Spot tests asserting configuration defaults or search behavior that might require updates when CPU-only HNSW layers are introduced.
+- [ ] 4 — Record likely regressions from adding the CPU-only HNSW layers.
+
+> Last Updated: —
