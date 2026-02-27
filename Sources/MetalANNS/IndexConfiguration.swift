@@ -10,6 +10,7 @@ public struct IndexConfiguration: Sendable, Codable {
     public var convergenceThreshold: Float
     public var hnswConfiguration: HNSWConfiguration
     public var repairConfiguration: RepairConfiguration
+    public var quantizedHNSWConfiguration: QuantizedHNSWConfiguration
 
     public static let `default` = IndexConfiguration(
         degree: 32,
@@ -20,7 +21,8 @@ public struct IndexConfiguration: Sendable, Codable {
         useFloat16: false,
         convergenceThreshold: 0.001,
         hnswConfiguration: .default,
-        repairConfiguration: .default
+        repairConfiguration: .default,
+        quantizedHNSWConfiguration: .default
     )
 
     public init(
@@ -32,7 +34,8 @@ public struct IndexConfiguration: Sendable, Codable {
         useFloat16: Bool = false,
         convergenceThreshold: Float = 0.001,
         hnswConfiguration: HNSWConfiguration = .default,
-        repairConfiguration: RepairConfiguration = .default
+        repairConfiguration: RepairConfiguration = .default,
+        quantizedHNSWConfiguration: QuantizedHNSWConfiguration = .default
     ) {
         self.degree = degree
         self.metric = metric
@@ -43,6 +46,7 @@ public struct IndexConfiguration: Sendable, Codable {
         self.convergenceThreshold = convergenceThreshold
         self.hnswConfiguration = hnswConfiguration
         self.repairConfiguration = repairConfiguration
+        self.quantizedHNSWConfiguration = quantizedHNSWConfiguration
     }
 
     public init(from decoder: Decoder) throws {
@@ -61,6 +65,10 @@ public struct IndexConfiguration: Sendable, Codable {
         repairConfiguration = try container.decodeIfPresent(
             RepairConfiguration.self,
             forKey: .repairConfiguration
+        ) ?? .default
+        quantizedHNSWConfiguration = try container.decodeIfPresent(
+            QuantizedHNSWConfiguration.self,
+            forKey: .quantizedHNSWConfiguration
         ) ?? .default
     }
 }

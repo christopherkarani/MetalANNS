@@ -22,6 +22,7 @@ public actor ANNSIndex {
     private var mmapLifetime: AnyObject?
     private var pendingRepairIDs: [UInt32] = []
     private var hnsw: HNSWLayers?
+    private var quantizedHNSW: QuantizedHNSWLayers?
 
     public init(configuration: IndexConfiguration = .default) {
         self.configuration = configuration
@@ -36,6 +37,7 @@ public actor ANNSIndex {
         self.isReadOnlyLoadedIndex = false
         self.mmapLifetime = nil
         self.hnsw = nil
+        self.quantizedHNSW = nil
     }
 
     init(configuration: IndexConfiguration = .default, context: MetalContext?) {
@@ -51,6 +53,7 @@ public actor ANNSIndex {
         self.isReadOnlyLoadedIndex = false
         self.mmapLifetime = nil
         self.hnsw = nil
+        self.quantizedHNSW = nil
     }
 
     public func build(vectors inputVectors: [[Float]], ids: [String]) async throws {
@@ -148,6 +151,7 @@ public actor ANNSIndex {
         self.mmapLifetime = nil
         self.pendingRepairIDs.removeAll()
         self.hnsw = nil
+        self.quantizedHNSW = nil
         try rebuildHNSWFromCurrentState()
     }
 
@@ -193,6 +197,7 @@ public actor ANNSIndex {
             graph.setCount(slot + 1)
         }
         hnsw = nil
+        quantizedHNSW = nil
 
         let repairConfig = configuration.repairConfiguration
         if repairConfig.enabled && repairConfig.repairInterval > 0 {
@@ -271,6 +276,7 @@ public actor ANNSIndex {
             graph.setCount(newMaxCount)
         }
         hnsw = nil
+        quantizedHNSW = nil
 
         let repairConfig = configuration.repairConfiguration
         if repairConfig.enabled {
@@ -323,6 +329,7 @@ public actor ANNSIndex {
             metric: configuration.metric
         )
         hnsw = nil
+        quantizedHNSW = nil
     }
 
     public func delete(id: String) throws {
@@ -384,6 +391,7 @@ public actor ANNSIndex {
         self.mmapLifetime = nil
         self.pendingRepairIDs.removeAll()
         self.hnsw = nil
+        self.quantizedHNSW = nil
     }
 
     public func setMetadata(_ column: String, value: String, for id: String) throws {
@@ -454,7 +462,17 @@ public actor ANNSIndex {
             let extractedVectors = extractVectors(from: vectors)
             let extractedGraph = extractGraph(from: graph)
 
-            if let hnsw {
+            if let quantizedHNSW {
+                rawResults = try await QuantizedHNSWSearchCPU.search(
+                    query: query,
+                    vectors: extractedVectors,
+                    hnsw: quantizedHNSW,
+                    baseGraph: extractedGraph,
+                    k: max(1, effectiveK),
+                    ef: max(1, effectiveEf),
+                    metric: searchMetric
+                )
+            } else if let hnsw {
                 rawResults = try await HNSWSearchCPU.search(
                     query: query,
                     vectors: extractedVectors,
@@ -536,7 +554,17 @@ public actor ANNSIndex {
             let extractedVectors = extractVectors(from: vectors)
             let extractedGraph = extractGraph(from: graph)
 
-            if let hnsw {
+            if let quantizedHNSW {
+                rawResults = try await QuantizedHNSWSearchCPU.search(
+                    query: query,
+                    vectors: extractedVectors,
+                    hnsw: quantizedHNSW,
+                    baseGraph: extractedGraph,
+                    k: max(1, searchK),
+                    ef: max(1, searchEf),
+                    metric: searchMetric
+                )
+            } else if let hnsw {
                 rawResults = try await HNSWSearchCPU.search(
                     query: query,
                     vectors: extractedVectors,
@@ -622,6 +650,10 @@ public actor ANNSIndex {
 
     func batchSearchMaxConcurrencyForTesting() async -> Int {
         await batchSearchMaxConcurrency()
+    }
+
+    func configurationForTesting() -> IndexConfiguration {
+        configuration
     }
 
     public func save(to url: URL) async throws {
@@ -790,33 +822,53 @@ public actor ANNSIndex {
         self.mmapLifetime = mmapLifetime
         self.pendingRepairIDs.removeAll()
         self.hnsw = nil
+        self.quantizedHNSW = nil
     }
 
     private func rebuildHNSWFromCurrentState() throws(ANNSError) {
         guard configuration.hnswConfiguration.enabled else {
             hnsw = nil
+            quantizedHNSW = nil
             return
         }
         guard let vectors, let graph else {
             hnsw = nil
+            quantizedHNSW = nil
             return
         }
         if context != nil {
             hnsw = nil
+            quantizedHNSW = nil
             return
         }
         guard vectors.count > 0, graph.nodeCount > 0 else {
             hnsw = nil
+            quantizedHNSW = nil
             return
         }
 
-        hnsw = try HNSWBuilder.buildLayers(
+        let extractedGraph = extractGraph(from: graph)
+        let builtHNSW = try HNSWBuilder.buildLayers(
             vectors: vectors,
-            graph: extractGraph(from: graph),
+            graph: extractedGraph,
             nodeCount: vectors.count,
             metric: configuration.metric,
             config: configuration.hnswConfiguration
         )
+        hnsw = builtHNSW
+
+        if configuration.quantizedHNSWConfiguration.useQuantizedEdges,
+           builtHNSW.maxLayer > 0 {
+            let extractedVectors = extractVectors(from: vectors)
+            quantizedHNSW = try? QuantizedHNSWBuilder.build(
+                from: builtHNSW,
+                vectors: extractedVectors,
+                config: configuration.quantizedHNSWConfiguration,
+                metric: configuration.metric
+            )
+        } else {
+            quantizedHNSW = nil
+        }
     }
 
     private func extractVectors(from vectors: any VectorStorage) -> [[Float]] {
