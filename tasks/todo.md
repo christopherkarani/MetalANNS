@@ -643,7 +643,7 @@ DECISIONS MADE: (pending)
 > **Status**: IN PROGRESS
 > **Owner**: Subagent
 > **Reviewer**: Orchestrator
-> **Last Updated**: 2026-02-27 09:40 EAT
+> **Last Updated**: 2026-02-27 09:43 EAT
 
 - [x] Task 1 — Create `HNSWLayers.swift` + basic structure tests
   - Commit: `feat(hnsw): add HNSWLayers and SkipLayer data structures`
@@ -655,7 +655,7 @@ DECISIONS MADE: (pending)
   - Commit: `feat(hnsw): add HNSWConfiguration with sensible defaults`
 - [x] Task 5 — Write comprehensive test suite (`HNSWTests.swift`)
   - Commit: `test(hnsw): add comprehensive layer assignment, build, and search tests`
-- [ ] Task 6 — Integrate into `ANNSIndex.swift`
+- [x] Task 6 — Integrate into `ANNSIndex.swift`
   - Commit: `feat(hnsw): integrate HNSWSearchCPU into ANNSIndex search path`
 - [ ] Task 7 — Verify full test suite passes
   - Commit: `chore(hnsw): verify zero regressions in full test suite`
@@ -706,7 +706,16 @@ DECISIONS MADE: (pending)
 
 ### Task Notes 6
 
-_(Executing agent: fill in after completing Task 6)_
+- Added RED integration test `indexHNSWTest` in `HNSWTests.swift`; compile failed until `IndexConfiguration.hnswConfiguration` existed.
+- Added `hnswConfiguration` to `IndexConfiguration` with backward-compatible decode fallback.
+- Integrated CPU-only HNSW flow in `ANNSIndex`:
+  - new `hnsw` stored state
+  - `rebuildHNSWFromCurrentState()` helper
+  - build/load eager rebuild logic (CPU-eligible only)
+  - search/rangeSearch CPU branch uses `HNSWSearchCPU` when available, falls back to beam otherwise
+  - compact/insert/batchInsert/repair invalidate stale HNSW
+- Updated `HNSWBuilder` to consume `HNSWConfiguration` (`M`, `maxLayers`) with defaulted config param.
+- Validation: `xcodebuild test ... -only-testing MetalANNSTests/HNSWTests` runs and passes 6 HNSW tests, including ANNSIndex integration.
 
 ### Task Notes 7
 
@@ -732,3 +741,308 @@ DECISIONS MADE: pending
 - [ ] 4 — Record likely regressions from adding the CPU-only HNSW layers.
 
 > Last Updated: —
+
+---
+
+## Phase 16: Product Quantization + IVFPQ
+
+> **Status**: NOT STARTED
+> **Owner**: Subagent
+> **Reviewer**: Orchestrator
+> **Last Updated**: —
+
+### Overview
+
+Implement full IVFPQ (coarse IVF + fine PQ) to compress vectors 32-64x while maintaining >0.80 recall@10. Enables 1M+ vector indices on-device. `IVFPQIndex` is a **standalone actor** — does NOT modify `ANNSIndex`. Reuses `KMeans` from Phase 12. GPU kernels handle ADC distance scanning only; training stays CPU-side.
+
+**Key metric targets:**
+- Memory: < 17 MB for 1M 128-dim vectors (512 MB uncompressed → 30-64x reduction)
+- Recall@10 > 0.80 with nprobe=8
+- GPU ADC 2-5x faster than CPU ADC
+
+### Task Checklist
+
+- [ ] Task 1 — Add `QuantizedStorage` protocol and tests
+- [ ] Task 2 — Implement `ProductQuantizer` training, encoding, reconstruction
+- [ ] Task 3 — Implement `PQVectorBuffer` with ADC distance computation
+- [ ] Task 4 — Implement `IVFPQIndex` actor (coarse + fine quantization)
+- [ ] Task 5 — Add Metal ADC kernels (`PQDistance.metal`)
+- [ ] Task 6 — Add persistence (save/load) for `IVFPQIndex`
+- [ ] Task 7 — Comprehensive test suite and performance validation
+- [ ] Task 8 — Full suite and completion signal
+
+---
+
+### Task 1: QuantizedStorage Protocol and Tests
+
+**Acceptance**: `QuantizedStorageTests` suite passes. First git commit.
+
+- [ ] 1.1 — Create `Tests/MetalANNSTests/QuantizedStorageTests.swift` with tests:
+  - `protocolExists` — verify `QuantizedStorage` protocol can be instantiated via stub conformance
+  - `reconstructionError` — mock quantizer, verify reconstruction error < 5% of original norm
+  - `codableRoundTrip` — verify stub implements Codable
+- [ ] 1.2 — **RED**: Tests fail (protocol not defined)
+- [ ] 1.3 — Create `Sources/MetalANNSCore/QuantizedStorage.swift`:
+  ```swift
+  public protocol QuantizedStorage: Sendable {
+      var count: Int { get }
+      var originalDimension: Int { get }
+      func approximateDistance(query: [Float], to index: UInt32, metric: Metric) -> Float
+      func reconstruct(at index: UInt32) -> [Float]
+  }
+  ```
+- [ ] 1.4 — **GREEN**: All 3 tests pass
+- [ ] 1.5 — **GIT**: `git commit -m "feat: add QuantizedStorage protocol for ADC-based distance computation"`
+
+### Task Notes 1
+
+_(Executing agent: fill in after completing Task 1)_
+
+---
+
+### Task 2: ProductQuantizer Training and Encoding
+
+**Acceptance**: `ProductQuantizerTests` passes. Second git commit.
+
+- [ ] 2.1 — Create `Tests/MetalANNSTests/ProductQuantizerTests.swift` with tests:
+  - `trainPQCodebook` — train on 10,000 random 128-dim vectors, verify no errors
+  - `encodeVectors` — encode 100 vectors, verify output is M UInt8 bytes per vector
+  - `reconstructionAccuracy` — encode → reconstruct 100 vectors, L2 error < 2% of original norm
+  - `distanceApproximationAccuracy` — PQ approximate distances vs exact, correlation > 0.95
+- [ ] 2.2 — **RED**: Tests fail (ProductQuantizer not defined)
+- [ ] 2.3 — Create `Sources/MetalANNSCore/ProductQuantizer.swift`:
+  ```swift
+  public struct ProductQuantizer: Sendable, Codable {
+      public let numSubspaces: Int
+      public let centroidsPerSubspace: Int
+      public let subspaceDimension: Int
+      public let codebooks: [[[Float]]]
+
+      public static func train(
+          vectors: [[Float]],
+          numSubspaces: Int = 8,
+          centroidsPerSubspace: Int = 256,
+          maxIterations: Int = 20
+      ) throws(ANNSError) -> ProductQuantizer
+
+      public func encode(vector: [Float]) throws(ANNSError) -> [UInt8]
+      public func reconstruct(codes: [UInt8]) throws(ANNSError) -> [Float]
+      public func approximateDistance(query: [Float], codes: [UInt8], metric: Metric) -> Float
+  }
+  ```
+  - `train()`: Split each vector into M subspaces → run `KMeans.fit()` per subspace
+  - `encode()`: For each subspace, find nearest centroid → UInt8
+  - `reconstruct()`: Fetch centroid from codebook per subspace → concatenate
+  - `approximateDistance()`: Build M×256 distance table, sum code lookups
+- [ ] 2.4 — **EDGE CASES**: Guard M divides D evenly; clamp Ks to [1,256]; guard vectors.isEmpty
+- [ ] 2.5 — **GREEN**: All 4 tests pass, reconstruction error < 2%, correlation > 0.95
+- [ ] 2.6 — **GIT**: `git commit -m "feat: implement ProductQuantizer with training, encoding, and reconstruction"`
+
+### Task Notes 2
+
+_(Executing agent: fill in after completing Task 2)_
+
+---
+
+### Task 3: PQVectorBuffer with ADC Distance Computation
+
+**Acceptance**: `PQVectorBufferTests` passes. Third git commit.
+
+- [ ] 3.1 — Create `Tests/MetalANNSTests/PQVectorBufferTests.swift` with tests:
+  - `initAndInsert` — create PQVectorBuffer, insert 100 vectors, verify count
+  - `approximateDistance` — insert vectors, compute approximate distances, verify consistency
+  - `memoryReduction` — compare PQVectorBuffer size vs uncompressed VectorBuffer, expect 30-60x
+- [ ] 3.2 — **RED**: Tests fail (PQVectorBuffer not defined)
+- [ ] 3.3 — Create `Sources/MetalANNSCore/PQVectorBuffer.swift`:
+  ```swift
+  public final class PQVectorBuffer: QuantizedStorage, Sendable {
+      public let originalDimension: Int
+      public private(set) var count: Int
+      public let capacity: Int
+      private let pq: ProductQuantizer
+      private var codes: [[UInt8]]  // codes[i] = M-byte code for vector i
+
+      public init(capacity: Int, dim: Int, pq: ProductQuantizer) throws(ANNSError)
+      public func insert(vector: [Float], at index: Int) throws(ANNSError)
+      public func approximateDistance(query: [Float], to index: UInt32, metric: Metric) -> Float
+      public func reconstruct(at index: UInt32) -> [Float]
+  }
+  ```
+  - `insert()`: Encode vector → store M-byte code. Do NOT store full vector.
+  - `approximateDistance()`: Build M×256 distance table, sum M lookups per query.
+- [ ] 3.4 — **GREEN**: All 3 tests pass, memory reduction verified
+- [ ] 3.5 — **GIT**: `git commit -m "feat: implement PQVectorBuffer with ADC distance computation"`
+
+### Task Notes 3
+
+_(Executing agent: fill in after completing Task 3)_
+
+---
+
+### Task 4: IVFPQIndex Actor (Coarse + Fine Quantization)
+
+**Acceptance**: `IVFPQIndexTests` passes with training, add, search, and recall verification. Fourth git commit.
+
+- [ ] 4.1 — Create `Tests/MetalANNSTests/IVFPQIndexTests.swift` with tests:
+  - `trainAndAdd` — train on 10K vectors, add 1K, verify count = 1K
+  - `searchRecall` — train on 10K, add 1K, search 100 queries, recall@10 > 0.80
+  - `nprobeEffect` — search with nprobe=1, 4, 16; verify recall increases monotonically
+  - `memoryFootprint` — measure index size, expect < original / 30
+- [ ] 4.2 — **RED**: Tests fail (IVFPQIndex not defined)
+- [ ] 4.3 — Create `Sources/MetalANNS/IVFPQConfiguration.swift`:
+  ```swift
+  public struct IVFPQConfiguration: Sendable, Codable {
+      public var numSubspaces: Int = 8
+      public var numCentroids: Int = 256
+      public var numCoarseCentroids: Int = 256
+      public var nprobe: Int = 8
+      public var metric: Metric = .euclidean
+      public var trainingIterations: Int = 20
+  }
+  ```
+- [ ] 4.4 — Create `Sources/MetalANNS/IVFPQIndex.swift`:
+  ```swift
+  public actor IVFPQIndex: Sendable {
+      private let config: IVFPQConfiguration
+      private var coarseCentroids: [[Float]]
+      private var pq: ProductQuantizer?
+      private var vectorBuffer: PQVectorBuffer?
+      private var invertedLists: [[UInt32]]  // invertedLists[k] = vector IDs in cluster k
+
+      public init(capacity: Int, dimension: Int, config: IVFPQConfiguration) throws(ANNSError)
+      public func train(vectors: [[Float]]) async throws(ANNSError)
+      public func add(vectors: [[Float]], ids: [UInt32]) async throws(ANNSError)
+      public func search(query: [Float], k: Int, nprobe: Int?) async -> [SearchResult]
+      public var count: Int { get }
+  }
+  ```
+  - `train()`: KMeans coarse centroids → per-cluster residual PQ training
+  - `add()`: Assign to cluster, PQ-encode residual, store in invertedLists + vectorBuffer
+  - `search()`: Find nprobe clusters → ADC scan each → merge top-k
+- [ ] 4.5 — **CRITICAL**: IVFPQIndex is STANDALONE — do NOT touch `ANNSIndex.swift`
+- [ ] 4.6 — **GREEN**: All 4 tests pass, recall@10 > 0.80, memory < original/30
+- [ ] 4.7 — **GIT**: `git commit -m "feat: implement IVFPQIndex with coarse and fine quantization"`
+
+### Task Notes 4
+
+_(Executing agent: fill in after completing Task 4)_
+
+---
+
+### Task 5: Metal ADC Distance Kernels
+
+**Acceptance**: `IVFPQGPUTests` passes (GPU vs CPU tolerance 1e-3). Fifth git commit.
+
+- [ ] 5.1 — Create `Tests/MetalANNSTests/IVFPQGPUTests.swift` with tests:
+  - `gpuVsCpuDistanceTable` — 100 queries × 1000 vectors, GPU ADC vs CPU, tolerance 1e-3
+  - Both tests skip with `#if targetEnvironment(simulator)`
+- [ ] 5.2 — **RED**: Tests fail (GPU kernels not implemented)
+- [ ] 5.3 — Create `Sources/MetalANNSCore/Shaders/PQDistance.metal` with two kernels:
+  - `pq_compute_distance_table`: buffer(0)=query residual, buffer(1)=codebooks, buffer(2)=output M×Ks table, buffer(3)=M (uint), buffer(4)=Ks (uint), buffer(5)=subspaceDim (uint). Dispatch 2D: x=subspace, y=centroid.
+  - `pq_adc_scan`: buffer(0)=codes (vectorCount×M bytes), buffer(1)=distTable, buffer(2)=output distances, buffer(3)=M (uint), buffer(4)=Ks (uint), buffer(5)=vectorCount (uint). Cache distTable in threadgroup memory.
+- [ ] 5.4 — Update `IVFPQIndex.search()` to use GPU kernels when MetalContext available; CPU ADC fallback
+- [ ] 5.5 — **GREEN**: GPU vs CPU tests pass, tolerance 1e-3
+- [ ] 5.6 — **GIT**: `git commit -m "feat: add Metal ADC distance kernels for GPU-accelerated PQ search"`
+
+### Task Notes 5
+
+_(Executing agent: fill in after completing Task 5)_
+
+---
+
+### Task 6: Persistence (Save/Load)
+
+**Acceptance**: `IVFPQPersistenceTests` passes. Sixth git commit.
+
+- [ ] 6.1 — Create `Tests/MetalANNSTests/IVFPQPersistenceTests.swift` with tests:
+  - `saveThenLoad` — build IVFPQIndex, save, load, verify count and search results
+  - `roundTripAccuracy` — same search before/after save-load, results identical
+- [ ] 6.2 — **RED**: Tests fail (persistence not implemented)
+- [ ] 6.3 — Add to `IVFPQIndex`:
+  ```swift
+  public func save(to path: String) async throws(ANNSError)
+  public static func load(from path: String) async throws(ANNSError) -> IVFPQIndex
+  ```
+  - Format: magic "IVFP" + version 1 + config JSON + coarse centroids (binary) + PQ codebooks (binary) + vector codes (binary) + inverted lists (binary)
+- [ ] 6.4 — **GREEN**: Both tests pass
+- [ ] 6.5 — **GIT**: `git commit -m "feat: add IVFPQIndex persistence (save/load)"`
+
+### Task Notes 6
+
+_(Executing agent: fill in after completing Task 6)_
+
+---
+
+### Task 7: Comprehensive Test Suite and Performance Validation
+
+**Acceptance**: Full IVFPQ suite passes with documented performance numbers. Seventh git commit.
+
+- [ ] 7.1 — Create `Tests/MetalANNSTests/IVFPQComprehensiveTests.swift` with all existing tests + new:
+  - `benchmarkSearchThroughput` — measure QPS on 100K-vector index, record result
+  - `benchmarkMemoryUsage` — peak memory during 100K-vector search, record MB
+  - `recallVsNprobe` — sweep nprobe=1, 4, 8, 16; record recall at each
+- [ ] 7.2 — **GREEN**: All tests pass
+- [ ] 7.3 — **EXPECTED TARGETS** (document actuals in Task Notes 7):
+  - Recall@10 > 0.80 at nprobe=8
+  - QPS > 1000 queries/sec on 100K vectors
+  - Memory reduction > 30x
+  - GPU ADC 2-5x faster than CPU ADC
+- [ ] 7.4 — **REGRESSION**: All Phase 13-15 tests still pass
+- [ ] 7.5 — **GIT**: `git commit -m "feat: add comprehensive IVFPQ test suite with performance benchmarks"`
+
+### Task Notes 7
+
+_(Executing agent: fill in after completing Task 7 — REQUIRED: paste actual benchmark numbers here)_
+
+---
+
+### Task 8: Full Suite and Completion Signal
+
+**Acceptance**: Full suite passes. Eighth and final git commit.
+
+- [ ] 8.1 — Run: `xcodebuild build -scheme MetalANNS -destination 'platform=macOS' -skipPackagePluginValidation` → **BUILD SUCCEEDED**
+- [ ] 8.2 — Run: `xcodebuild test -scheme MetalANNS -destination 'platform=macOS' -skipPackagePluginValidation` → All IVFPQ tests pass, known MmapTests baseline allowed
+- [ ] 8.3 — Verify git log shows exactly 8 commits
+- [ ] 8.4 — Fill in Phase Complete Signal below
+- [ ] 8.5 — **GIT**: `git commit -m "chore: phase 16 complete - IVFPQ quantization and compression"`
+
+### Task Notes 8
+
+_(Executing agent: fill in after completing Task 8)_
+
+---
+
+### Phase 16 Complete — Signal
+
+When all items above are checked, update this section:
+
+```
+STATUS: PENDING
+FINAL BUILD RESULT: (pending)
+FINAL TEST RESULT: (pending)
+TOTAL COMMITS: (pending)
+RECALL@10 (nprobe=8): (pending — target > 0.80)
+QPS (100K vectors): (pending — target > 1000)
+MEMORY REDUCTION: (pending — target > 30x)
+GPU SPEEDUP: (pending — target 2-5x vs CPU ADC)
+ISSUES ENCOUNTERED: (pending)
+DECISIONS MADE: (pending)
+```
+
+---
+
+### Orchestrator Review Checklist — Phase 16
+
+- [ ] R1 — Git log shows exactly 8 commits with correct conventional commit messages
+- [ ] R2 — Full test suite passes: `xcodebuild test -scheme MetalANNS -destination 'platform=macOS'`
+- [ ] R3 — `IVFPQIndex` is standalone — `ANNSIndex.swift` is UNCHANGED
+- [ ] R4 — `ProductQuantizer.train()` reuses existing `KMeans.fit()` from Phase 12 (no reimplementation)
+- [ ] R5 — PQ codes are always UInt8 (Ks=256 fixed)
+- [ ] R6 — `PQVectorBuffer` does NOT store original vectors post-encoding (only M-byte codes)
+- [ ] R7 — Metal buffer indices consistent: pq_compute_distance_table (0-5), pq_adc_scan (0-5)
+- [ ] R8 — GPU ADC has CPU fallback path (simulator safe, tested)
+- [ ] R9 — Persistence format uses magic bytes "IVFP" + version for forward compatibility
+- [ ] R10 — Recall@10 > 0.80 measured and documented in Task Notes 7
+- [ ] R11 — Memory reduction > 30x measured and documented in Task Notes 7
+- [ ] R12 — All Phase 13 (typed throws), Phase 14 (repair), Phase 15 (HNSW) tests still pass
+- [ ] R13 — Agent notes filled in for all 8 tasks

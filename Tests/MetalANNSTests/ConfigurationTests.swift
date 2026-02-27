@@ -12,6 +12,9 @@ struct ConfigurationTests {
         #expect(config.efSearch == 64)
         #expect(config.maxIterations == 20)
         #expect(config.useFloat16 == false)
+        #expect(config.hnswConfiguration.enabled == true)
+        #expect(config.hnswConfiguration.M == 8)
+        #expect(config.hnswConfiguration.maxLayers == 6)
     }
 
     @Test("Metric enum has all three cases")

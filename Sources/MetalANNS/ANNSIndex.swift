@@ -21,6 +21,7 @@ public actor ANNSIndex {
     private var isReadOnlyLoadedIndex: Bool
     private var mmapLifetime: AnyObject?
     private var pendingRepairIDs: [UInt32] = []
+    private var hnsw: HNSWLayers?
 
     public init(configuration: IndexConfiguration = .default) {
         self.configuration = configuration
@@ -34,6 +35,7 @@ public actor ANNSIndex {
         self.isBuilt = false
         self.isReadOnlyLoadedIndex = false
         self.mmapLifetime = nil
+        self.hnsw = nil
     }
 
     public func build(vectors inputVectors: [[Float]], ids: [String]) async throws {
@@ -130,6 +132,8 @@ public actor ANNSIndex {
         self.isReadOnlyLoadedIndex = false
         self.mmapLifetime = nil
         self.pendingRepairIDs.removeAll()
+        self.hnsw = nil
+        try rebuildHNSWFromCurrentState()
     }
 
     public func insert(_ vector: [Float], id: String) async throws {
@@ -173,6 +177,7 @@ public actor ANNSIndex {
         if graph.nodeCount < slot + 1 {
             graph.setCount(slot + 1)
         }
+        hnsw = nil
 
         let repairConfig = configuration.repairConfiguration
         if repairConfig.enabled && repairConfig.repairInterval > 0 {
@@ -250,6 +255,7 @@ public actor ANNSIndex {
         if graph.nodeCount < newMaxCount {
             graph.setCount(newMaxCount)
         }
+        hnsw = nil
 
         let repairConfig = configuration.repairConfiguration
         if repairConfig.enabled && repairConfig.repairInterval > 0 {
@@ -293,6 +299,7 @@ public actor ANNSIndex {
             config: configuration.repairConfiguration,
             metric: configuration.metric
         )
+        hnsw = nil
     }
 
     public func delete(id: String) throws {
@@ -353,6 +360,7 @@ public actor ANNSIndex {
         self.isReadOnlyLoadedIndex = false
         self.mmapLifetime = nil
         self.pendingRepairIDs.removeAll()
+        self.hnsw = nil
     }
 
     public func setMetadata(_ column: String, value: String, for id: String) throws {
@@ -416,15 +424,34 @@ public actor ANNSIndex {
                 metric: searchMetric
             )
         } else {
-            rawResults = try await BeamSearchCPU.search(
-                query: query,
-                vectors: extractVectors(from: vectors),
-                graph: extractGraph(from: graph),
-                entryPoint: Int(entryPoint),
-                k: max(1, effectiveK),
-                ef: max(1, effectiveEf),
-                metric: searchMetric
-            )
+            if configuration.hnswConfiguration.enabled, hnsw == nil {
+                try rebuildHNSWFromCurrentState()
+            }
+
+            let extractedVectors = extractVectors(from: vectors)
+            let extractedGraph = extractGraph(from: graph)
+
+            if let hnsw {
+                rawResults = try await HNSWSearchCPU.search(
+                    query: query,
+                    vectors: extractedVectors,
+                    hnsw: hnsw,
+                    baseGraph: extractedGraph,
+                    k: max(1, effectiveK),
+                    ef: max(1, effectiveEf),
+                    metric: searchMetric
+                )
+            } else {
+                rawResults = try await BeamSearchCPU.search(
+                    query: query,
+                    vectors: extractedVectors,
+                    graph: extractedGraph,
+                    entryPoint: Int(entryPoint),
+                    k: max(1, effectiveK),
+                    ef: max(1, effectiveEf),
+                    metric: searchMetric
+                )
+            }
         }
 
         var filtered = softDeletion.filterResults(rawResults)
@@ -479,15 +506,34 @@ public actor ANNSIndex {
                 metric: searchMetric
             )
         } else {
-            rawResults = try await BeamSearchCPU.search(
-                query: query,
-                vectors: extractVectors(from: vectors),
-                graph: extractGraph(from: graph),
-                entryPoint: Int(entryPoint),
-                k: max(1, searchK),
-                ef: max(1, searchEf),
-                metric: searchMetric
-            )
+            if configuration.hnswConfiguration.enabled, hnsw == nil {
+                try rebuildHNSWFromCurrentState()
+            }
+
+            let extractedVectors = extractVectors(from: vectors)
+            let extractedGraph = extractGraph(from: graph)
+
+            if let hnsw {
+                rawResults = try await HNSWSearchCPU.search(
+                    query: query,
+                    vectors: extractedVectors,
+                    hnsw: hnsw,
+                    baseGraph: extractedGraph,
+                    k: max(1, searchK),
+                    ef: max(1, searchEf),
+                    metric: searchMetric
+                )
+            } else {
+                rawResults = try await BeamSearchCPU.search(
+                    query: query,
+                    vectors: extractedVectors,
+                    graph: extractedGraph,
+                    entryPoint: Int(entryPoint),
+                    k: max(1, searchK),
+                    ef: max(1, searchEf),
+                    metric: searchMetric
+                )
+            }
         }
 
         var filtered = softDeletion.filterResults(rawResults)
@@ -617,6 +663,7 @@ public actor ANNSIndex {
             softDeletion: persistedMetadata?.softDeletion ?? SoftDeletion(),
             metadataStore: persistedMetadata?.metadataStore ?? MetadataStore()
         )
+        try await index.rebuildHNSWFromCurrentState()
 
         return index
     }
@@ -642,6 +689,7 @@ public actor ANNSIndex {
             isReadOnlyLoadedIndex: true,
             mmapLifetime: loaded.mmapLifetime
         )
+        try await index.rebuildHNSWFromCurrentState()
 
         return index
     }
@@ -668,6 +716,7 @@ public actor ANNSIndex {
             isReadOnlyLoadedIndex: true,
             mmapLifetime: diskBacked.mmapLifetime
         )
+        try await index.rebuildHNSWFromCurrentState()
 
         return index
     }
@@ -705,6 +754,35 @@ public actor ANNSIndex {
         self.isBuilt = true
         self.isReadOnlyLoadedIndex = isReadOnlyLoadedIndex
         self.mmapLifetime = mmapLifetime
+        self.pendingRepairIDs.removeAll()
+        self.hnsw = nil
+    }
+
+    private func rebuildHNSWFromCurrentState() throws(ANNSError) {
+        guard configuration.hnswConfiguration.enabled else {
+            hnsw = nil
+            return
+        }
+        guard let vectors, let graph else {
+            hnsw = nil
+            return
+        }
+        if context != nil, supportsGPUSearch(for: vectors) {
+            hnsw = nil
+            return
+        }
+        guard vectors.count > 0, graph.nodeCount > 0 else {
+            hnsw = nil
+            return
+        }
+
+        hnsw = try HNSWBuilder.buildLayers(
+            vectors: vectors,
+            graph: extractGraph(from: graph),
+            nodeCount: vectors.count,
+            metric: configuration.metric,
+            config: configuration.hnswConfiguration
+        )
     }
 
     private func extractVectors(from vectors: any VectorStorage) -> [[Float]] {

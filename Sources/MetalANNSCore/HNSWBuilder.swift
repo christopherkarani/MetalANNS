@@ -5,16 +5,18 @@ private let logger = Logger(subsystem: "com.metalanns", category: "HNSWBuilder")
 
 public enum HNSWBuilder {
     private static let defaultML = 1.4426950408889634
-    private static let defaultConnectionsPerLayer = 8
-    private static let defaultMaxLayers = 6
 
     /// Build HNSW skip layers from a complete base graph.
     public static func buildLayers(
         vectors: any VectorStorage,
         graph: [[(UInt32, Float)]],
         nodeCount: Int,
-        metric: Metric
+        metric: Metric,
+        config: HNSWConfiguration = .default
     ) throws(ANNSError) -> HNSWLayers {
+        guard config.enabled else {
+            return HNSWLayers()
+        }
         guard nodeCount > 0 else {
             throw ANNSError.constructionFailed("Cannot build HNSW layers with empty graph")
         }
@@ -29,7 +31,7 @@ public enum HNSWBuilder {
         var maxLayerAssigned = 0
 
         for nodeID in 0..<nodeCount {
-            let level = assignLevel(mL: defaultML, maxLayers: defaultMaxLayers)
+            let level = assignLevel(mL: defaultML, maxLayers: config.maxLayers)
             nodeLevels[nodeID] = level
             maxLayerAssigned = max(maxLayerAssigned, level)
         }
@@ -54,7 +56,7 @@ public enum HNSWBuilder {
                     vectors: vectors,
                     nodeCount: nodeCount,
                     metric: metric,
-                    M: defaultConnectionsPerLayer
+                    M: config.M
                 )
                 skipLayers.append(skipLayer)
             }

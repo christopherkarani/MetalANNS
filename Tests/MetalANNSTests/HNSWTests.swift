@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import MetalANNS
 @testable import MetalANNSCore
 
 @Suite("HNSW Layer Tests")
@@ -145,6 +146,23 @@ struct HNSWTests {
         #expect(config.enabled == true)
         #expect(config.M > 0)
         #expect(config.maxLayers >= 0)
+    }
+
+    @Test("ANNSIndex uses HNSW for CPU search when available")
+    func indexHNSWTest() async throws {
+        var config = IndexConfiguration(degree: 8, metric: .l2)
+        config.hnswConfiguration = HNSWConfiguration(enabled: true)
+
+        let index = ANNSIndex(configuration: config)
+        let vectors = (0..<100).map { i in (0..<16).map { d in Float(i * 16 + d) * 0.01 } }
+        let ids = (0..<100).map { "v_\($0)" }
+
+        try await index.build(vectors: vectors, ids: ids)
+
+        let query = (0..<16).map { d in Float(d) * 0.01 }
+        let results = try await index.search(query: query, k: 5)
+
+        #expect(results.count == 5)
     }
 
     private func computeExactDistances(
