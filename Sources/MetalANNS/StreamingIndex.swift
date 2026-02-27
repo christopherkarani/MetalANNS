@@ -6,14 +6,30 @@ import MetalANNSCore
 /// New vectors land in a small `delta` index. When the delta reaches
 /// `StreamingConfiguration.deltaCapacity` it is merged into the frozen
 /// `base` index asynchronously (or synchronously for `.blocking` strategy).
+/// Search always probes both shards and also covers pre-build pending inserts.
 public actor StreamingIndex {
+    private enum MetadataValue: Sendable, Codable {
+        case string(String)
+        case float(Float)
+        case int64(Int64)
+    }
+
+    private struct PersistedMeta: Sendable, Codable {
+        let config: StreamingConfiguration
+        let vectorDimension: Int?
+        let allVectorsList: [[Float]]
+        let allIDsList: [String]
+        let deletedIDs: [String]
+        let metadataByID: [String: [String: MetadataValue]]
+    }
+
     private var base: ANNSIndex?
+    private var delta: ANNSIndex?
     private var mergeTask: Task<Void, Error>?
     private var _isMerging = false
 
     private var pendingVectors: [[Float]] = []
     private var pendingIDs: [String] = []
-    private var delta: ANNSIndex?
 
     private var allVectorsList: [[Float]] = []
     private var allIDsList: [String] = []
@@ -22,7 +38,7 @@ public actor StreamingIndex {
 
     private var idInBase: Set<String> = []
     private var idInDelta: Set<String> = []
-
+    private var metadataByID: [String: [String: MetadataValue]] = [:]
     private var vectorDimension: Int?
 
     private let config: StreamingConfiguration
@@ -86,6 +102,261 @@ public actor StreamingIndex {
         try await maybeTriggerMerge()
     }
 
+    public func search(
+        query: [Float],
+        k: Int,
+        filter: SearchFilter? = nil,
+        metric: Metric? = nil
+    ) async throws -> [SearchResult] {
+        try validateQueryDimension(query)
+        guard k > 0 else {
+            return []
+        }
+
+        let searchMetric = metric ?? config.indexConfiguration.metric
+        var combined: [SearchResult] = []
+        combined.reserveCapacity(k * 2)
+
+        if let base {
+            let baseResults = try await base.search(query: query, k: k, filter: filter, metric: metric)
+            combined.append(contentsOf: baseResults)
+        }
+
+        if let delta {
+            let deltaResults = try await delta.search(query: query, k: k, filter: filter, metric: metric)
+            combined.append(contentsOf: deltaResults)
+        }
+
+        combined.append(contentsOf: pendingSearchResults(query: query, filter: filter, metric: searchMetric))
+        return Array(dedupeAndSort(combined).prefix(k))
+    }
+
+    public func batchSearch(
+        queries: [[Float]],
+        k: Int,
+        filter: SearchFilter? = nil,
+        metric: Metric? = nil
+    ) async throws -> [[SearchResult]] {
+        guard !queries.isEmpty else {
+            return []
+        }
+
+        return try await withThrowingTaskGroup(of: (Int, [SearchResult]).self) { group in
+            for (index, query) in queries.enumerated() {
+                group.addTask { [self] in
+                    let results = try await self.search(query: query, k: k, filter: filter, metric: metric)
+                    return (index, results)
+                }
+            }
+
+            var ordered = Array<[SearchResult]?>(repeating: nil, count: queries.count)
+            for try await (index, results) in group {
+                ordered[index] = results
+            }
+            return ordered.map { $0 ?? [] }
+        }
+    }
+
+    public func rangeSearch(
+        query: [Float],
+        maxDistance: Float,
+        limit: Int = 1000,
+        filter: SearchFilter? = nil,
+        metric: Metric? = nil
+    ) async throws -> [SearchResult] {
+        try validateQueryDimension(query)
+        guard maxDistance > 0 else {
+            return []
+        }
+        guard limit > 0 else {
+            return []
+        }
+
+        let searchMetric = metric ?? config.indexConfiguration.metric
+        var combined: [SearchResult] = []
+
+        if let base {
+            let baseResults = try await base.rangeSearch(
+                query: query,
+                maxDistance: maxDistance,
+                limit: Int.max,
+                filter: filter,
+                metric: metric
+            )
+            combined.append(contentsOf: baseResults)
+        }
+
+        if let delta {
+            let deltaResults = try await delta.rangeSearch(
+                query: query,
+                maxDistance: maxDistance,
+                limit: Int.max,
+                filter: filter,
+                metric: metric
+            )
+            combined.append(contentsOf: deltaResults)
+        }
+
+        for result in pendingSearchResults(query: query, filter: filter, metric: searchMetric)
+        where result.score <= maxDistance {
+            combined.append(result)
+        }
+
+        return Array(dedupeAndSort(combined).prefix(limit))
+    }
+
+    public func setMetadata(_ column: String, value: String, for id: String) async throws {
+        guard allIDs.contains(id), !deletedIDs.contains(id) else {
+            throw ANNSError.idNotFound(id)
+        }
+
+        var row = metadataByID[id] ?? [:]
+        row[column] = .string(value)
+        metadataByID[id] = row
+
+        if idInBase.contains(id), let base {
+            try await base.setMetadata(column, value: value, for: id)
+        }
+        if idInDelta.contains(id), let delta {
+            try await delta.setMetadata(column, value: value, for: id)
+        }
+    }
+
+    public func setMetadata(_ column: String, value: Float, for id: String) async throws {
+        guard allIDs.contains(id), !deletedIDs.contains(id) else {
+            throw ANNSError.idNotFound(id)
+        }
+
+        var row = metadataByID[id] ?? [:]
+        row[column] = .float(value)
+        metadataByID[id] = row
+
+        if idInBase.contains(id), let base {
+            try await base.setMetadata(column, value: value, for: id)
+        }
+        if idInDelta.contains(id), let delta {
+            try await delta.setMetadata(column, value: value, for: id)
+        }
+    }
+
+    public func setMetadata(_ column: String, value: Int64, for id: String) async throws {
+        guard allIDs.contains(id), !deletedIDs.contains(id) else {
+            throw ANNSError.idNotFound(id)
+        }
+
+        var row = metadataByID[id] ?? [:]
+        row[column] = .int64(value)
+        metadataByID[id] = row
+
+        if idInBase.contains(id), let base {
+            try await base.setMetadata(column, value: value, for: id)
+        }
+        if idInDelta.contains(id), let delta {
+            try await delta.setMetadata(column, value: value, for: id)
+        }
+    }
+
+    public func delete(id: String) async throws {
+        guard allIDs.contains(id), !deletedIDs.contains(id) else {
+            throw ANNSError.idNotFound(id)
+        }
+
+        deletedIDs.insert(id)
+        idInBase.remove(id)
+        idInDelta.remove(id)
+
+        if let base {
+            do {
+                try await base.delete(id: id)
+            } catch let error as ANNSError {
+                guard case .idNotFound = error else {
+                    throw error
+                }
+            }
+        }
+
+        if let delta {
+            do {
+                try await delta.delete(id: id)
+            } catch let error as ANNSError {
+                guard case .idNotFound = error else {
+                    throw error
+                }
+            }
+        }
+
+        removePendingID(id)
+    }
+
+    public func flush() async throws {
+        if let task = mergeTask {
+            defer { mergeTask = nil }
+            try await task.value
+        }
+
+        try await flushPendingIntoDelta()
+
+        if delta != nil || !pendingVectors.isEmpty {
+            try await triggerMerge()
+        }
+    }
+
+    public func save(to url: URL) async throws {
+        try await flush()
+
+        guard let base else {
+            throw ANNSError.constructionFailed("Nothing to save — index is empty")
+        }
+
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        let baseURL = url.appendingPathComponent("base.anns")
+        if FileManager.default.fileExists(atPath: baseURL.path) {
+            try FileManager.default.removeItem(at: baseURL)
+        }
+        try await base.save(to: baseURL)
+
+        let meta = PersistedMeta(
+            config: config,
+            vectorDimension: vectorDimension,
+            allVectorsList: allVectorsList,
+            allIDsList: allIDsList,
+            deletedIDs: Array(deletedIDs),
+            metadataByID: metadataByID
+        )
+        let data = try JSONEncoder().encode(meta)
+        try data.write(to: url.appendingPathComponent("streaming.meta.json"), options: .atomic)
+    }
+
+    public static func load(from url: URL) async throws -> StreamingIndex {
+        let metaURL = url.appendingPathComponent("streaming.meta.json")
+        let data = try Data(contentsOf: metaURL)
+        let meta = try JSONDecoder().decode(PersistedMeta.self, from: data)
+
+        let loadedBase = try await ANNSIndex.load(from: url.appendingPathComponent("base.anns"))
+        let streaming = StreamingIndex(config: meta.config)
+        await streaming.applyLoadedState(base: loadedBase, meta: meta)
+        return streaming
+    }
+
+    private func applyLoadedState(base: ANNSIndex, meta: PersistedMeta) {
+        self.base = base
+        self.delta = nil
+        self.mergeTask = nil
+        self._isMerging = false
+        self.pendingVectors = []
+        self.pendingIDs = []
+
+        self.allVectorsList = meta.allVectorsList
+        self.allIDsList = meta.allIDsList
+        self.allIDs = Set(meta.allIDsList)
+        self.deletedIDs = Set(meta.deletedIDs)
+        self.metadataByID = meta.metadataByID
+        self.vectorDimension = meta.vectorDimension ?? meta.allVectorsList.first?.count
+
+        self.idInBase = Set(meta.allIDsList.filter { !self.deletedIDs.contains($0) })
+        self.idInDelta = []
+    }
+
     private func validateDimension(of vector: [Float]) throws {
         if vector.isEmpty {
             throw ANNSError.dimensionMismatch(expected: 1, got: 0)
@@ -100,43 +371,70 @@ public actor StreamingIndex {
         }
     }
 
-    private func flushPendingIntoDelta() async throws {
-        guard !pendingVectors.isEmpty else {
-            return
+    private func validateQueryDimension(_ query: [Float]) throws {
+        guard let expected = vectorDimension else {
+            throw ANNSError.indexEmpty
         }
+        guard query.count == expected else {
+            throw ANNSError.dimensionMismatch(expected: expected, got: query.count)
+        }
+    }
 
-        if delta == nil {
-            guard pendingVectors.count >= 2 else {
+    private func removePendingID(_ id: String) {
+        if let index = pendingIDs.firstIndex(of: id) {
+            pendingIDs.remove(at: index)
+            pendingVectors.remove(at: index)
+        }
+    }
+
+    private func adjustedConfiguration(for nodeCount: Int) -> IndexConfiguration {
+        var adjusted = config.indexConfiguration
+        adjusted.degree = min(adjusted.degree, max(1, nodeCount - 1))
+        return adjusted
+    }
+
+    private func flushPendingIntoDelta() async throws {
+        while !pendingVectors.isEmpty {
+            if delta == nil {
+                guard pendingVectors.count >= 2 else {
+                    return
+                }
+                let newDelta = try await buildIndex(vectors: pendingVectors, ids: pendingIDs)
+                delta = newDelta
+                idInDelta = Set(pendingIDs)
+                pendingVectors.removeAll(keepingCapacity: true)
+                pendingIDs.removeAll(keepingCapacity: true)
+                continue
+            }
+
+            guard let delta else {
                 return
             }
-            let newDelta = ANNSIndex(configuration: adjustedConfiguration(for: pendingVectors.count))
-            try await newDelta.build(vectors: pendingVectors, ids: pendingIDs)
-            delta = newDelta
-            idInDelta.formUnion(pendingIDs)
-            pendingVectors.removeAll(keepingCapacity: true)
-            pendingIDs.removeAll(keepingCapacity: true)
-            return
-        }
 
-        do {
-            try await delta?.batchInsert(pendingVectors, ids: pendingIDs)
-            idInDelta.formUnion(pendingIDs)
-            pendingVectors.removeAll(keepingCapacity: true)
-            pendingIDs.removeAll(keepingCapacity: true)
-        } catch let error as ANNSError {
-            guard case .constructionFailed(let message) = error,
-                  message.contains("Index capacity exceeded")
-            else {
-                throw error
+            do {
+                try await delta.batchInsert(pendingVectors, ids: pendingIDs)
+                idInDelta.formUnion(pendingIDs)
+                pendingVectors.removeAll(keepingCapacity: true)
+                pendingIDs.removeAll(keepingCapacity: true)
+            } catch let error as ANNSError {
+                guard case .constructionFailed(let message) = error,
+                      message.contains("Index capacity exceeded")
+                else {
+                    throw error
+                }
+
+                if _isMerging {
+                    return
+                }
+                try await triggerMerge()
             }
-            try await triggerMerge()
-            idInDelta.subtract(pendingIDs)
-            pendingVectors.removeAll(keepingCapacity: true)
-            pendingIDs.removeAll(keepingCapacity: true)
         }
     }
 
     private func shouldMerge() async -> Bool {
+        if _isMerging {
+            return false
+        }
         guard let delta else {
             return false
         }
@@ -152,39 +450,99 @@ public actor StreamingIndex {
         case .blocking:
             try await triggerMerge()
         case .background:
-            guard mergeTask == nil, !_isMerging else {
-                return
-            }
-            mergeTask = Task { [self] in
-                defer {
-                    Task { self.clearMergeTask() }
-                }
-                try await self.triggerMerge()
-            }
+            startBackgroundMergeIfNeeded()
         }
     }
 
-    private func clearMergeTask() {
+    private func startBackgroundMergeIfNeeded() {
+        guard mergeTask == nil else {
+            return
+        }
+
+        let task = Task { [self] in
+            try await self.triggerMerge()
+        }
+        mergeTask = task
+
+        Task { [self] in
+            _ = try? await task.value
+            self.clearMergeTaskReference()
+        }
+    }
+
+    private func clearMergeTaskReference() {
         mergeTask = nil
     }
 
-    private func adjustedConfiguration(for nodeCount: Int) -> IndexConfiguration {
-        var adjusted = config.indexConfiguration
-        adjusted.degree = min(adjusted.degree, max(1, nodeCount - 1))
-        return adjusted
-    }
+    private func activeRecords(upperBound: Int) -> (vectors: [[Float]], ids: [String]) {
+        let safeUpper = min(upperBound, allIDsList.count)
+        guard safeUpper > 0 else {
+            return ([], [])
+        }
 
-    private func activeRecords() -> (vectors: [[Float]], ids: [String]) {
         var vectors: [[Float]] = []
         var ids: [String] = []
-        vectors.reserveCapacity(allVectorsList.count)
-        ids.reserveCapacity(allIDsList.count)
+        vectors.reserveCapacity(safeUpper)
+        ids.reserveCapacity(safeUpper)
 
-        for (vector, id) in zip(allVectorsList, allIDsList) where !deletedIDs.contains(id) {
-            vectors.append(vector)
+        for index in 0..<safeUpper {
+            let id = allIDsList[index]
+            guard !deletedIDs.contains(id) else {
+                continue
+            }
             ids.append(id)
+            vectors.append(allVectorsList[index])
         }
         return (vectors, ids)
+    }
+
+    private func activeRecords(in range: Range<Int>) -> (vectors: [[Float]], ids: [String]) {
+        let lower = max(0, range.lowerBound)
+        let upper = min(allIDsList.count, range.upperBound)
+        guard lower < upper else {
+            return ([], [])
+        }
+
+        var vectors: [[Float]] = []
+        var ids: [String] = []
+        vectors.reserveCapacity(upper - lower)
+        ids.reserveCapacity(upper - lower)
+
+        for index in lower..<upper {
+            let id = allIDsList[index]
+            guard !deletedIDs.contains(id) else {
+                continue
+            }
+            ids.append(id)
+            vectors.append(allVectorsList[index])
+        }
+        return (vectors, ids)
+    }
+
+    private func buildIndex(vectors: [[Float]], ids: [String]) async throws -> ANNSIndex {
+        let index = ANNSIndex(configuration: adjustedConfiguration(for: vectors.count))
+        try await index.build(vectors: vectors, ids: ids)
+        try await applyStoredMetadata(to: index, ids: ids)
+        return index
+    }
+
+    private func applyStoredMetadata(to index: ANNSIndex, ids: [String]) async throws {
+        for id in ids {
+            guard let row = metadataByID[id] else {
+                continue
+            }
+
+            for (column, value) in row {
+                switch value {
+                case .string(let value):
+                    try await index.setMetadata(column, value: value, for: id)
+                case .float(let value):
+                    try await index.setMetadata(column, value: value, for: id)
+                case .int64(let value):
+                    try await index.setMetadata(column, value: value, for: id)
+                }
+            }
+        }
     }
 
     private func triggerMerge() async throws {
@@ -194,29 +552,144 @@ public actor StreamingIndex {
         _isMerging = true
         defer { _isMerging = false }
 
-        let merged = activeRecords()
-        guard !merged.vectors.isEmpty else {
+        let snapshotCount = allIDsList.count
+        let merged = activeRecords(upperBound: snapshotCount)
+
+        guard !merged.ids.isEmpty else {
             base = nil
             delta = nil
             idInBase.removeAll()
             idInDelta.removeAll()
+            pendingVectors.removeAll(keepingCapacity: true)
+            pendingIDs.removeAll(keepingCapacity: true)
             return
         }
 
-        guard merged.vectors.count >= 2 else {
+        guard merged.ids.count >= 2 else {
             base = nil
             delta = nil
             idInBase.removeAll()
             idInDelta.removeAll()
+            pendingVectors = merged.vectors
+            pendingIDs = merged.ids
             return
         }
 
-        let newBase = ANNSIndex(configuration: adjustedConfiguration(for: merged.vectors.count))
-        try await newBase.build(vectors: merged.vectors, ids: merged.ids)
+        let newBase = try await buildIndex(vectors: merged.vectors, ids: merged.ids)
 
         base = newBase
-        delta = nil
         idInBase = Set(merged.ids)
+        delta = nil
         idInDelta.removeAll()
+        pendingVectors.removeAll(keepingCapacity: true)
+        pendingIDs.removeAll(keepingCapacity: true)
+
+        let tail = activeRecords(in: snapshotCount..<allIDsList.count)
+        if tail.ids.count >= 2 {
+            let newDelta = try await buildIndex(vectors: tail.vectors, ids: tail.ids)
+            delta = newDelta
+            idInDelta = Set(tail.ids)
+        } else if tail.ids.count == 1 {
+            pendingVectors = tail.vectors
+            pendingIDs = tail.ids
+        }
+    }
+
+    private func pendingSearchResults(
+        query: [Float],
+        filter: SearchFilter?,
+        metric: Metric
+    ) -> [SearchResult] {
+        var results: [SearchResult] = []
+        results.reserveCapacity(pendingVectors.count)
+
+        for (vector, id) in zip(pendingVectors, pendingIDs) {
+            guard !deletedIDs.contains(id), matchesFilter(for: id, filter: filter) else {
+                continue
+            }
+
+            let score = SIMDDistance.distance(query, vector, metric: metric)
+            results.append(SearchResult(id: id, score: score, internalID: UInt32.max))
+        }
+
+        return results
+    }
+
+    private func dedupeAndSort(_ results: [SearchResult]) -> [SearchResult] {
+        var bestByID: [String: SearchResult] = [:]
+        bestByID.reserveCapacity(results.count)
+
+        for result in results {
+            if let existing = bestByID[result.id] {
+                if result.score < existing.score {
+                    bestByID[result.id] = result
+                }
+            } else {
+                bestByID[result.id] = result
+            }
+        }
+
+        return bestByID.values.sorted { lhs, rhs in
+            if lhs.score == rhs.score {
+                return lhs.id < rhs.id
+            }
+            return lhs.score < rhs.score
+        }
+    }
+
+    private func matchesFilter(for id: String, filter: SearchFilter?) -> Bool {
+        guard let filter else {
+            return true
+        }
+        let row = metadataByID[id] ?? [:]
+        return evaluate(filter: filter, row: row)
+    }
+
+    private func evaluate(filter: SearchFilter, row: [String: MetadataValue]) -> Bool {
+        switch filter {
+        case .equals(column: let column, value: let value):
+            if case .string(let current)? = row[column] {
+                return current == value
+            }
+            return false
+
+        case .greaterThan(column: let column, value: let value):
+            guard let current = numericValue(from: row[column]) else {
+                return false
+            }
+            return current > value
+
+        case .lessThan(column: let column, value: let value):
+            guard let current = numericValue(from: row[column]) else {
+                return false
+            }
+            return current < value
+
+        case .in(column: let column, values: let values):
+            if case .string(let current)? = row[column] {
+                return values.contains(current)
+            }
+            return false
+
+        case .and(let filters):
+            return filters.allSatisfy { evaluate(filter: $0, row: row) }
+
+        case .or(let filters):
+            return filters.contains { evaluate(filter: $0, row: row) }
+
+        case .not(let inner):
+            return !evaluate(filter: inner, row: row)
+        }
+    }
+
+    private func numericValue(from value: MetadataValue?) -> Float? {
+        switch value {
+        case .float(let value):
+            return value
+        case .int64(let value):
+            return Float(value)
+        case .string, .none:
+            return nil
+        }
     }
 }
