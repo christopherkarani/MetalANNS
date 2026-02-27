@@ -643,11 +643,11 @@ DECISIONS MADE: (pending)
 > **Status**: IN PROGRESS
 > **Owner**: Subagent
 > **Reviewer**: Orchestrator
-> **Last Updated**: 2026-02-27 09:14 EAT
+> **Last Updated**: 2026-02-27 09:36 EAT
 
 - [x] Task 1 — Create `HNSWLayers.swift` + basic structure tests
   - Commit: `feat(hnsw): add HNSWLayers and SkipLayer data structures`
-- [ ] Task 2 — Create `HNSWBuilder.swift` + level assignment and layer building
+- [x] Task 2 — Create `HNSWBuilder.swift` + level assignment and layer building
   - Commit: `feat(hnsw): implement HNSWBuilder with probabilistic level assignment`
 - [ ] Task 3 — Create `HNSWSearchCPU.swift` + layer-by-layer descent
   - Commit: `feat(hnsw): implement HNSWSearchCPU with layer descent and beam search`
@@ -670,7 +670,13 @@ DECISIONS MADE: (pending)
 
 ### Task Notes 2
 
-_(Executing agent: fill in after completing Task 2)_
+- Added RED test `hnswtBuildingTest` in `HNSWTests.swift`, which failed with `cannot find 'HNSWBuilder' in scope`.
+- Implemented `Sources/MetalANNSCore/HNSWBuilder.swift`:
+  - `buildLayers(vectors:graph:nodeCount:metric:) throws(ANNSError)`
+  - probabilistic `assignLevel(mL:maxLayers:)`
+  - skip-layer adjacency construction using `SIMDDistance.distance`
+- Validation: targeted xcodebuild test command compiles and succeeds after builder implementation.
+- Baseline compile unblock (workspace-level): added `Foundation` imports and split one heavy expression in existing graph-repair tests to resolve pre-existing compiler failures.
 
 ### Task Notes 3
 
