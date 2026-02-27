@@ -1749,3 +1749,42 @@ All six phases implemented:
 - Phase 16: IVFPQ product quantization (32-64x compression)
 - Phase 17: Production benchmarking suite (.annbin format, sweeps, Pareto)
 - Phase 18: Multi-queue GPU parallelism
+
+---
+
+## Phase 19: Streaming Inserts
+
+> **Status**: IMPLEMENTED (PARTIAL ENV VALIDATION)
+> **Owner**: Orchestrator
+> **Last Updated**: 2026-02-27
+
+- [x] 1 — `StreamingConfiguration` implemented with `deltaCapacity`, `mergeStrategy`, and Codable support.
+- [x] 2 — `StreamingIndex` actor implemented for continuous ingest (`base` + `delta` + pending pre-build buffer).
+- [x] 3 — Background/blocking merge paths implemented with atomic base replacement and `isMerging`.
+- [x] 4 — Search implemented across base + delta + pending with dedupe and score ordering.
+- [x] 5 — Metadata forwarding and delete routing implemented and covered by tests.
+- [x] 6 — `flush()` idempotence and concurrent insert/search behavior covered by tests.
+- [x] 7 — Persistence implemented (`base.anns` + `streaming.meta.json`) with auto-flush on save.
+- [ ] 8 — Full xcodebuild build/test green in this environment (blocked by local toolchain/environment issues).
+
+### Task Notes 2
+
+- Adopted lazy delta build with `pendingVectors`/`pendingIDs`. Because this environment rejects single-vector ANNSIndex builds (`NNDescentCPU requires at least 2 vectors`), pending data is promoted to delta only once at least two vectors are available.
+
+### Task Notes 3
+
+- Background merge uses actor-isolated `Task` scheduling and a single `mergeTask` gate.
+- Merge snapshots canonical records, rebuilds base, then reconstructs tail records inserted during merge into fresh delta/pending so no inserts are dropped.
+
+### Task Notes 7
+
+- Persistence format is directory-based:
+  - `base.anns`
+  - `streaming.meta.json` (config, canonical vectors/ids, deleted IDs, metadata map)
+- `save(to:)` auto-flushes before serializing.
+
+### Validation Summary
+
+- `swift test --filter Streaming` passed (23/23 streaming tests).
+- `xcodebuild build/test` failed in this environment with local Xcode/CoreSimulator/package-detection issues.
+- Full `swift test` run failed only on pre-existing GPU/default-Metal-library baselines unrelated to Phase 19 streaming changes.
