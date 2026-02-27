@@ -16,9 +16,9 @@ kernel void pq_compute_distance_table(
         return;
     }
 
-    const float *querySubspace = query + (subspace * subspaceDim);
+    device const float *querySubspace = query + (subspace * subspaceDim);
     uint codebookOffset = (subspace * Ks * subspaceDim) + (centroid * subspaceDim);
-    const float *centroidPtr = codebooks + codebookOffset;
+    device const float *centroidPtr = codebooks + codebookOffset;
 
     float distance = 0.0f;
     for (uint d = 0; d < subspaceDim; d++) {

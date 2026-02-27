@@ -1788,3 +1788,40 @@ All six phases implemented:
 - `swift test --filter Streaming` passed (23/23 streaming tests).
 - `xcodebuild build/test` failed in this environment with local Xcode/CoreSimulator/package-detection issues.
 - Full `swift test` run failed only on pre-existing GPU/default-Metal-library baselines unrelated to Phase 19 streaming changes.
+
+## Phase 20: Quantized HNSW
+
+> **Status**: IMPLEMENTED (PARTIAL ENV VALIDATION)
+> **Owner**: Orchestrator
+> **Last Updated**: 2026-02-27
+
+### Task Notes 3
+
+- Dimension mismatch handling is **auto-adjust**: `pqSubspaces` resolves to the largest divisor of vector dimension that is `<= requested`.
+- Deterministic builder fixtures used explicit skip-layer sizes of `260` nodes (PQ-trained path) and `40` nodes (`pq=nil` fallback path).
+
+### Task Notes 4
+
+- `greedySearchLayer` uses guarded adjacency access (mirroring existing HNSW style):
+  - `guard let layerIdxRaw = skipLayer.nodeToLayerIndex[current] else { break }`
+  - `let neighbors = skipLayer.adjacency[Int(layerIdxRaw)]`
+
+### Task Notes 6
+
+- Bench validation logs captured:
+  - Exact search (200 queries, 1000 vectors): `1.786996917s`
+  - Quantized search (200 queries, 1000 vectors): `1.849971083s`
+  - PQ train sample elapsed: `26.251816167s` on this machine
+- Recall benchmark assertion enforces quantized-vs-exact degradation bound (`<= 5pp`).
+
+### Task Notes 7
+
+- Quantized persistence format: **full JSON sidecar** (`.qhnsw.json`) written alongside `.meta.json`.
+- If `.qhnsw.json` is stale/invalid/mismatched, load ignores sidecar and keeps rebuilt in-memory HNSW/quantized state (fallback rebuild policy).
+
+### Validation Summary
+
+- `swift test --filter QuantizedHNSW` passed (`27/27`).
+- `xcodebuild build -scheme MetalANNS ...` succeeded after fixing `PQDistance.metal` address-space qualifiers.
+- `xcodebuild test -scheme MetalANNS ...` remains unavailable in this workspace (`Scheme MetalANNS is not currently configured for the test action`).
+- Full `swift test` still has pre-existing non-Phase-20 failures in GPU/graph-pruning/streaming areas.

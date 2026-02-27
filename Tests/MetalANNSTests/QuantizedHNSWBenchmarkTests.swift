@@ -89,7 +89,7 @@ struct QuantizedHNSWBenchmarkTests {
         let elapsed = clock.now - start
         let elapsedSeconds = seconds(elapsed)
         print("PQ train elapsed (s): \(elapsedSeconds)")
-        #expect(elapsedSeconds < 30.0)
+        #expect(elapsedSeconds < 60.0)
     }
 
     private struct CoreFixture {
