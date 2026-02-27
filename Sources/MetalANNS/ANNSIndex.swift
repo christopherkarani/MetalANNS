@@ -656,6 +656,14 @@ public actor ANNSIndex {
         configuration
     }
 
+    func hasQuantizedHNSWForTesting() -> Bool {
+        quantizedHNSW != nil
+    }
+
+    func setQuantizedHNSW(_ quantized: QuantizedHNSWLayers?) {
+        quantizedHNSW = quantized
+    }
+
     public func save(to url: URL) async throws {
         guard isBuilt, let vectors, let graph else {
             throw ANNSError.indexEmpty
@@ -677,6 +685,11 @@ public actor ANNSIndex {
         )
         let metadataData = try JSONEncoder().encode(metadata)
         try metadataData.write(to: Self.metadataURL(for: url), options: .atomic)
+
+        if let quantizedHNSW {
+            let quantizedData = try JSONEncoder().encode(quantizedHNSW)
+            try quantizedData.write(to: Self.qhnswURL(for: url), options: .atomic)
+        }
     }
 
     public func saveMmapCompatible(to url: URL) async throws {
@@ -700,6 +713,11 @@ public actor ANNSIndex {
         )
         let metadataData = try JSONEncoder().encode(metadata)
         try metadataData.write(to: Self.metadataURL(for: url), options: .atomic)
+
+        if let quantizedHNSW {
+            let quantizedData = try JSONEncoder().encode(quantizedHNSW)
+            try quantizedData.write(to: Self.qhnswURL(for: url), options: .atomic)
+        }
     }
 
     public static func load(from url: URL) async throws -> ANNSIndex {
@@ -723,6 +741,7 @@ public actor ANNSIndex {
             metadataStore: persistedMetadata?.metadataStore ?? MetadataStore()
         )
         try await index.rebuildHNSWFromCurrentState()
+        await index.loadQuantizedHNSWSidecarIfPresent(from: url)
 
         return index
     }
@@ -749,6 +768,7 @@ public actor ANNSIndex {
             mmapLifetime: loaded.mmapLifetime
         )
         try await index.rebuildHNSWFromCurrentState()
+        await index.loadQuantizedHNSWSidecarIfPresent(from: url)
 
         return index
     }
@@ -776,6 +796,7 @@ public actor ANNSIndex {
             mmapLifetime: diskBacked.mmapLifetime
         )
         try await index.rebuildHNSWFromCurrentState()
+        await index.loadQuantizedHNSWSidecarIfPresent(from: url)
 
         return index
     }
@@ -885,8 +906,70 @@ public actor ANNSIndex {
         }
     }
 
+    private func loadQuantizedHNSWSidecarIfPresent(from indexURL: URL) {
+        guard configuration.quantizedHNSWConfiguration.useQuantizedEdges else {
+            return
+        }
+
+        let sidecarURL = Self.qhnswURL(for: indexURL)
+        guard FileManager.default.fileExists(atPath: sidecarURL.path) else {
+            return
+        }
+        guard let data = try? Data(contentsOf: sidecarURL),
+              let decoded = try? JSONDecoder().decode(QuantizedHNSWLayers.self, from: data) else {
+            return
+        }
+
+        guard isQuantizedSidecarCompatible(decoded) else {
+            return
+        }
+        quantizedHNSW = decoded
+    }
+
+    private func isQuantizedSidecarCompatible(_ candidate: QuantizedHNSWLayers) -> Bool {
+        guard let vectors, let graph else {
+            return false
+        }
+        guard candidate.maxLayer >= 0,
+              candidate.quantizedLayers.count == candidate.maxLayer,
+              Int(candidate.entryPoint) < vectors.count,
+              graph.nodeCount == vectors.count else {
+            return false
+        }
+
+        for layer in candidate.quantizedLayers {
+            let nodeCount = layer.base.layerIndexToNode.count
+            guard layer.base.adjacency.count == nodeCount else {
+                return false
+            }
+
+            for nodeID in layer.base.layerIndexToNode {
+                if Int(nodeID) >= vectors.count {
+                    return false
+                }
+            }
+
+            if let pq = layer.pq {
+                guard layer.codes.count == nodeCount else {
+                    return false
+                }
+                for code in layer.codes where code.count != pq.numSubspaces {
+                    return false
+                }
+            } else if !layer.codes.isEmpty && layer.codes.count != nodeCount {
+                return false
+            }
+        }
+
+        return true
+    }
+
     private nonisolated static func metadataURL(for fileURL: URL) -> URL {
         URL(fileURLWithPath: fileURL.path + ".meta.json")
+    }
+
+    private nonisolated static func qhnswURL(for fileURL: URL) -> URL {
+        URL(fileURLWithPath: fileURL.path + ".qhnsw.json")
     }
 
     private nonisolated static func loadPersistedMetadataIfPresent(from fileURL: URL) throws -> PersistedMetadata? {
