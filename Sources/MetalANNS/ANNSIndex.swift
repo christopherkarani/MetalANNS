@@ -38,6 +38,21 @@ public actor ANNSIndex {
         self.hnsw = nil
     }
 
+    init(configuration: IndexConfiguration = .default, context: MetalContext?) {
+        self.configuration = configuration
+        self.context = context
+        self.vectors = nil
+        self.graph = nil
+        self.idMap = IDMap()
+        self.softDeletion = SoftDeletion()
+        self.metadataStore = MetadataStore()
+        self.entryPoint = 0
+        self.isBuilt = false
+        self.isReadOnlyLoadedIndex = false
+        self.mmapLifetime = nil
+        self.hnsw = nil
+    }
+
     public func build(vectors inputVectors: [[Float]], ids: [String]) async throws {
         guard !inputVectors.isEmpty else {
             throw ANNSError.constructionFailed("Cannot build index with empty vectors")
@@ -572,7 +587,7 @@ public actor ANNSIndex {
             return []
         }
 
-        let maxConcurrency = context != nil ? 4 : max(1, ProcessInfo.processInfo.activeProcessorCount)
+        let maxConcurrency = await batchSearchMaxConcurrency()
 
         return try await withThrowingTaskGroup(of: (Int, [SearchResult]).self) { group in
             var orderedResults = Array<[SearchResult]?>(repeating: nil, count: queries.count)
@@ -603,6 +618,10 @@ public actor ANNSIndex {
 
             return orderedResults.map { $0! }
         }
+    }
+
+    func batchSearchMaxConcurrencyForTesting() async -> Int {
+        await batchSearchMaxConcurrency()
     }
 
     public func save(to url: URL) async throws {
@@ -731,6 +750,13 @@ public actor ANNSIndex {
 
     public var count: Int {
         max(0, idMap.count - softDeletion.deletedCount)
+    }
+
+    private func batchSearchMaxConcurrency() async -> Int {
+        if let context {
+            return await context.queuePool.queues.count
+        }
+        return max(1, ProcessInfo.processInfo.activeProcessorCount)
     }
 
     private func currentDevice() -> MTLDevice? {
