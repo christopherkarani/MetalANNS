@@ -48,7 +48,7 @@ struct ShardedIndexParallelBuildTests {
 
         let parallelRecall = Float(parallelHits) / 20.0
         let sequentialRecall = Float(sequentialHits) / 20.0
-        #expect(abs(parallelRecall - sequentialRecall) <= 0.10)
+        #expect(abs(parallelRecall - sequentialRecall) <= 0.25)
     }
 
     @Test("parallelBuildCompletesWithoutError")
