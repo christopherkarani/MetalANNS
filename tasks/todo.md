@@ -643,7 +643,7 @@ DECISIONS MADE: (pending)
 > **Status**: IN PROGRESS
 > **Owner**: Subagent
 > **Reviewer**: Orchestrator
-> **Last Updated**: 2026-02-27 09:38 EAT
+> **Last Updated**: 2026-02-27 09:40 EAT
 
 - [x] Task 1 — Create `HNSWLayers.swift` + basic structure tests
   - Commit: `feat(hnsw): add HNSWLayers and SkipLayer data structures`
@@ -653,7 +653,7 @@ DECISIONS MADE: (pending)
   - Commit: `feat(hnsw): implement HNSWSearchCPU with layer descent and beam search`
 - [x] Task 4 — Create `HNSWConfiguration.swift`
   - Commit: `feat(hnsw): add HNSWConfiguration with sensible defaults`
-- [ ] Task 5 — Write comprehensive test suite (`HNSWTests.swift`)
+- [x] Task 5 — Write comprehensive test suite (`HNSWTests.swift`)
   - Commit: `test(hnsw): add comprehensive layer assignment, build, and search tests`
 - [ ] Task 6 — Integrate into `ANNSIndex.swift`
   - Commit: `feat(hnsw): integrate HNSWSearchCPU into ANNSIndex search path`
@@ -695,7 +695,14 @@ DECISIONS MADE: (pending)
 
 ### Task Notes 5
 
-_(Executing agent: fill in after completing Task 5)_
+- Reworked `Tests/MetalANNSTests/HNSWTests.swift` into a comprehensive suite with 5 tests:
+  - layer structure retrieval
+  - builder level assignment sanity
+  - layered search returning sorted top-k
+  - recall comparison vs flat beam search (±0.05)
+  - HNSW configuration defaults
+- Added deterministic helper utilities for vector buffers and exact-distance ground truth.
+- Validation: `xcodebuild test ... -only-testing MetalANNSTests/HNSWTests` now executes and passes all 5 HNSW tests.
 
 ### Task Notes 6
 
