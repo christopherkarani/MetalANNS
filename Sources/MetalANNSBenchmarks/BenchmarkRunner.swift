@@ -1,5 +1,6 @@
 import Foundation
 import MetalANNS
+import MetalANNSCore
 
 struct BenchmarkRunner {
     struct Config {
@@ -20,6 +21,8 @@ struct BenchmarkRunner {
         var recallAt1: Double
         var recallAt10: Double
         var recallAt100: Double
+        var queryCount: Int = 0
+        var totalSearchTimeSeconds: Double = 0
     }
 
     static func run(config: Config) async throws -> Results {
@@ -51,6 +54,7 @@ struct BenchmarkRunner {
         var recallAt10Total: Double = 0
         var recallAt100Total: Double = 0
 
+        let batchSearchStart = DispatchTime.now().uptimeNanoseconds
         for query in queries {
             let latencyStart = DispatchTime.now().uptimeNanoseconds
             _ = try await index.search(query: query, k: config.k)
@@ -78,6 +82,7 @@ struct BenchmarkRunner {
             let exactTop100 = Set(exact.prefix(top100Count))
             recallAt100Total += Double(approxTop100.intersection(exactTop100).count) / Double(max(1, top100Count))
         }
+        let batchSearchEnd = DispatchTime.now().uptimeNanoseconds
 
         let queryCount = Double(max(1, queries.count))
         return Results(
@@ -87,7 +92,111 @@ struct BenchmarkRunner {
             queryLatencyP99Ms: percentile(0.99, in: latenciesMs),
             recallAt1: recallAt1Total / queryCount,
             recallAt10: recallAt10Total / queryCount,
-            recallAt100: recallAt100Total / queryCount
+            recallAt100: recallAt100Total / queryCount,
+            queryCount: queries.count,
+            totalSearchTimeSeconds: Double(batchSearchEnd - batchSearchStart) / 1_000_000_000.0
+        )
+    }
+
+    static func run(config: Config, dataset: BenchmarkDataset) async throws -> Results {
+        guard !dataset.trainVectors.isEmpty else {
+            throw BenchmarkDatasetError.invalidDataset("trainVectors cannot be empty")
+        }
+        guard !dataset.testVectors.isEmpty else {
+            throw BenchmarkDatasetError.invalidDataset("testVectors cannot be empty")
+        }
+
+        let ids = (0..<dataset.trainVectors.count).map { "v_\($0)" }
+        let index = ANNSIndex(
+            configuration: IndexConfiguration(
+                degree: config.degree,
+                metric: config.metric,
+                efSearch: config.efSearch
+            )
+        )
+
+        let buildStart = DispatchTime.now().uptimeNanoseconds
+        try await index.build(vectors: dataset.trainVectors, ids: ids)
+        let buildEnd = DispatchTime.now().uptimeNanoseconds
+        let buildTimeMs = Double(buildEnd - buildStart) / 1_000_000.0
+
+        let top1Count = min(1, dataset.neighborsCount)
+        let top10Count = min(10, dataset.neighborsCount)
+        let top100Count = min(100, dataset.neighborsCount)
+
+        var latenciesMs: [Double] = []
+        latenciesMs.reserveCapacity(dataset.testVectors.count)
+
+        var recallAt1Total: Double = 0
+        var recallAt10Total: Double = 0
+        var recallAt100Total: Double = 0
+
+        let queryK = max(config.k, max(top1Count, max(top10Count, top100Count)))
+        let batchSearchStart = DispatchTime.now().uptimeNanoseconds
+
+        for (queryIndex, query) in dataset.testVectors.enumerated() {
+            let latencyStart = DispatchTime.now().uptimeNanoseconds
+            let approx = try await index.search(query: query, k: queryK)
+            let latencyEnd = DispatchTime.now().uptimeNanoseconds
+            latenciesMs.append(Double(latencyEnd - latencyStart) / 1_000_000.0)
+
+            let expected = dataset.groundTruth[queryIndex]
+            let approxIDs = approx.compactMap(parseBenchmarkID)
+
+            let approxTop1 = Set(approxIDs.prefix(top1Count))
+            let exactTop1 = Set(expected.prefix(top1Count))
+            recallAt1Total += Double(approxTop1.intersection(exactTop1).count) / Double(max(1, top1Count))
+
+            let approxTop10 = Set(approxIDs.prefix(top10Count))
+            let exactTop10 = Set(expected.prefix(top10Count))
+            recallAt10Total += Double(approxTop10.intersection(exactTop10).count) / Double(max(1, top10Count))
+
+            let approxTop100 = Set(approxIDs.prefix(top100Count))
+            let exactTop100 = Set(expected.prefix(top100Count))
+            recallAt100Total += Double(approxTop100.intersection(exactTop100).count) / Double(max(1, top100Count))
+        }
+
+        let batchSearchEnd = DispatchTime.now().uptimeNanoseconds
+        let queryCount = max(1, dataset.testVectors.count)
+
+        return Results(
+            buildTimeMs: buildTimeMs,
+            queryLatencyP50Ms: percentile(0.50, in: latenciesMs),
+            queryLatencyP95Ms: percentile(0.95, in: latenciesMs),
+            queryLatencyP99Ms: percentile(0.99, in: latenciesMs),
+            recallAt1: recallAt1Total / Double(queryCount),
+            recallAt10: recallAt10Total / Double(queryCount),
+            recallAt100: recallAt100Total / Double(queryCount),
+            queryCount: dataset.testVectors.count,
+            totalSearchTimeSeconds: Double(batchSearchEnd - batchSearchStart) / 1_000_000_000.0
+        )
+    }
+
+    static func sweep(
+        configs: [(label: String, config: Config)],
+        dataset: BenchmarkDataset
+    ) async throws -> BenchmarkReport {
+        var rows: [BenchmarkReport.Row] = []
+        rows.reserveCapacity(configs.count)
+
+        for item in configs {
+            let result = try await run(config: item.config, dataset: dataset)
+            rows.append(
+                BenchmarkReport.Row(
+                    label: item.label,
+                    recallAt10: result.recallAt10,
+                    qps: result.qps,
+                    buildTimeMs: result.buildTimeMs,
+                    p50Ms: result.queryLatencyP50Ms,
+                    p95Ms: result.queryLatencyP95Ms,
+                    p99Ms: result.queryLatencyP99Ms
+                )
+            )
+        }
+
+        return BenchmarkReport(
+            rows: rows,
+            datasetLabel: "train=\(dataset.trainVectors.count),test=\(dataset.testVectors.count),dim=\(dataset.dimension),metric=\(dataset.metric.rawValue)"
         )
     }
 
@@ -150,5 +259,28 @@ struct BenchmarkRunner {
             }
             return -dot
         }
+    }
+
+    private static func parseBenchmarkID(_ result: SearchResult) -> UInt32? {
+        if let value = UInt32(result.id) {
+            return value
+        }
+
+        if let underscore = result.id.firstIndex(of: "_") {
+            let after = result.id.index(after: underscore)
+            let suffix = result.id[after...]
+            return UInt32(suffix)
+        }
+
+        return nil
+    }
+}
+
+extension BenchmarkRunner.Results {
+    var qps: Double {
+        guard queryCount > 0, totalSearchTimeSeconds > 0 else {
+            return 0
+        }
+        return Double(queryCount) / totalSearchTimeSeconds
     }
 }
