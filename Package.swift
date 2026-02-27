@@ -24,7 +24,7 @@ let package = Package(
         ),
         .testTarget(
             name: "MetalANNSTests",
-            dependencies: ["MetalANNS", "MetalANNSCore"],
+            dependencies: ["MetalANNS", "MetalANNSCore", "MetalANNSBenchmarks"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .executableTarget(
