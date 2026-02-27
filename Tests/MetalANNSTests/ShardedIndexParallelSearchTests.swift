@@ -1,0 +1,241 @@
+import Foundation
+import Testing
+@testable import MetalANNS
+@testable import MetalANNSCore
+
+@Suite("ShardedIndex Parallel Search Tests")
+struct ShardedIndexParallelSearchTests {
+    @Test("parallelSearchMatchesSequential")
+    func parallelSearchMatchesSequential() async throws {
+        let dim = 32
+        let vectors = makeClusteredVectors(count: 1200, dim: dim, clusters: 12)
+        let ids = (0..<vectors.count).map { "v\($0)" }
+        let config = IndexConfiguration(degree: 8, metric: .cosine, efSearch: 96)
+        let index = ShardedIndex(numShards: 4, nprobe: 3, configuration: config)
+        try await index.build(vectors: vectors, ids: ids)
+
+        let sequential = try await buildSequentialReference(
+            vectors: vectors,
+            ids: ids,
+            numShards: 4,
+            nprobe: 3,
+            configuration: config
+        )
+
+        var parallelHits = 0
+        var sequentialHits = 0
+
+        for i in 0..<50 {
+            let query = vectors[i]
+            let parallelResults = try await index.search(query: query, k: 10)
+            let sequentialResults = try await searchSequentialReference(
+                state: sequential,
+                query: query,
+                k: 10,
+                metric: config.metric
+            )
+
+            #expect(parallelResults.count == sequentialResults.count)
+
+            if parallelResults.contains(where: { $0.id == "v\(i)" }) {
+                parallelHits += 1
+            }
+            if sequentialResults.contains(where: { $0.id == "v\(i)" }) {
+                sequentialHits += 1
+            }
+        }
+
+        let parallelRecall = Float(parallelHits) / 50.0
+        let sequentialRecall = Float(sequentialHits) / 50.0
+        #expect(abs(parallelRecall - sequentialRecall) <= 0.15)
+    }
+
+    @Test("parallelBatchSearchCorrect")
+    func parallelBatchSearchCorrect() async throws {
+        let vectors = makeClusteredVectors(count: 1500, dim: 32, clusters: 12)
+        let ids = (0..<vectors.count).map { "v\($0)" }
+        let index = ShardedIndex(
+            numShards: 4,
+            nprobe: 3,
+            configuration: IndexConfiguration(degree: 8, metric: .cosine, efSearch: 96)
+        )
+        try await index.build(vectors: vectors, ids: ids)
+
+        let queries = Array(vectors.prefix(100))
+        let results = try await index.batchSearch(queries: queries, k: 10)
+        #expect(results.count == 100)
+
+        var hits = 0
+        for i in 0..<100 where results[i].contains(where: { $0.id == "v\(i)" }) {
+            hits += 1
+        }
+        let recall = Float(hits) / 100.0
+        #expect(recall > 0.6)
+    }
+
+    @Test("parallelSearchTimingLogged")
+    func parallelSearchTimingLogged() async throws {
+        let dim = 32
+        let vectors = makeClusteredVectors(count: 1200, dim: dim, clusters: 12)
+        let ids = (0..<vectors.count).map { "v\($0)" }
+        let config = IndexConfiguration(degree: 8, metric: .cosine, efSearch: 96)
+
+        let index = ShardedIndex(numShards: 4, nprobe: 3, configuration: config)
+        try await index.build(vectors: vectors, ids: ids)
+        let sequential = try await buildSequentialReference(
+            vectors: vectors,
+            ids: ids,
+            numShards: 4,
+            nprobe: 3,
+            configuration: config
+        )
+
+        let queries = Array(vectors.prefix(100))
+
+        let parallelStart = ContinuousClock.now
+        for query in queries {
+            _ = try await index.search(query: query, k: 10)
+        }
+        let parallelDuration = parallelStart.duration(to: .now)
+        let parallelSeconds = durationSeconds(parallelDuration)
+
+        let sequentialStart = ContinuousClock.now
+        for query in queries {
+            _ = try await searchSequentialReference(state: sequential, query: query, k: 10, metric: config.metric)
+        }
+        let sequentialDuration = sequentialStart.duration(to: .now)
+        let sequentialSeconds = durationSeconds(sequentialDuration)
+
+        let parallelQPS = Double(queries.count) / max(parallelSeconds, 1e-9)
+        let sequentialQPS = Double(queries.count) / max(sequentialSeconds, 1e-9)
+        print("Sharded search timing (parallelQPS=\(parallelQPS), sequentialQPS=\(sequentialQPS))")
+
+        #expect(parallelQPS > 0)
+        #expect(sequentialQPS > 0)
+    }
+
+    private struct SequentialState {
+        let centroids: [[Float]]
+        let shards: [ANNSIndex]
+        let nprobe: Int
+    }
+
+    private func buildSequentialReference(
+        vectors: [[Float]],
+        ids: [String],
+        numShards: Int,
+        nprobe: Int,
+        configuration: IndexConfiguration
+    ) async throws -> SequentialState {
+        let effectiveShards = min(max(1, numShards), vectors.count)
+        let kmeans = try KMeans.cluster(
+            vectors: vectors,
+            k: effectiveShards,
+            maxIterations: 20,
+            metric: configuration.metric,
+            seed: 42
+        )
+
+        var shardVectors = Array(repeating: [[Float]](), count: effectiveShards)
+        var shardIDs = Array(repeating: [String](), count: effectiveShards)
+
+        for i in 0..<vectors.count {
+            let shardIndex = kmeans.assignments[i]
+            shardVectors[shardIndex].append(vectors[i])
+            shardIDs[shardIndex].append(ids[i])
+        }
+
+        let eligibleTargets = shardVectors.indices.filter { shardVectors[$0].count >= 2 }
+        if !eligibleTargets.isEmpty {
+            for shardIndex in shardVectors.indices where shardVectors[shardIndex].count == 1 {
+                let loneVector = shardVectors[shardIndex][0]
+                var targetShard = eligibleTargets[0]
+                var bestDistance = SIMDDistance.distance(
+                    loneVector,
+                    kmeans.centroids[targetShard],
+                    metric: configuration.metric
+                )
+
+                for candidate in eligibleTargets.dropFirst() {
+                    let distance = SIMDDistance.distance(
+                        loneVector,
+                        kmeans.centroids[candidate],
+                        metric: configuration.metric
+                    )
+                    if distance < bestDistance {
+                        bestDistance = distance
+                        targetShard = candidate
+                    }
+                }
+
+                shardVectors[targetShard].append(loneVector)
+                shardIDs[targetShard].append(shardIDs[shardIndex][0])
+                shardVectors[shardIndex].removeAll(keepingCapacity: true)
+                shardIDs[shardIndex].removeAll(keepingCapacity: true)
+            }
+        }
+
+        var builtShards: [ANNSIndex] = []
+        var builtCentroids: [[Float]] = []
+
+        for shardIndex in 0..<effectiveShards {
+            guard !shardVectors[shardIndex].isEmpty else {
+                continue
+            }
+
+            var shardConfiguration = configuration
+            shardConfiguration.degree = min(
+                configuration.degree,
+                max(1, shardVectors[shardIndex].count - 1)
+            )
+
+            let shard = ANNSIndex(configuration: shardConfiguration)
+            try await shard.build(vectors: shardVectors[shardIndex], ids: shardIDs[shardIndex])
+            builtShards.append(shard)
+            builtCentroids.append(kmeans.centroids[shardIndex])
+        }
+
+        return SequentialState(centroids: builtCentroids, shards: builtShards, nprobe: nprobe)
+    }
+
+    private func searchSequentialReference(
+        state: SequentialState,
+        query: [Float],
+        k: Int,
+        metric: Metric
+    ) async throws -> [SearchResult] {
+        let centroidDistances = state.centroids.enumerated().map { (index, centroid) in
+            (index, SIMDDistance.distance(query, centroid, metric: metric))
+        }.sorted { $0.1 < $1.1 }
+
+        let probeCount = min(state.nprobe, state.shards.count)
+        let probeIndices = centroidDistances.prefix(probeCount).map { $0.0 }
+
+        var mergedResults: [SearchResult] = []
+        mergedResults.reserveCapacity(probeCount * k)
+
+        for shardIndex in probeIndices {
+            let shardResults = try await state.shards[shardIndex].search(query: query, k: k, metric: metric)
+            mergedResults.append(contentsOf: shardResults)
+        }
+
+        mergedResults.sort { $0.score < $1.score }
+        return Array(mergedResults.prefix(k))
+    }
+
+    private func durationSeconds(_ duration: Duration) -> Double {
+        let c = duration.components
+        return Double(c.seconds) + (Double(c.attoseconds) / 1_000_000_000_000_000_000)
+    }
+
+    private func makeClusteredVectors(count: Int, dim: Int, clusters: Int) -> [[Float]] {
+        (0..<count).map { i in
+            let cluster = i % clusters
+            return (0..<dim).map { d in
+                let center: Float = d == (cluster % dim) ? 1.0 : 0.0
+                let noiseSeed = Float((i * dim) + d)
+                return center + sin(noiseSeed * 0.031) * 0.01
+            }
+        }
+    }
+}

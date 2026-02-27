@@ -164,18 +164,74 @@ public actor ShardedIndex {
         var mergedResults: [SearchResult] = []
         mergedResults.reserveCapacity(probeCount * k)
 
-        for shardIndex in probeIndices {
-            let shardResults = try await shards[shardIndex].search(
-                query: query,
-                k: k,
-                filter: filter,
-                metric: metric
-            )
-            mergedResults.append(contentsOf: shardResults)
+        try await withThrowingTaskGroup(of: [SearchResult].self) { group in
+            for shardIndex in probeIndices {
+                let shard = shards[shardIndex]
+                group.addTask {
+                    try await shard.search(
+                        query: query,
+                        k: k,
+                        filter: filter,
+                        metric: metric
+                    )
+                }
+            }
+
+            for try await shardResults in group {
+                mergedResults.append(contentsOf: shardResults)
+            }
         }
 
         mergedResults.sort { $0.score < $1.score }
         return Array(mergedResults.prefix(k))
+    }
+
+    public func batchSearch(
+        queries: [[Float]],
+        k: Int,
+        filter: SearchFilter? = nil,
+        metric: Metric? = nil
+    ) async throws -> [[SearchResult]] {
+        guard isBuilt, !shards.isEmpty, !centroids.isEmpty else {
+            throw ANNSError.indexEmpty
+        }
+        guard !queries.isEmpty else {
+            return []
+        }
+
+        let maxConcurrency = max(1, ProcessInfo.processInfo.activeProcessorCount)
+        return try await withThrowingTaskGroup(of: (Int, [SearchResult]).self) { group in
+            var orderedResults = Array<[SearchResult]?>(repeating: nil, count: queries.count)
+            var nextIndex = 0
+
+            for _ in 0..<min(maxConcurrency, queries.count) {
+                let idx = nextIndex
+                let query = queries[idx]
+                nextIndex += 1
+
+                group.addTask { [self] in
+                    let result = try await self.search(query: query, k: k, filter: filter, metric: metric)
+                    return (idx, result)
+                }
+            }
+
+            for try await (idx, results) in group {
+                orderedResults[idx] = results
+
+                if nextIndex < queries.count {
+                    let idx = nextIndex
+                    let query = queries[idx]
+                    nextIndex += 1
+
+                    group.addTask { [self] in
+                        let result = try await self.search(query: query, k: k, filter: filter, metric: metric)
+                        return (idx, result)
+                    }
+                }
+            }
+
+            return orderedResults.map { $0 ?? [] }
+        }
     }
 
     public var count: Int {
