@@ -31,6 +31,37 @@ struct HNSWTests {
         #expect(hnsw.maxLayer >= 0)
     }
 
+    @Test("HNSWSearchCPU descends layers and searches")
+    func hnswtSearchTest() async throws {
+        let vectors = (0..<100).map { i in (0..<16).map { d in Float(i * 16 + d) * 0.01 } }
+        let (graphData, _) = try await NNDescentCPU.build(
+            vectors: vectors,
+            degree: 4,
+            metric: .l2,
+            maxIterations: 5
+        )
+
+        let hnsw = try HNSWBuilder.buildLayers(
+            vectors: try makeVectorBuffer(vectors),
+            graph: graphData,
+            nodeCount: vectors.count,
+            metric: .l2
+        )
+
+        let query = (0..<16).map { d in Float(d) * 0.01 }
+        let results = try await HNSWSearchCPU.search(
+            query: query,
+            vectors: vectors,
+            hnsw: hnsw,
+            baseGraph: graphData,
+            k: 5,
+            ef: 32,
+            metric: .l2
+        )
+
+        #expect(results.count == 5)
+    }
+
     private func makeVectorBuffer(_ vectors: [[Float]]) throws -> VectorBuffer {
         guard let first = vectors.first else {
             throw ANNSError.constructionFailed("Empty vectors")

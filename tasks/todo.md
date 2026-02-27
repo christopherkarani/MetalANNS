@@ -643,13 +643,13 @@ DECISIONS MADE: (pending)
 > **Status**: IN PROGRESS
 > **Owner**: Subagent
 > **Reviewer**: Orchestrator
-> **Last Updated**: 2026-02-27 09:36 EAT
+> **Last Updated**: 2026-02-27 09:38 EAT
 
 - [x] Task 1 — Create `HNSWLayers.swift` + basic structure tests
   - Commit: `feat(hnsw): add HNSWLayers and SkipLayer data structures`
 - [x] Task 2 — Create `HNSWBuilder.swift` + level assignment and layer building
   - Commit: `feat(hnsw): implement HNSWBuilder with probabilistic level assignment`
-- [ ] Task 3 — Create `HNSWSearchCPU.swift` + layer-by-layer descent
+- [x] Task 3 — Create `HNSWSearchCPU.swift` + layer-by-layer descent
   - Commit: `feat(hnsw): implement HNSWSearchCPU with layer descent and beam search`
 - [ ] Task 4 — Create `HNSWConfiguration.swift`
   - Commit: `feat(hnsw): add HNSWConfiguration with sensible defaults`
@@ -680,7 +680,12 @@ DECISIONS MADE: (pending)
 
 ### Task Notes 3
 
-_(Executing agent: fill in after completing Task 3)_
+- Added RED test `hnswtSearchTest` in `HNSWTests.swift`; compile failed with missing `HNSWSearchCPU`.
+- Implemented `Sources/MetalANNSCore/HNSWSearchCPU.swift`:
+  - `search(...) async throws(ANNSError)` for top-down layer descent + layer-0 `BeamSearchCPU`.
+  - `greedySearchLayer(...) throws(ANNSError)` with bounded iterations and sentinel checks.
+- Adjusted typed-throws bridging around `BeamSearchCPU.search` (map unknown errors to `ANNSError.searchFailed`).
+- Validation: targeted xcodebuild test command now succeeds after implementation.
 
 ### Task Notes 4
 
