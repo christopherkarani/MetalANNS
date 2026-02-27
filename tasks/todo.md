@@ -37,6 +37,14 @@ This file is the **shared communication layer** between the orchestrator and exe
 
 ---
 
+## Task: Review docs prompts (phase 14-16)
+
+- [ ] 1 — Identify the untracked prompt files in `docs/prompts` for phase-14, phase-15, and phase-16 and confirm they are the ones under review.
+- [ ] 2 — For each file, read the key API guidance and flag any mismatches, missing dependencies, or impossible instructions that would break compilation or runtime if implemented as written.
+- [ ] 3 — Capture each actionable issue with file path plus line number(s) so the author can fix the prompt before using it.
+
+> Notes: This is a focused review; mark items as you confirm and keep the notes precise and verifiable.
+
 ## Task 1: Package Scaffold
 
 **Acceptance**: `xcodebuild build` succeeds. Git repo initialized with first commit.
@@ -1057,3 +1065,86 @@ DECISIONS MADE: (pending)
 - [ ] R11 — Memory reduction > 30x measured and documented in Task Notes 7
 - [ ] R12 — All Phase 13 (typed throws), Phase 14 (repair), Phase 15 (HNSW) tests still pass
 - [ ] R13 — Agent notes filled in for all 8 tasks
+
+---
+
+## Phase 15: CPU-only HNSW Layer Navigation
+
+> **Status**: IN PROGRESS
+> **Owner**: Codex execution agent
+> **Reviewer**: Orchestrator
+> **Last Updated**: —
+
+### Task 1: Create `HNSWLayers.swift` + basic structure tests
+- [ ] RED: add failing structure test for `SkipLayer`/`HNSWLayers`
+- [ ] GREEN: implement `Sources/MetalANNSCore/HNSWLayers.swift`
+- [ ] VERIFY: targeted HNSW test passes
+- [ ] COMMIT: `feat(hnsw): add HNSWLayers and SkipLayer data structures`
+
+### Task 1 Notes
+- _pending_
+
+### Task 2: Create `HNSWBuilder.swift` + level assignment and layer building
+- [ ] RED: add failing builder test
+- [ ] GREEN: implement `Sources/MetalANNSCore/HNSWBuilder.swift`
+- [ ] VERIFY: targeted HNSW builder test passes
+- [ ] COMMIT: `feat(hnsw): implement HNSWBuilder with probabilistic level assignment`
+
+### Task 2 Notes
+- _pending_
+
+### Task 3: Create `HNSWSearchCPU.swift` + layer-by-layer descent
+- [ ] RED: add failing HNSW search test
+- [ ] GREEN: implement `Sources/MetalANNSCore/HNSWSearchCPU.swift`
+- [ ] VERIFY: targeted HNSW search test passes
+- [ ] COMMIT: `feat(hnsw): implement HNSWSearchCPU with layer descent and beam search`
+
+### Task 3 Notes
+- _pending_
+
+### Task 4: Create `HNSWConfiguration.swift`
+- [ ] RED: add failing default configuration test
+- [ ] GREEN: implement `Sources/MetalANNSCore/HNSWConfiguration.swift`
+- [ ] VERIFY: targeted configuration test passes
+- [ ] COMMIT: `feat(hnsw): add HNSWConfiguration with sensible defaults`
+
+### Task 4 Notes
+- _pending_
+
+### Task 5: Write comprehensive HNSW test suite
+- [ ] RED: expand tests (layer structure, level assignment, search, recall parity)
+- [ ] GREEN: stabilize and pass all new HNSW tests
+- [ ] VERIFY: focused HNSW test run passes
+- [ ] COMMIT: `test(hnsw): add comprehensive layer assignment, build, and search tests`
+
+### Task 5 Notes
+- _pending_
+
+### Task 6: Integrate into `ANNSIndex.swift`
+- [ ] RED: add failing ANNSIndex CPU-HNSW integration test
+- [ ] GREEN: integrate HNSW build/search invalidation in ANNSIndex CPU path
+- [ ] VERIFY: targeted integration tests pass
+- [ ] COMMIT: `feat(hnsw): integrate HNSWSearchCPU into ANNSIndex search path`
+
+### Task 6 Notes
+- _pending_
+
+### Task 7: Verify full suite and regressions
+- [ ] BUILD: `xcodebuild build -scheme MetalANNS -destination 'platform=macOS' -skipPackagePluginValidation`
+- [ ] TEST: `xcodebuild test -scheme MetalANNS -destination 'platform=macOS' -skipPackagePluginValidation`
+- [ ] VERIFY: zero new regressions
+- [ ] COMMIT: `chore(hnsw): verify zero regressions in full test suite`
+
+### Task 7 Notes
+- _pending_
+
+### Phase 15 Complete — Signal
+
+```text
+STATUS: PENDING
+FINAL BUILD RESULT: pending
+FINAL TEST RESULT: pending
+TOTAL COMMITS: pending
+ISSUES ENCOUNTERED: pending
+DECISIONS MADE: pending
+```
