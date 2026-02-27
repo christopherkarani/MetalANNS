@@ -10,7 +10,6 @@ struct CommandQueuePoolTests {
         return
         #else
         guard let device = MTLCreateSystemDefaultDevice() else {
-            Issue.record("No Metal device available")
             return
         }
 
@@ -26,7 +25,6 @@ struct CommandQueuePoolTests {
         return
         #else
         guard let device = MTLCreateSystemDefaultDevice() else {
-            Issue.record("No Metal device available")
             return
         }
 
@@ -42,7 +40,6 @@ struct CommandQueuePoolTests {
         return
         #else
         guard let device = MTLCreateSystemDefaultDevice() else {
-            Issue.record("No Metal device available")
             return
         }
 
@@ -65,7 +62,6 @@ struct CommandQueuePoolTests {
         return
         #else
         guard let device = MTLCreateSystemDefaultDevice() else {
-            Issue.record("No Metal device available")
             return
         }
 

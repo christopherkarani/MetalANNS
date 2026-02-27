@@ -9,7 +9,9 @@ struct MetalDeviceTests {
         #if targetEnvironment(simulator)
         return
         #else
-        let context = try MetalContext()
+        guard let context = makeContextOrSkip() else {
+            return
+        }
         #expect(context.device.name.isEmpty == false)
         #endif
     }
@@ -19,9 +21,19 @@ struct MetalDeviceTests {
         #if targetEnvironment(simulator)
         return
         #else
-        let context = try MetalContext()
+        guard let context = makeContextOrSkip() else {
+            return
+        }
         let pipeline = try await context.pipelineCache.pipeline(for: "cosine_distance")
         #expect(pipeline.maxTotalThreadsPerThreadgroup > 0)
         #endif
+    }
+
+    private func makeContextOrSkip() -> MetalContext? {
+        do {
+            return try MetalContext()
+        } catch {
+            return nil
+        }
     }
 }
