@@ -25,16 +25,16 @@ public struct SkipLayer: Sendable, Codable {
 /// Complete HNSW skip-layer structure. Layer 0 uses the base graph.
 public struct HNSWLayers: Sendable {
     /// Skip layers where `layers[0]` corresponds to layer 1.
-    public let layers: [SkipLayer]
+    public var layers: [SkipLayer]
 
     /// Maximum assigned layer in the hierarchy.
-    public let maxLayer: Int
+    public var maxLayer: Int
 
     /// Level multiplier (1 / ln(2)).
-    public let mL: Double
+    public var mL: Double
 
     /// Entry point in the highest populated layer.
-    public let entryPoint: UInt32
+    public var entryPoint: UInt32
 
     public init(
         layers: [SkipLayer] = [],

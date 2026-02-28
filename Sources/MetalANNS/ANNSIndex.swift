@@ -31,6 +31,10 @@ public actor ANNSIndex {
     private var hnsw: HNSWLayers?
     private var quantizedHNSW: QuantizedHNSWLayers?
 
+    public var isHNSWBuilt: Bool {
+        hnsw != nil
+    }
+
     public init(configuration: IndexConfiguration = .default) {
         self.configuration = configuration
         self.context = try? MetalContext()
@@ -203,8 +207,27 @@ public actor ANNSIndex {
         if graph.nodeCount < slot + 1 {
             graph.setCount(slot + 1)
         }
-        hnsw = nil
-        quantizedHNSW = nil
+        if var liveHNSW = hnsw, configuration.hnswConfiguration.enabled {
+            do {
+                try HNSWInserter.insert(
+                    vector: vector,
+                    nodeID: UInt32(slot),
+                    into: &liveHNSW,
+                    vectorStorage: vectors,
+                    config: configuration.hnswConfiguration,
+                    metric: configuration.metric
+                )
+                hnsw = liveHNSW
+                quantizedHNSW = nil
+            } catch {
+                hnsw = nil
+                quantizedHNSW = nil
+                throw error
+            }
+        } else {
+            hnsw = nil
+            quantizedHNSW = nil
+        }
 
         let repairConfig = configuration.repairConfiguration
         if repairConfig.enabled && repairConfig.repairInterval > 0 {
@@ -282,8 +305,39 @@ public actor ANNSIndex {
         if graph.nodeCount < newMaxCount {
             graph.setCount(newMaxCount)
         }
-        hnsw = nil
-        quantizedHNSW = nil
+        if var liveHNSW = hnsw, configuration.hnswConfiguration.enabled {
+            do {
+                for (offset, vector) in vectors.enumerated() {
+                    let visibleCount = slots[offset] + 1
+                    if vectorStorage.count != visibleCount {
+                        vectorStorage.setCount(visibleCount)
+                    }
+                    try HNSWInserter.insert(
+                        vector: vector,
+                        nodeID: UInt32(slots[offset]),
+                        into: &liveHNSW,
+                        vectorStorage: vectorStorage,
+                        config: configuration.hnswConfiguration,
+                        metric: configuration.metric
+                    )
+                }
+                if vectorStorage.count != newMaxCount {
+                    vectorStorage.setCount(newMaxCount)
+                }
+                hnsw = liveHNSW
+                quantizedHNSW = nil
+            } catch {
+                if vectorStorage.count != newMaxCount {
+                    vectorStorage.setCount(newMaxCount)
+                }
+                hnsw = nil
+                quantizedHNSW = nil
+                throw error
+            }
+        } else {
+            hnsw = nil
+            quantizedHNSW = nil
+        }
 
         let repairConfig = configuration.repairConfiguration
         if repairConfig.enabled {
@@ -335,8 +389,7 @@ public actor ANNSIndex {
             config: configuration.repairConfiguration,
             metric: configuration.metric
         )
-        hnsw = nil
-        quantizedHNSW = nil
+        try rebuildHNSWFromCurrentState()
     }
 
     public func delete(id: String) throws {
