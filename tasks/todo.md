@@ -1,3 +1,37 @@
+## MetalANNS — Phase 25: GPU ADC Linear Scan Extraction & Public API
+
+> **Status**: IN PROGRESS
+> **Owner**: Codex
+> **Last Updated**: 2026-02-28
+
+## Task Checklist
+
+- [x] Round 1 (TDD) — Add failing `GPUADCSearchTests.swift` for low-level compute path (`gpuDistancesMatchCPU`, `emptyCodesReturnsEmpty`, `flattenCodebooksCorrectLayout`, `cachedFlatCodebooksSkipsRecomputation`).
+- [x] Round 1 — Run required `xcodebuild test -scheme MetalANNS ... | grep -E "PASS|FAIL|error:"` command and record output.
+- [x] Round 1 — Run `swift test --filter GPUADCSearchTests` and confirm RED state before implementation.
+- [x] Round 1 — Implement `Sources/MetalANNSCore/GPUADCSearch.swift` low-level API (`computeDistances`, `flattenCodebooks`).
+- [x] Round 1 verify — Re-run required xcodebuild command and `swift test --filter GPUADCSearchTests` to GREEN.
+- [ ] Round 2 (TDD) — Add failing IVFPQ regression test (`ivfpqRegressionAfterRewire`) for GPU/CPU top-k parity.
+- [ ] Round 2 — Rewire `IVFPQIndex.gpuADCDistances()` to delegate to `GPUADCSearch.computeDistances()`.
+- [ ] Round 2 — Replace IVFPQ flatten callers with `GPUADCSearch.flattenCodebooks(from:)` and delete private IVFPQ flatten helper.
+- [ ] Round 2 verify — Re-run required xcodebuild command and targeted regressions (`IVFPQGPUTests`, `IVFPQIndexTests`, `IVFPQPersistenceTests`, `GPUADCSearchTests`).
+- [ ] Round 3 (TDD) — Add failing high-level `GPUADCSearch.search()` tests (`searchReturnsTopK`, `searchKLargerThanCorpus`).
+- [ ] Round 3 — Implement `GPUADCSearch.search()` sorted top-k API.
+- [ ] Round 3 verify — Re-run required xcodebuild command and targeted suites (`GPUADCSearchTests`, `IVFPQGPUTests`).
+- [ ] Final verification — Run `xcodebuild test -scheme MetalANNS ... | tail -30` and scoped `swift test --filter "(GPUADCSearchTests|IVFPQGPUTests|IVFPQIndexTests|IVFPQPersistenceTests)"`.
+- [ ] Document phase review results and command outputs below.
+
+## Review Results
+
+- Round 1 RED:
+  - `xcodebuild test -scheme MetalANNS -destination 'platform=macOS' 2>&1 | grep -E "PASS|FAIL|error:"`
+  - Result: `xcodebuild: error: Scheme MetalANNS is not currently configured for the test action.`
+  - `swift test --filter GPUADCSearchTests` failed as expected (missing `GPUADCSearch` symbol).
+- Round 1 GREEN:
+  - `xcodebuild test -scheme MetalANNS -destination 'platform=macOS' 2>&1 | grep -E "PASS|FAIL|error:"`
+  - Result: same scheme test-action error in this environment.
+  - `swift test --filter GPUADCSearchTests` → PASS (4 tests).
+
 ## MetalANNS — Phase 24: Index Observability
 
 > **Status**: IMPLEMENTED (VALIDATION PARTIAL: `xcodebuild test` test-action unavailable; `swift test` used)
