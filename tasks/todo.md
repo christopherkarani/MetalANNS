@@ -1,3 +1,42 @@
+## MetalANNS — Phase 24: Index Observability
+
+> **Status**: IMPLEMENTED (VALIDATION PARTIAL: `xcodebuild test` test-action unavailable; `swift test` used)
+> **Owner**: Codex
+> **Last Updated**: 2026-02-28
+
+## Task Checklist
+
+- [x] Round 1 (TDD) — Add failing `IndexMetricsTests.swift` covering metrics actor behavior and API integration entry points.
+- [x] Round 1 — Implement `IndexMetrics` and `MetricsSnapshot` in `Sources/MetalANNS/`.
+- [x] Round 1 verify — Run required `xcodebuild test ... | grep` command and fallback `swift test --filter IndexMetricsTests`.
+- [x] Round 2 (TDD) — Add failing ANNSIndex metrics integration tests (search/insert/batchInsert/batchSearch/rangeSearch).
+- [x] Round 2 — Add `ANNSIndex.metrics` and instrument search/rangeSearch/insert/batchInsert/batchSearch.
+- [x] Round 2 verify — Re-run required xcodebuild command and targeted Swift tests.
+- [x] Round 3 (TDD) — Add failing StreamingIndex metrics tests (merge count + shared metrics across indexes).
+- [x] Round 3 — Add `StreamingIndex.metrics`, child metrics propagation, and merge recording on real merge completion only.
+- [x] Round 3 verify — Re-run required xcodebuild command and targeted Swift tests.
+- [x] Persistence regression — Assert metrics are not persisted across ANNSIndex and StreamingIndex save/load.
+- [x] Full regression snapshot — Run full `swift test` and confirm no new failures beyond known baseline.
+- [x] Document review results and validation outputs below.
+
+## Review Results
+
+- Required command run repeatedly:
+  - `xcodebuild test -scheme MetalANNS -destination 'platform=macOS' 2>&1 | grep -E "PASS|FAIL|error:"`
+  - Result: `xcodebuild: error: Scheme MetalANNS is not currently configured for the test action.`
+- TDD red confirmed for `IndexMetricsTests` before implementation (missing `IndexMetrics`/`MetricsSnapshot` and `metrics` properties).
+- `swift test --filter IndexMetricsTests` → PASS (11 tests).
+- Targeted regressions:
+  - `swift test --filter ANNSIndexTests` → PASS
+  - `swift test --filter StreamingIndexMergeTests` → PASS
+  - `swift test --filter StreamingIndexPersistenceTests` → PASS
+  - `swift test --filter StreamingIndexSearchTests` → PASS
+  - `swift test --filter StreamingIndexFlushTests` → PASS
+  - `swift test --filter FilteredSearchTests` → PASS
+- Full suite snapshot:
+  - `swift test` reports 11 known baseline failures due missing Metal default library in this environment.
+  - No new failure class introduced by Phase 24 changes.
+
 # MetalANNS — Phase 23: Binary Quantization + Hamming Distance
 
 > **Status**: IMPLEMENTED (VALIDATION PARTIAL: `xcodebuild test` test-action unavailable; `swift test` used)

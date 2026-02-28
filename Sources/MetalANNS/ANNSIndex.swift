@@ -22,6 +22,7 @@ public actor ANNSIndex {
     private var mmapLifetime: AnyObject?
     private var pendingRepairIDs: [UInt32] = []
     private var hnsw: HNSWLayers?
+    public var metrics: IndexMetrics? = nil
 
     public init(configuration: IndexConfiguration = .default) {
         self.configuration = configuration
@@ -194,6 +195,9 @@ public actor ANNSIndex {
             vectors.setCount(slot + 1)
         }
 
+        let metricsRecorder = metrics
+        let insertStart = metricsRecorder == nil ? nil : ContinuousClock.now
+
         try IncrementalBuilder.insert(
             vector: graphVector,
             at: slot,
@@ -214,6 +218,11 @@ public actor ANNSIndex {
             if pendingRepairIDs.count >= repairConfig.repairInterval {
                 try triggerRepair()
             }
+        }
+
+        if let metricsRecorder, let insertStart {
+            let duration = ContinuousClock.now - insertStart
+            await metricsRecorder.recordInsert(durationNs: Self.durationNanoseconds(duration))
         }
     }
 
@@ -278,6 +287,10 @@ public actor ANNSIndex {
             graphVectors = vectors
         }
 
+        let metricsRecorder = metrics
+        let batchInsertStart = metricsRecorder == nil ? nil : ContinuousClock.now
+        let insertedCount = vectors.count
+
         try BatchIncrementalBuilder.batchInsert(
             vectors: graphVectors,
             startingAt: startSlot,
@@ -309,6 +322,14 @@ public actor ANNSIndex {
                     metric: configuration.metric
                 )
             }
+        }
+
+        if let metricsRecorder, let batchInsertStart {
+            let duration = ContinuousClock.now - batchInsertStart
+            await metricsRecorder.recordBatchInsert(
+                count: insertedCount,
+                durationNs: Self.durationNanoseconds(duration)
+            )
         }
     }
 
@@ -452,6 +473,8 @@ public actor ANNSIndex {
         let normalizedQuery = (searchMetric == .hamming && configuration.useBinary)
             ? Self.quantizeForHamming(query)
             : query
+        let metricsRecorder = metrics
+        let searchStart = metricsRecorder == nil ? nil : ContinuousClock.now
         let hasFilter = filter != nil
         let deletedCount = softDeletion.deletedCount
         let effectiveK: Int
@@ -516,7 +539,12 @@ public actor ANNSIndex {
             }
             return SearchResult(id: externalID, score: result.score, internalID: result.internalID)
         }
-        return Array(mapped.prefix(k))
+        let output = Array(mapped.prefix(k))
+        if let metricsRecorder, let searchStart {
+            let duration = ContinuousClock.now - searchStart
+            await metricsRecorder.recordSearch(durationNs: Self.durationNanoseconds(duration))
+        }
+        return output
     }
 
     public func rangeSearch(
@@ -546,6 +574,8 @@ public actor ANNSIndex {
         let normalizedQuery = (searchMetric == .hamming && configuration.useBinary)
             ? Self.quantizeForHamming(query)
             : query
+        let metricsRecorder = metrics
+        let searchStart = metricsRecorder == nil ? nil : ContinuousClock.now
         let deletedCount = softDeletion.deletedCount
         let searchK = min(vectors.count, limit + deletedCount)
         let searchEf = min(vectors.count, max(configuration.efSearch, searchK * 2))
@@ -605,7 +635,12 @@ public actor ANNSIndex {
             }
             return SearchResult(id: externalID, score: result.score, internalID: result.internalID)
         }
-        return Array(mapped.prefix(limit))
+        let output = Array(mapped.prefix(limit))
+        if let metricsRecorder, let searchStart {
+            let duration = ContinuousClock.now - searchStart
+            await metricsRecorder.recordSearch(durationNs: Self.durationNanoseconds(duration))
+        }
+        return output
     }
 
     public func batchSearch(
@@ -619,6 +654,9 @@ public actor ANNSIndex {
         }
         guard !queries.isEmpty else {
             return []
+        }
+        if let metrics {
+            await metrics.recordBatchSearch()
         }
 
         let maxConcurrency = await batchSearchMaxConcurrency()
@@ -652,6 +690,10 @@ public actor ANNSIndex {
 
             return orderedResults.map { $0! }
         }
+    }
+
+    public func setMetrics(_ metrics: IndexMetrics?) {
+        self.metrics = metrics
     }
 
     func batchSearchMaxConcurrencyForTesting() async -> Int {
@@ -876,6 +918,13 @@ public actor ANNSIndex {
 
     private nonisolated static func metadataURL(for fileURL: URL) -> URL {
         URL(fileURLWithPath: fileURL.path + ".meta.json")
+    }
+
+    private nonisolated static func durationNanoseconds(_ duration: Duration) -> UInt64 {
+        let components = duration.components
+        let seconds = components.seconds > 0 ? UInt64(components.seconds) : 0
+        let attoseconds = components.attoseconds > 0 ? UInt64(components.attoseconds) : 0
+        return seconds &* 1_000_000_000 &+ attoseconds / 1_000_000_000
     }
 
     private nonisolated static func loadPersistedMetadataIfPresent(from fileURL: URL) throws -> PersistedMetadata? {

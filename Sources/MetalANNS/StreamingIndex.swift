@@ -42,6 +42,13 @@ public actor StreamingIndex {
     private var vectorDimension: Int?
 
     private let config: StreamingConfiguration
+    /// Optional metrics sink for streaming operations.
+    /// When set, the same instance is propagated to child base/delta indexes so
+    /// delegated searches/inserts are recorded exactly once at the child level.
+    public var metrics: IndexMetrics? = nil {
+        didSet { metricsNeedsPropagation = true }
+    }
+    private var metricsNeedsPropagation = false
 
     public init(config: StreamingConfiguration = .default) {
         self.config = config
@@ -55,11 +62,16 @@ public actor StreamingIndex {
         _isMerging
     }
 
+    public func setMetrics(_ metrics: IndexMetrics?) {
+        self.metrics = metrics
+    }
+
     public func insert(_ vector: [Float], id: String) async throws {
         guard !allIDs.contains(id) else {
             throw ANNSError.idAlreadyExists(id)
         }
         try validateDimension(of: vector)
+        await synchronizeChildMetricsIfNeeded()
 
         allIDs.insert(id)
         allIDsList.append(id)
@@ -89,6 +101,7 @@ public actor StreamingIndex {
         for vector in vectors {
             try validateDimension(of: vector)
         }
+        await synchronizeChildMetricsIfNeeded()
 
         for id in ids {
             allIDs.insert(id)
@@ -112,6 +125,7 @@ public actor StreamingIndex {
         guard k > 0 else {
             return []
         }
+        await synchronizeChildMetricsIfNeeded()
 
         let searchMetric = metric ?? config.indexConfiguration.metric
         var combined: [SearchResult] = []
@@ -171,6 +185,7 @@ public actor StreamingIndex {
         guard limit > 0 else {
             return []
         }
+        await synchronizeChildMetricsIfNeeded()
 
         let searchMetric = metric ?? config.indexConfiguration.metric
         var combined: [SearchResult] = []
@@ -289,6 +304,8 @@ public actor StreamingIndex {
     }
 
     public func flush() async throws {
+        await synchronizeChildMetricsIfNeeded()
+
         if let task = mergeTask {
             defer { mergeTask = nil }
             try await task.value
@@ -355,6 +372,7 @@ public actor StreamingIndex {
 
         self.idInBase = Set(meta.allIDsList.filter { !self.deletedIDs.contains($0) })
         self.idInDelta = []
+        self.metricsNeedsPropagation = true
     }
 
     private func validateDimension(of vector: [Float]) throws {
@@ -522,6 +540,9 @@ public actor StreamingIndex {
     private func buildIndex(vectors: [[Float]], ids: [String]) async throws -> ANNSIndex {
         let index = ANNSIndex(configuration: adjustedConfiguration(for: vectors.count))
         try await index.build(vectors: vectors, ids: ids)
+        if let metrics {
+            await index.setMetrics(metrics)
+        }
         try await applyStoredMetadata(to: index, ids: ids)
         return index
     }
@@ -583,6 +604,9 @@ public actor StreamingIndex {
         idInDelta.removeAll()
         pendingVectors.removeAll(keepingCapacity: true)
         pendingIDs.removeAll(keepingCapacity: true)
+        if let metrics {
+            await metrics.recordMerge()
+        }
 
         let tail = activeRecords(in: snapshotCount..<allIDsList.count)
         if tail.ids.count >= 2 {
@@ -691,5 +715,18 @@ public actor StreamingIndex {
         case .string, .none:
             return nil
         }
+    }
+
+    private func synchronizeChildMetricsIfNeeded() async {
+        guard metricsNeedsPropagation else {
+            return
+        }
+        if let base {
+            await base.setMetrics(metrics)
+        }
+        if let delta {
+            await delta.setMetrics(metrics)
+        }
+        metricsNeedsPropagation = false
     }
 }
