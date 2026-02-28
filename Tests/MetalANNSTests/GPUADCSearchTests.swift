@@ -133,6 +133,72 @@ struct GPUADCSearchTests {
         #expect(Set(gpu.map(\.id)) == Set(cpu.map(\.id)))
         #endif
     }
+
+    @Test("search returns sorted top-k and top-1 matches CPU brute-force ADC")
+    func searchReturnsTopK() async throws {
+        #if targetEnvironment(simulator)
+        return
+        #else
+        guard let context = try? MetalContext() else { return }
+
+        let pq = try trainPQ(dim: 64, M: 8)
+        let corpus = makeRandomVectors(count: 300, dim: 64, seed: 501)
+        let codes = try corpus.map { try pq.encode(vector: $0) }
+        let ids = (0..<codes.count).map { "gpuadc-\($0)" }
+        let query = makeRandomVectors(count: 1, dim: 64, seed: 502)[0]
+
+        let results = try await GPUADCSearch.search(
+            context: context,
+            query: query,
+            pq: pq,
+            codes: codes,
+            ids: ids,
+            k: 10
+        )
+
+        #expect(results.count == 10)
+        for i in 1..<results.count {
+            #expect(results[i].score >= results[i - 1].score)
+        }
+
+        let cpuTop = zip(ids, codes).map { id, code in
+            (id, pq.approximateDistance(query: query, codes: code, metric: .l2))
+        }
+        .sorted { $0.1 < $1.1 }
+        .first
+
+        #expect(results.first?.id == cpuTop?.0)
+        #endif
+    }
+
+    @Test("search returns all results when k exceeds corpus size")
+    func searchKLargerThanCorpus() async throws {
+        #if targetEnvironment(simulator)
+        return
+        #else
+        guard let context = try? MetalContext() else { return }
+
+        let pq = try trainPQ(dim: 64, M: 8)
+        let corpus = makeRandomVectors(count: 5, dim: 64, seed: 503)
+        let codes = try corpus.map { try pq.encode(vector: $0) }
+        let ids = (0..<codes.count).map { "small-\($0)" }
+        let query = makeRandomVectors(count: 1, dim: 64, seed: 504)[0]
+
+        let results = try await GPUADCSearch.search(
+            context: context,
+            query: query,
+            pq: pq,
+            codes: codes,
+            ids: ids,
+            k: 100
+        )
+
+        #expect(results.count == 5)
+        for i in 1..<results.count {
+            #expect(results[i].score >= results[i - 1].score)
+        }
+        #endif
+    }
 }
 
 private func trainPQ(dim: Int = 64, M: Int = 8) throws -> ProductQuantizer {

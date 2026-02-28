@@ -132,7 +132,34 @@ public enum GPUADCSearch {
         k: Int,
         flatCodebooks: [Float]? = nil
     ) async throws -> [SearchResult] {
-        throw ANNSError.searchFailed("GPUADCSearch.search is not implemented")
+        guard codes.count == ids.count else {
+            throw ANNSError.constructionFailed("codes and ids count mismatch")
+        }
+        guard k > 0 else {
+            return []
+        }
+        guard !codes.isEmpty else {
+            return []
+        }
+
+        let distances = try await computeDistances(
+            context: context,
+            query: query,
+            pq: pq,
+            codes: codes,
+            flatCodebooks: flatCodebooks
+        )
+
+        var results: [SearchResult] = []
+        results.reserveCapacity(min(k, distances.count))
+        for (index, distance) in distances.enumerated() {
+            results.append(SearchResult(id: ids[index], score: distance, internalID: UInt32(index)))
+        }
+        results.sort { $0.score < $1.score }
+        if results.count > k {
+            results.removeSubrange(k...)
+        }
+        return results
     }
 
     public static func flattenCodebooks(from pq: ProductQuantizer) -> [Float] {
