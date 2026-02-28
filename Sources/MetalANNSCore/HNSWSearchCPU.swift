@@ -20,8 +20,12 @@ public enum HNSWSearchCPU {
         guard vectors.count == baseGraph.count else {
             throw ANNSError.searchFailed("Graph size does not match vector count")
         }
-        guard query.count == vectors[0].count else {
-            throw ANNSError.dimensionMismatch(expected: vectors[0].count, got: query.count)
+        let dim = vectors[0].count
+        guard query.count == dim else {
+            throw ANNSError.dimensionMismatch(expected: dim, got: query.count)
+        }
+        for vector in vectors where vector.count != dim {
+            throw ANNSError.dimensionMismatch(expected: dim, got: vector.count)
         }
 
         var currentEntry = Int(hnsw.entryPoint)
@@ -86,6 +90,9 @@ public enum HNSWSearchCPU {
                 break
             }
 
+            var bestNode = current
+            var bestDistance = currentDistance
+
             for neighborID in neighbors {
                 if neighborID == UInt32.max || Int(neighborID) >= vectors.count {
                     continue
@@ -95,11 +102,16 @@ public enum HNSWSearchCPU {
                     vectors[Int(neighborID)],
                     metric: metric
                 )
-                if neighborDistance < currentDistance {
-                    current = neighborID
-                    currentDistance = neighborDistance
-                    improved = true
+                if neighborDistance < bestDistance {
+                    bestNode = neighborID
+                    bestDistance = neighborDistance
                 }
+            }
+
+            if bestNode != current {
+                current = bestNode
+                currentDistance = bestDistance
+                improved = true
             }
         }
 

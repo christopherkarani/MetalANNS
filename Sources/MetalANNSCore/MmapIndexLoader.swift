@@ -76,28 +76,34 @@ public enum MmapIndexLoader {
             guard dim % 8 == 0 else {
                 throw ANNSError.corruptFile("Binary index has dim not divisible by 8")
             }
-            vectorByteCount = nodeCount * (dim / 8)
+            vectorByteCount = try checkedMultiply(nodeCount, dim / 8)
         } else {
             let bytesPerElement = storageType == 1 ? MemoryLayout<UInt16>.stride : MemoryLayout<Float>.stride
-            vectorByteCount = nodeCount * dim * bytesPerElement
+            let vectorElements = try checkedMultiply(nodeCount, dim)
+            vectorByteCount = try checkedMultiply(vectorElements, bytesPerElement)
         }
-        let adjacencyByteCount = nodeCount * degree * MemoryLayout<UInt32>.stride
-        let distanceByteCount = nodeCount * degree * MemoryLayout<Float>.stride
+        let edgeElements = try checkedMultiply(nodeCount, degree)
+        let adjacencyByteCount = try checkedMultiply(edgeElements, MemoryLayout<UInt32>.stride)
+        let distanceByteCount = try checkedMultiply(edgeElements, MemoryLayout<Float>.stride)
 
         let alignment = pageSize
-        let vectorOffset = alignedOffset(cursor, alignment: alignment)
-        let adjacencyOffset = alignedOffset(vectorOffset + vectorByteCount, alignment: alignment)
-        let distanceOffset = alignedOffset(adjacencyOffset + adjacencyByteCount, alignment: alignment)
-        let trailerOffset = alignedOffset(distanceOffset + distanceByteCount, alignment: alignment)
+        let vectorOffset = try alignedOffset(cursor, alignment: alignment)
+        let adjacencyOffset = try alignedOffset(try checkedAdd(vectorOffset, vectorByteCount), alignment: alignment)
+        let distanceOffset = try alignedOffset(try checkedAdd(adjacencyOffset, adjacencyByteCount), alignment: alignment)
+        let trailerOffset = try alignedOffset(try checkedAdd(distanceOffset, distanceByteCount), alignment: alignment)
 
-        let vectorMappedLength = alignedLength(vectorByteCount, alignment: alignment)
-        let adjacencyMappedLength = alignedLength(adjacencyByteCount, alignment: alignment)
-        let distanceMappedLength = alignedLength(distanceByteCount, alignment: alignment)
+        let vectorMappedLength = try alignedLength(vectorByteCount, alignment: alignment)
+        let adjacencyMappedLength = try alignedLength(adjacencyByteCount, alignment: alignment)
+        let distanceMappedLength = try alignedLength(distanceByteCount, alignment: alignment)
 
-        guard vectorOffset + vectorMappedLength <= region.length,
-              adjacencyOffset + adjacencyMappedLength <= region.length,
-              distanceOffset + distanceMappedLength <= region.length,
-              trailerOffset + MemoryLayout<UInt32>.size <= region.length else {
+        let vectorSectionEnd = try checkedAdd(vectorOffset, vectorMappedLength)
+        let adjacencySectionEnd = try checkedAdd(adjacencyOffset, adjacencyMappedLength)
+        let distanceSectionEnd = try checkedAdd(distanceOffset, distanceMappedLength)
+        let trailerHeaderEnd = try checkedAdd(trailerOffset, MemoryLayout<UInt32>.size)
+        guard vectorSectionEnd <= region.length,
+              adjacencySectionEnd <= region.length,
+              distanceSectionEnd <= region.length,
+              trailerHeaderEnd <= region.length else {
             throw ANNSError.corruptFile("Mmap sections are truncated")
         }
 
@@ -147,12 +153,14 @@ public enum MmapIndexLoader {
 
         var trailerCursor = trailerOffset
         let idMapByteCount = Int(try readUInt32(from: region.pointer, length: region.length, cursor: &trailerCursor))
-        guard trailerCursor + idMapByteCount + MemoryLayout<UInt32>.size <= region.length else {
+        let idMapEnd = try checkedAdd(trailerCursor, idMapByteCount)
+        let entryPointEnd = try checkedAdd(idMapEnd, MemoryLayout<UInt32>.size)
+        guard entryPointEnd <= region.length else {
             throw ANNSError.corruptFile("Truncated IDMap payload")
         }
 
         let idMapData = Data(bytes: region.pointer.advanced(by: trailerCursor), count: idMapByteCount)
-        trailerCursor += idMapByteCount
+        trailerCursor = idMapEnd
         let entryPoint = try readUInt32(from: region.pointer, length: region.length, cursor: &trailerCursor)
 
         let idMap: IDMap
@@ -160,6 +168,12 @@ public enum MmapIndexLoader {
             idMap = try JSONDecoder().decode(IDMap.self, from: idMapData)
         } catch {
             throw ANNSError.corruptFile("IDMap payload is corrupt")
+        }
+        guard idMap.count == nodeCount else {
+            throw ANNSError.corruptFile("ID map size does not match node count")
+        }
+        guard Int(entryPoint) < nodeCount else {
+            throw ANNSError.corruptFile("Entry point is out of bounds")
         }
 
         return MmapLoadResult(
@@ -218,20 +232,36 @@ public enum MmapIndexLoader {
         return value
     }
 
-    private static func alignedOffset(_ value: Int, alignment: Int) -> Int {
+    private static func alignedOffset(_ value: Int, alignment: Int) throws -> Int {
         let remainder = value % alignment
         if remainder == 0 {
             return value
         }
-        return value + (alignment - remainder)
+        return try checkedAdd(value, alignment - remainder)
     }
 
-    private static func alignedLength(_ value: Int, alignment: Int) -> Int {
+    private static func alignedLength(_ value: Int, alignment: Int) throws -> Int {
         let remainder = value % alignment
         if remainder == 0 {
             return value
         }
-        return value + (alignment - remainder)
+        return try checkedAdd(value, alignment - remainder)
+    }
+
+    private static func checkedMultiply(_ lhs: Int, _ rhs: Int) throws -> Int {
+        let (product, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        if overflow {
+            throw ANNSError.corruptFile("Integer overflow while parsing mmap index")
+        }
+        return product
+    }
+
+    private static func checkedAdd(_ lhs: Int, _ rhs: Int) throws -> Int {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        if overflow {
+            throw ANNSError.corruptFile("Integer overflow while parsing mmap index")
+        }
+        return sum
     }
 }
 

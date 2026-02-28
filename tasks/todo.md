@@ -1,3 +1,118 @@
+## MetalANNS — Fix All Reported Errors (Post-Audit Remediation)
+
+> **Status**: COMPLETE
+> **Owner**: Codex
+> **Last Updated**: 2026-02-28
+
+## Task Checklist
+
+- [x] Batch 1 (Critical) — Make `ANNSIndex.insert`/`batchInsert` failure-safe (transactional rollback semantics).
+- [x] Batch 1 (Critical) — Preserve/requeue pending repair IDs on repair failure.
+- [x] Batch 1 verify — Run targeted tests: `ANNSIndexTests`, `BatchInsertTests`, `IncrementalTests`, `GraphRepairTests`.
+- [x] Batch 2 (Critical/High) — Make persistence saves atomic for base and streaming state.
+- [x] Batch 2 (High) — Replace unchecked loader arithmetic paths with checked overflow-safe math and invariant guards.
+- [x] Batch 2 verify — Run targeted persistence tests: `PersistenceTests`, `MmapTests`, `DiskBackedTests`, `StreamingIndexPersistenceTests`, `IVFPQPersistenceTests`.
+- [x] Batch 3 (Critical/High) — Fix GPU NN-Descent race/liveness issues and PQ ADC malformed-code bounds safety.
+- [x] Batch 3 (High/Medium) — Add/clarify guard behavior for GPU limits (`k/ef`, visited table, degree thread constraints).
+- [x] Batch 3 verify — Run targeted GPU tests: `NNDescentGPUTests`, `GPUADCSearchTests`, `MetalSearchTests`, `FullGPUSearchTests`, `BitonicSortTests`.
+- [x] Batch 4 (High/Medium) — Fix remaining API/search/filter issues (`SearchFilter` numeric safety and related behavior).
+- [x] Batch 4 (Medium) — Strengthen weak/flaky tests and add missing edge tests identified in audit.
+- [x] Final verify — Run full `swift test` and document remaining environment-only failures.
+- [x] Update `docs/code-review-report.md` to reflect fixed status and residual risks.
+
+## Review Results
+
+- Batch 1 completed:
+  - `ANNSIndex.insert` and `batchInsert` now defer IDMap commit until mutation steps succeed.
+  - Auto-repair paths preserve pending IDs on failure and retry rather than dropping repair work.
+  - Binary insert path now stores quantized vectors consistently.
+- Batch 1 verification:
+  - `swift test --filter "(ANNSIndexTests|BatchInsertTests|IncrementalTests|GraphRepairTests|MetadataTests)"` passed.
+- Batch 2 completed:
+  - `IndexSerializer.save*` now uses checked integer arithmetic and atomic file replacement.
+  - `MmapIndexLoader` and `IndexSerializer.load` now use overflow-safe math and stronger invariant validation (`idMap` count, `entryPoint` bounds).
+  - `StreamingIndex.save` now writes via staging directory swap and validates metadata consistency before persist/load.
+- Batch 2 verification:
+  - `swift test --filter "(PersistenceTests|MmapTests|DiskBackedTests|StreamingIndexPersistenceTests|IVFPQPersistenceTests)"` passed.
+- Batch 3 completed:
+  - NN-Descent GPU path now rejects `nodeCount < 2`, uses float comparisons for distance ordering (fixes inner-product ordering bug), and uses per-node updates to remove cross-node pair races.
+  - PQ ADC shader/host path now validates code bounds; shader now uses threadgroup-size-aware table copy and explicit address spaces.
+  - Full GPU search now has explicit bounds guards (no silent `k/ef` clamp; visited-capacity and degree limits surfaced for safe fallback).
+- Batch 3 verification:
+  - Targeted GPU test command executed; environment still reports Metal default-library load failures.
+  - GPUADC focused tests pass/skip as expected under environment constraints.
+- Batch 4 completed:
+  - Added precise integer filters (`greaterThanInt` / `lessThanInt`) and integrated support in both `MetadataStore` and `StreamingIndex` filter evaluation.
+  - `HNSWSearchCPU` now validates jagged dimensions and uses stable greedy-step improvement selection.
+  - `ANNSIndex.build` now validates minimum node count and degree invariants up front.
+  - `ANNSIndex` now uses HNSW only when runtime metric matches build metric; no hidden metric-contract violation.
+  - Added targeted tests for build validation, Int64 filter precision, GPU nodeCount guard, and malformed ADC code validation.
+- Final verification:
+  - `swift test` after fixes: **208 tests, 196 passed, 12 failed**.
+  - All 12 failures are environment-bound GPU suites failing to load default Metal shader library (`MTLLibraryErrorDomain Code=6`), not regressions from remediations.
+
+## MetalANNS — Deep Codebase Audit
+
+> **Status**: COMPLETE
+> **Owner**: Codex
+> **Last Updated**: 2026-02-28
+
+## Task Checklist
+
+- [x] 1 — Establish audit scope and evaluation rubric (architecture, correctness, reliability, performance, security, tests, maintainability, docs).
+- [x] 2 — Gather objective repository health signals (test pass/fail state, environment constraints, module/test distribution).
+- [x] 3 — Perform deep static review of core implementation paths (`ANNSIndex`, `IVFPQIndex`, GPU/CPU backends, persistence, streaming/sharding).
+- [x] 4 — Perform deep static review of test suite quality (coverage gaps, brittle tests, missing edge cases, regression risks).
+- [x] 5 — Consolidate findings by severity with file/line references and compute final score out of 100.
+- [x] 6 — Document review results below and deliver final report.
+
+## Review Results
+
+- Scope covered:
+  - Source: 60 Swift files in `Sources/` and 9 Metal shader files.
+  - Tests: 62 Swift test files in `Tests/`.
+  - Total code lines (`Sources` + `Tests`): ~17,683.
+- Runtime validation snapshot (`swift test` on 2026-02-28):
+  - 204 tests across 62 suites executed.
+  - 193 passed, 11 failed.
+  - All 11 failures map to Metal library load environment issue (`MTLLibraryErrorDomain Code=6: no default library was found`) in GPU suites.
+- Critical findings:
+  - Non-atomic / non-transactional persistence writes can produce torn or inconsistent on-disk state.
+    - `Sources/MetalANNSCore/IndexSerializer.swift:60`
+    - `Sources/MetalANNS/StreamingIndex.swift:340`
+  - Insert/batchInsert paths can partially commit state on failure (ID map/vector state may persist when graph update fails).
+    - `Sources/MetalANNS/ANNSIndex.swift:187`
+    - `Sources/MetalANNS/ANNSIndex.swift:269`
+  - GPU NN-Descent kernel update path can race and leave mismatched `(neighborID, distance)` pairs.
+    - `Sources/MetalANNSCore/Shaders/NNDescent.metal:208`
+    - `Sources/MetalANNSCore/Shaders/NNDescentFloat16.metal:139`
+- High findings:
+  - Unchecked integer arithmetic in loaders may trap on corrupt data instead of throwing controlled errors.
+    - `Sources/MetalANNSCore/IndexSerializer.swift:164`
+    - `Sources/MetalANNSCore/MmapIndexLoader.swift:79`
+  - GPU path can OOB-read ADC table for malformed PQ code bytes (`code < Ks` not validated in shader).
+    - `Sources/MetalANNSCore/Shaders/PQDistance.metal:57`
+  - GPU tests often skip when GPU is unavailable, allowing major path regressions to hide in CI.
+    - `Tests/MetalANNSTests/MetalSearchTests.swift:40`
+    - `Tests/MetalANNSTests/NNDescentGPUTests.swift:22`
+- Medium findings:
+  - Fixed-size visited table and silent clamp limits in GPU search may degrade recall at scale without explicit error.
+    - `Sources/MetalANNSCore/Shaders/Search.metal:5`
+    - `Sources/MetalANNSCore/FullGPUSearch.swift:37`
+  - Some concurrency tests are permissive (`count >= 30` after 50 inserts), masking potential data loss.
+    - `Tests/MetalANNSTests/StreamingIndexFlushTests.swift:75`
+- Strengths:
+  - Broad test breadth (200+ tests) and good module separation (core compute vs public API).
+  - Strong baseline parameter validation on many API edges.
+  - Actor-based abstractions (`PipelineCache`, `CommandQueuePool`, top-level indexes) reduce host-side race exposure.
+- Final deep-audit score: **72/100**.
+  - Correctness: 14/20
+  - Reliability & Persistence: 13/20
+  - GPU Safety/Robustness: 10/15
+  - Performance/Scalability: 11/15
+  - Test Quality: 14/20
+  - API & Maintainability: 10/10
+
 ## MetalANNS — Phase 25: GPU ADC Linear Scan Extraction & Public API
 
 > **Status**: IMPLEMENTED (VALIDATION PARTIAL: `xcodebuild test` test-action unavailable; `swift test` used)

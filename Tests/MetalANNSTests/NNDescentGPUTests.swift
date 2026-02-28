@@ -112,4 +112,28 @@ struct NNDescentGPUTests {
         let averageRecall = totalRecall / Float(nodeCount)
         #expect(averageRecall > 0.80, "Average recall \\(averageRecall) below 0.80")
     }
+
+    @Test("Random init rejects nodeCount less than 2")
+    func randomInitRejectsSingleNode() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            return
+        }
+
+        let context = try MetalContext()
+        let graph = try GraphBuffer(capacity: 1, degree: 1, device: context.device)
+
+        do {
+            try await NNDescentGPU.randomInit(
+                context: context,
+                graph: graph,
+                nodeCount: 1
+            )
+            #expect(Bool(false), "Expected randomInit to reject nodeCount < 2")
+        } catch let error as ANNSError {
+            guard case .constructionFailed = error else {
+                #expect(Bool(false), "Expected constructionFailed, got \(error)")
+                return
+            }
+        }
+    }
 }

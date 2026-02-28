@@ -26,6 +26,7 @@ public actor StreamingIndex {
     private var base: ANNSIndex?
     private var delta: ANNSIndex?
     private var mergeTask: Task<Void, Error>?
+    private var lastBackgroundMergeError: ANNSError?
     private var _isMerging = false
 
     private var pendingVectors: [[Float]] = []
@@ -67,6 +68,7 @@ public actor StreamingIndex {
     }
 
     public func insert(_ vector: [Float], id: String) async throws {
+        try checkBackgroundMergeError()
         guard !allIDs.contains(id) else {
             throw ANNSError.idAlreadyExists(id)
         }
@@ -86,6 +88,7 @@ public actor StreamingIndex {
     }
 
     public func batchInsert(_ vectors: [[Float]], ids: [String]) async throws {
+        try checkBackgroundMergeError()
         guard vectors.count == ids.count else {
             throw ANNSError.constructionFailed("Vector and ID counts do not match")
         }
@@ -125,6 +128,7 @@ public actor StreamingIndex {
         filter: SearchFilter? = nil,
         metric: Metric? = nil
     ) async throws -> [SearchResult] {
+        try checkBackgroundMergeError()
         try validateQueryDimension(query)
         guard k > 0 else {
             return []
@@ -184,6 +188,7 @@ public actor StreamingIndex {
         filter: SearchFilter? = nil,
         metric: Metric? = nil
     ) async throws -> [SearchResult] {
+        try checkBackgroundMergeError()
         try validateQueryDimension(query)
         guard maxDistance > 0 else {
             return []
@@ -312,6 +317,7 @@ public actor StreamingIndex {
     }
 
     public func flush() async throws {
+        try checkBackgroundMergeError()
         if metricsNeedsPropagation {
             await synchronizeChildMetricsIfNeeded()
         }
@@ -329,19 +335,14 @@ public actor StreamingIndex {
     }
 
     public func save(to url: URL) async throws {
+        try checkBackgroundMergeError()
         try await flush()
 
         guard let base else {
             throw ANNSError.constructionFailed("Nothing to save — index is empty")
         }
 
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        let baseURL = url.appendingPathComponent("base.anns")
-        if FileManager.default.fileExists(atPath: baseURL.path) {
-            try FileManager.default.removeItem(at: baseURL)
-        }
-        try await base.save(to: baseURL)
-
+        // Capture a consistent metadata snapshot before cross-actor await points.
         let meta = PersistedMeta(
             config: config,
             vectorDimension: vectorDimension,
@@ -350,14 +351,37 @@ public actor StreamingIndex {
             deletedIDs: Array(deletedIDs),
             metadataByID: metadataByID
         )
+        try Self.validateLoadedMeta(meta)
+
+        let fileManager = FileManager.default
+        let parentURL = url.deletingLastPathComponent()
+        let tempURL = parentURL.appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
+        let tempBaseURL = tempURL.appendingPathComponent("base.anns")
+        let tempMetaURL = tempURL.appendingPathComponent("streaming.meta.json")
+
+        try fileManager.createDirectory(at: tempURL, withIntermediateDirectories: true)
+        do {
+            try await base.save(to: tempBaseURL)
+        } catch {
+            try? fileManager.removeItem(at: tempURL)
+            throw error
+        }
+
         let data = try JSONEncoder().encode(meta)
-        try data.write(to: url.appendingPathComponent("streaming.meta.json"), options: .atomic)
+        do {
+            try data.write(to: tempMetaURL, options: .atomic)
+            try Self.replaceDirectory(at: url, with: tempURL)
+        } catch {
+            try? fileManager.removeItem(at: tempURL)
+            throw error
+        }
     }
 
     public static func load(from url: URL) async throws -> StreamingIndex {
         let metaURL = url.appendingPathComponent("streaming.meta.json")
         let data = try Data(contentsOf: metaURL)
         let meta = try JSONDecoder().decode(PersistedMeta.self, from: data)
+        try validateLoadedMeta(meta)
 
         let loadedBase = try await ANNSIndex.load(from: url.appendingPathComponent("base.anns"))
         let streaming = StreamingIndex(config: meta.config)
@@ -493,13 +517,25 @@ public actor StreamingIndex {
         mergeTask = task
 
         Task { [self] in
-            _ = try? await task.value
+            do {
+                try await task.value
+            } catch let error as ANNSError {
+                self.recordBackgroundMergeError(error)
+            } catch {
+                self.recordBackgroundMergeError(
+                    .constructionFailed("Background merge failed: \(error)")
+                )
+            }
             self.clearMergeTaskReference()
         }
     }
 
     private func clearMergeTaskReference() {
         mergeTask = nil
+    }
+
+    private func recordBackgroundMergeError(_ error: ANNSError) {
+        lastBackgroundMergeError = error
     }
 
     private func activeRecords(upperBound: Int) -> (vectors: [[Float]], ids: [String]) {
@@ -627,6 +663,8 @@ public actor StreamingIndex {
             pendingVectors = tail.vectors
             pendingIDs = tail.ids
         }
+
+        lastBackgroundMergeError = nil
     }
 
     private func pendingSearchResults(
@@ -699,6 +737,18 @@ public actor StreamingIndex {
             }
             return current < value
 
+        case .greaterThanInt(column: let column, value: let value):
+            guard let current = integerValue(from: row[column]) else {
+                return false
+            }
+            return current > value
+
+        case .lessThanInt(column: let column, value: let value):
+            guard let current = integerValue(from: row[column]) else {
+                return false
+            }
+            return current < value
+
         case .in(column: let column, values: let values):
             if case .string(let current)? = row[column] {
                 return values.contains(current)
@@ -727,6 +777,15 @@ public actor StreamingIndex {
         }
     }
 
+    private func integerValue(from value: MetadataValue?) -> Int64? {
+        switch value {
+        case .int64(let value):
+            return value
+        case .float, .string, .none:
+            return nil
+        }
+    }
+
     private func synchronizeChildMetricsIfNeeded() async {
         guard metricsNeedsPropagation else {
             return
@@ -738,5 +797,64 @@ public actor StreamingIndex {
             await delta.setMetrics(metrics)
         }
         metricsNeedsPropagation = false
+    }
+
+    private func checkBackgroundMergeError() throws {
+        if let lastBackgroundMergeError {
+            throw lastBackgroundMergeError
+        }
+    }
+
+    private static func validateLoadedMeta(_ meta: PersistedMeta) throws {
+        guard meta.allVectorsList.count == meta.allIDsList.count else {
+            throw ANNSError.corruptFile("Streaming metadata vector and ID counts do not match")
+        }
+
+        let allIDSet = Set(meta.allIDsList)
+        guard allIDSet.count == meta.allIDsList.count else {
+            throw ANNSError.corruptFile("Streaming metadata contains duplicate IDs")
+        }
+        guard Set(meta.deletedIDs).isSubset(of: allIDSet) else {
+            throw ANNSError.corruptFile("Streaming metadata deleted IDs are not a subset of all IDs")
+        }
+
+        for id in meta.metadataByID.keys where !allIDSet.contains(id) {
+            throw ANNSError.corruptFile("Streaming metadata contains row for unknown ID '\(id)'")
+        }
+
+        let resolvedDimension = meta.vectorDimension ?? meta.allVectorsList.first?.count
+        if let resolvedDimension {
+            guard resolvedDimension > 0 else {
+                throw ANNSError.corruptFile("Streaming metadata has invalid vector dimension")
+            }
+            for vector in meta.allVectorsList where vector.count != resolvedDimension {
+                throw ANNSError.corruptFile("Streaming metadata vectors have inconsistent dimensions")
+            }
+        } else if !meta.allVectorsList.isEmpty {
+            throw ANNSError.corruptFile("Streaming metadata is missing vector dimension")
+        }
+    }
+
+    private static func replaceDirectory(at destinationURL: URL, with sourceURL: URL) throws {
+        let fileManager = FileManager.default
+        let parentURL = destinationURL.deletingLastPathComponent()
+        try fileManager.createDirectory(at: parentURL, withIntermediateDirectories: true)
+
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            let backupURL = parentURL.appendingPathComponent(".\(destinationURL.lastPathComponent).backup-\(UUID().uuidString)")
+            do {
+                try fileManager.moveItem(at: destinationURL, to: backupURL)
+                try fileManager.moveItem(at: sourceURL, to: destinationURL)
+                try? fileManager.removeItem(at: backupURL)
+            } catch {
+                if !fileManager.fileExists(atPath: destinationURL.path),
+                   fileManager.fileExists(atPath: backupURL.path) {
+                    try? fileManager.moveItem(at: backupURL, to: destinationURL)
+                }
+                throw error
+            }
+        } else {
+            try fileManager.moveItem(at: sourceURL, to: destinationURL)
+        }
     }
 }

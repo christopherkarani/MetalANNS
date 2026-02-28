@@ -255,6 +255,38 @@ struct GPUADCSearchTests {
         #expect(emptyForNoDistances.isEmpty)
     }
 
+    @Test("GPU ADC rejects out-of-range PQ code values")
+    func rejectsOutOfRangeCodeValues() async throws {
+        guard let context = makeGPUContextOrSkip() else {
+            return
+        }
+
+        let pq = ProductQuantizer(
+            numSubspaces: 2,
+            centroidsPerSubspace: 4,
+            subspaceDimension: 2,
+            codebooks: [
+                [[0, 0], [1, 1], [2, 2], [3, 3]],
+                [[0, 0], [1, 1], [2, 2], [3, 3]]
+            ]
+        )
+
+        do {
+            _ = try await GPUADCSearch.computeDistances(
+                context: context,
+                query: [0, 0, 0, 0],
+                pq: pq,
+                codes: [[0, 250]]
+            )
+            #expect(Bool(false), "Expected out-of-range code value rejection")
+        } catch let error as ANNSError {
+            guard case .searchFailed = error else {
+                #expect(Bool(false), "Expected searchFailed, got \(error)")
+                return
+            }
+        }
+    }
+
     private func makeGPUContextOrSkip() -> MetalContext? {
         #if targetEnvironment(simulator)
         print("Skipping GPU ADC tests on simulator")

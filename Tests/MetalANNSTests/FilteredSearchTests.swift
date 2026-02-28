@@ -109,6 +109,43 @@ struct FilteredSearchTests {
         }
     }
 
+    @Test("Int64 filters preserve precision for large values")
+    func int64FilterPrecision() async throws {
+        let dim = 8
+        let vectors = makeVectors(count: 20, dim: dim, seedOffset: 200)
+        let ids = (0..<20).map { "v\($0)" }
+
+        let index = ANNSIndex(configuration: IndexConfiguration(degree: 8, metric: .cosine, efSearch: 64))
+        try await index.build(vectors: vectors, ids: ids)
+
+        let base: Int64 = 9_000_000_000_000_000_000
+        for i in 0..<20 {
+            try await index.setMetadata("ts", value: base + Int64(i), for: "v\(i)")
+        }
+
+        let gtResults = try await index.search(
+            query: vectors[10],
+            k: 20,
+            filter: .greaterThanInt(column: "ts", value: base + 15)
+        )
+        #expect(!gtResults.isEmpty)
+        for result in gtResults {
+            let i = extractIndex(from: result.id)
+            #expect(i > 15)
+        }
+
+        let ltResults = try await index.search(
+            query: vectors[10],
+            k: 20,
+            filter: .lessThanInt(column: "ts", value: base + 5)
+        )
+        #expect(!ltResults.isEmpty)
+        for result in ltResults {
+            let i = extractIndex(from: result.id)
+            #expect(i < 5)
+        }
+    }
+
     private func makeVectors(count: Int, dim: Int, seedOffset: Int) -> [[Float]] {
         (0..<count).map { row in
             (0..<dim).map { col in

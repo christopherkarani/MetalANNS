@@ -3,6 +3,7 @@ import Metal
 
 public enum FullGPUSearch {
     private static let maxEF = 256
+    private static let maxVisited = 4096
 
     public static func search(
         context: MetalContext,
@@ -27,15 +28,26 @@ public enum FullGPUSearch {
         guard ef >= k else {
             throw ANNSError.searchFailed("ef must be greater than or equal to k")
         }
+        guard k <= maxEF else {
+            throw ANNSError.searchFailed("k exceeds FullGPUSearch maximum (\(maxEF)); use CPU/hybrid search")
+        }
+        guard ef <= maxEF else {
+            throw ANNSError.searchFailed("ef exceeds FullGPUSearch maximum (\(maxEF)); use CPU/hybrid search")
+        }
         guard query.count == vectors.dim else {
             throw ANNSError.dimensionMismatch(expected: vectors.dim, got: query.count)
         }
         guard entryPoint >= 0, entryPoint < nodeCount else {
             throw ANNSError.searchFailed("Entry point is out of bounds")
         }
+        guard nodeCount <= maxVisited else {
+            throw ANNSError.searchFailed(
+                "nodeCount exceeds FullGPUSearch visited-table capacity (\(maxVisited)); use CPU/hybrid search"
+            )
+        }
 
-        let kLimit = min(k, nodeCount, maxEF)
-        let efLimit = min(max(ef, kLimit), nodeCount, maxEF)
+        let kLimit = min(k, nodeCount)
+        let efLimit = min(max(ef, kLimit), nodeCount)
 
         let kernelName = vectors.isFloat16 ? "beam_search_f16" : "beam_search"
         let pipeline = try await context.pipelineCache.pipeline(for: kernelName)
@@ -100,7 +112,12 @@ public enum FullGPUSearch {
             encoder.setBytes(&entryPointValue, length: uintSize, index: 10)
             encoder.setBytes(&metricType, length: uintSize, index: 11)
 
-            let threadWidth = max(1, min(graph.degree, pipeline.maxTotalThreadsPerThreadgroup))
+            guard graph.degree <= pipeline.maxTotalThreadsPerThreadgroup else {
+                throw ANNSError.searchFailed(
+                    "Graph degree \(graph.degree) exceeds kernel threadgroup capacity \(pipeline.maxTotalThreadsPerThreadgroup)"
+                )
+            }
+            let threadWidth = max(1, graph.degree)
             let threadsPerThreadgroup = MTLSize(width: threadWidth, height: 1, depth: 1)
             let threadgroups = MTLSize(width: 1, height: 1, depth: 1)
             encoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)

@@ -3,6 +3,8 @@ import Metal
 import MetalANNSCore
 
 public actor ANNSIndex {
+    private static let fullGPUMaxEF = 256
+
     private struct PersistedMetadata: Codable, Sendable {
         let configuration: IndexConfiguration
         let softDeletion: SoftDeletion
@@ -75,6 +77,17 @@ public actor ANNSIndex {
             if !seenIDs.insert(id).inserted {
                 throw ANNSError.idAlreadyExists(id)
             }
+        }
+        guard inputVectors.count >= 2 else {
+            throw ANNSError.constructionFailed("Build requires at least 2 vectors")
+        }
+        guard configuration.degree > 0 else {
+            throw ANNSError.constructionFailed("Degree must be greater than zero")
+        }
+        guard configuration.degree < inputVectors.count else {
+            throw ANNSError.constructionFailed(
+                "Degree \(configuration.degree) must be less than node count \(inputVectors.count)"
+            )
         }
         if configuration.metric == .hamming, !configuration.useBinary {
             throw ANNSError.constructionFailed("metric .hamming requires useBinary == true")
@@ -179,45 +192,67 @@ public actor ANNSIndex {
             throw ANNSError.idAlreadyExists(id)
         }
 
-        let nextInternalID = idMap.count
+        guard idMap.canAllocate(1) else {
+            throw ANNSError.constructionFailed("Internal ID space exhausted")
+        }
+
+        let nextInternalID = Int(idMap.nextInternalID)
         guard nextInternalID < vectors.capacity, nextInternalID < graph.capacity else {
             throw ANNSError.constructionFailed("Index capacity exceeded; rebuild with larger capacity")
         }
 
-        guard let assignedID = idMap.assign(externalID: id) else {
-            throw ANNSError.idAlreadyExists(id)
-        }
-
         let graphVector = vectors is BinaryVectorBuffer ? Self.quantizeForHamming(vector) : vector
-        let slot = Int(assignedID)
-        try vectors.insert(vector: vector, at: slot)
-        if vectors.count < slot + 1 {
-            vectors.setCount(slot + 1)
-        }
+        let slot = nextInternalID
+        let previousVectorCount = vectors.count
+        let previousGraphCount = graph.nodeCount
 
         let metricsRecorder = metrics
         let insertStart = metricsRecorder == nil ? nil : ContinuousClock.now
 
-        try IncrementalBuilder.insert(
-            vector: graphVector,
-            at: slot,
-            into: graph,
-            vectors: vectors,
-            entryPoint: entryPoint,
-            metric: configuration.metric,
-            degree: configuration.degree
-        )
-        if graph.nodeCount < slot + 1 {
-            graph.setCount(slot + 1)
-        }
-        hnsw = nil
-
-        let repairConfig = configuration.repairConfiguration
-        if repairConfig.enabled && repairConfig.repairInterval > 0 {
-            pendingRepairIDs.append(UInt32(slot))
-            if pendingRepairIDs.count >= repairConfig.repairInterval {
-                try triggerRepair()
+        do {
+            try vectors.insert(vector: graphVector, at: slot)
+            if vectors.count < slot + 1 {
+                vectors.setCount(slot + 1)
             }
+
+            try IncrementalBuilder.insert(
+                vector: graphVector,
+                at: slot,
+                into: graph,
+                vectors: vectors,
+                entryPoint: entryPoint,
+                metric: configuration.metric,
+                degree: configuration.degree
+            )
+            if graph.nodeCount < slot + 1 {
+                graph.setCount(slot + 1)
+            }
+            hnsw = nil
+
+            let repairConfig = configuration.repairConfiguration
+            if repairConfig.enabled && repairConfig.repairInterval > 0 {
+                pendingRepairIDs.append(UInt32(slot))
+                if pendingRepairIDs.count >= repairConfig.repairInterval {
+                    try triggerRepair(throwOnFailure: false)
+                }
+            }
+
+            guard let assignedID = idMap.assign(externalID: id), Int(assignedID) == slot else {
+                throw ANNSError.constructionFailed("Failed to commit internal ID for '\(id)'")
+            }
+        } catch {
+            vectors.setCount(previousVectorCount)
+            graph.setCount(previousGraphCount)
+
+            // Best-effort cleanup of the uncommitted node slot.
+            let emptyIDs = Array(repeating: UInt32.max, count: configuration.degree)
+            let emptyDistances = Array(repeating: Float.greatestFiniteMagnitude, count: configuration.degree)
+            try? graph.setNeighbors(of: slot, ids: emptyIDs, distances: emptyDistances)
+
+            if let annError = error as? ANNSError {
+                throw annError
+            }
+            throw ANNSError.constructionFailed("Incremental insert failed: \(error)")
         }
 
         if let metricsRecorder, let insertStart {
@@ -257,71 +292,84 @@ public actor ANNSIndex {
             }
         }
 
-        let startSlot = idMap.count
+        guard idMap.canAllocate(ids.count) else {
+            throw ANNSError.constructionFailed("Internal ID space exhausted")
+        }
+
+        let startSlot = Int(idMap.nextInternalID)
         guard startSlot + vectors.count <= vectorStorage.capacity,
               startSlot + vectors.count <= graph.capacity else {
             throw ANNSError.constructionFailed("Index capacity exceeded; rebuild with larger capacity")
         }
 
-        var slots: [Int] = []
-        slots.reserveCapacity(ids.count)
-        for id in ids {
-            guard let assignedID = idMap.assign(externalID: id) else {
-                throw ANNSError.idAlreadyExists(id)
-            }
-            slots.append(Int(assignedID))
-        }
-
-        for (offset, vector) in vectors.enumerated() {
-            try vectorStorage.insert(vector: vector, at: slots[offset])
-        }
-        let newMaxCount = (slots.last ?? 0) + 1
-        if vectorStorage.count < newMaxCount {
-            vectorStorage.setCount(newMaxCount)
-        }
-
-        let graphVectors: [[Float]]
-        if vectorStorage is BinaryVectorBuffer {
-            graphVectors = vectors.map(Self.quantizeForHamming)
-        } else {
-            graphVectors = vectors
-        }
+        let slots = Array(startSlot..<(startSlot + vectors.count))
+        let previousVectorCount = vectorStorage.count
+        let previousGraphCount = graph.nodeCount
 
         let metricsRecorder = metrics
         let batchInsertStart = metricsRecorder == nil ? nil : ContinuousClock.now
         let insertedCount = vectors.count
 
-        try BatchIncrementalBuilder.batchInsert(
-            vectors: graphVectors,
-            startingAt: startSlot,
-            into: graph,
-            vectorStorage: vectorStorage,
-            entryPoint: entryPoint,
-            metric: configuration.metric,
-            degree: configuration.degree
-        )
-
-        if graph.nodeCount < newMaxCount {
-            graph.setCount(newMaxCount)
-        }
-        hnsw = nil
-
-        let repairConfig = configuration.repairConfiguration
-        if repairConfig.enabled {
-            var idsToRepair = pendingRepairIDs
-            idsToRepair.reserveCapacity(idsToRepair.count + slots.count)
-            idsToRepair.append(contentsOf: slots.map(UInt32.init))
-            pendingRepairIDs.removeAll(keepingCapacity: true)
-
-            if !idsToRepair.isEmpty {
-                _ = try GraphRepairer.repair(
-                    recentIDs: idsToRepair,
-                    vectors: vectorStorage,
-                    graph: graph,
-                    config: repairConfig,
-                    metric: configuration.metric
-                )
+        do {
+            let graphVectors: [[Float]]
+            if vectorStorage is BinaryVectorBuffer {
+                graphVectors = vectors.map(Self.quantizeForHamming)
+            } else {
+                graphVectors = vectors
             }
+
+            for (offset, vector) in graphVectors.enumerated() {
+                try vectorStorage.insert(vector: vector, at: slots[offset])
+            }
+            let newMaxCount = (slots.last ?? 0) + 1
+            if vectorStorage.count < newMaxCount {
+                vectorStorage.setCount(newMaxCount)
+            }
+
+            try BatchIncrementalBuilder.batchInsert(
+                vectors: graphVectors,
+                startingAt: startSlot,
+                into: graph,
+                vectorStorage: vectorStorage,
+                entryPoint: entryPoint,
+                metric: configuration.metric,
+                degree: configuration.degree
+            )
+
+            if graph.nodeCount < newMaxCount {
+                graph.setCount(newMaxCount)
+            }
+            hnsw = nil
+
+            let repairConfig = configuration.repairConfiguration
+            if repairConfig.enabled {
+                pendingRepairIDs.append(contentsOf: slots.map(UInt32.init))
+                try triggerRepair(throwOnFailure: false)
+            }
+
+            for (offset, id) in ids.enumerated() {
+                guard let assignedID = idMap.assign(externalID: id), Int(assignedID) == slots[offset] else {
+                    throw ANNSError.constructionFailed("Failed to commit internal ID for '\(id)'")
+                }
+            }
+        } catch {
+            vectorStorage.setCount(previousVectorCount)
+            graph.setCount(previousGraphCount)
+            pendingRepairIDs.removeAll { internalID in
+                slots.contains(Int(internalID))
+            }
+
+            // Best-effort cleanup for uncommitted slots.
+            let emptyIDs = Array(repeating: UInt32.max, count: configuration.degree)
+            let emptyDistances = Array(repeating: Float.greatestFiniteMagnitude, count: configuration.degree)
+            for slot in slots {
+                try? graph.setNeighbors(of: slot, ids: emptyIDs, distances: emptyDistances)
+            }
+
+            if let annError = error as? ANNSError {
+                throw annError
+            }
+            throw ANNSError.constructionFailed("Batch insert failed: \(error)")
         }
 
         if let metricsRecorder, let batchInsertStart {
@@ -346,7 +394,7 @@ public actor ANNSIndex {
         try triggerRepair()
     }
 
-    private func triggerRepair() throws(ANNSError) {
+    private func triggerRepair(throwOnFailure: Bool = true) throws(ANNSError) {
         guard let vectors, let graph else {
             return
         }
@@ -357,14 +405,22 @@ public actor ANNSIndex {
         let idsToRepair = pendingRepairIDs
         pendingRepairIDs.removeAll(keepingCapacity: true)
 
-        _ = try GraphRepairer.repair(
-            recentIDs: idsToRepair,
-            vectors: vectors,
-            graph: graph,
-            config: configuration.repairConfiguration,
-            metric: configuration.metric
-        )
-        hnsw = nil
+        do {
+            _ = try GraphRepairer.repair(
+                recentIDs: idsToRepair,
+                vectors: vectors,
+                graph: graph,
+                config: configuration.repairConfiguration,
+                metric: configuration.metric
+            )
+            hnsw = nil
+        } catch {
+            // Preserve pending IDs so repair can be retried later.
+            pendingRepairIDs = idsToRepair + pendingRepairIDs
+            if throwOnFailure {
+                throw error
+            }
+        }
     }
 
     public func delete(id: String) throws {
@@ -486,17 +542,53 @@ public actor ANNSIndex {
         let effectiveEf = max(configuration.efSearch, effectiveK)
 
         let rawResults: [SearchResult]
-        if let context, supportsGPUSearch(for: vectors), searchMetric != .hamming {
-            rawResults = try await FullGPUSearch.search(
-                context: context,
-                query: normalizedQuery,
-                vectors: vectors,
-                graph: graph,
-                entryPoint: Int(entryPoint),
-                k: max(1, effectiveK),
-                ef: max(1, effectiveEf),
-                metric: searchMetric
-            )
+        let canAttemptGPU = supportsGPUSearch(for: vectors)
+            && searchMetric != .hamming
+            && effectiveK <= Self.fullGPUMaxEF
+            && effectiveEf <= Self.fullGPUMaxEF
+
+        if let context, canAttemptGPU {
+            do {
+                rawResults = try await FullGPUSearch.search(
+                    context: context,
+                    query: normalizedQuery,
+                    vectors: vectors,
+                    graph: graph,
+                    entryPoint: Int(entryPoint),
+                    k: max(1, effectiveK),
+                    ef: max(1, effectiveEf),
+                    metric: searchMetric
+                )
+            } catch {
+                if configuration.hnswConfiguration.enabled, hnsw == nil {
+                    try rebuildHNSWFromCurrentState()
+                }
+
+                let extractedVectors = extractVectors(from: vectors)
+                let extractedGraph = extractGraph(from: graph)
+
+                if let hnsw, searchMetric == configuration.metric {
+                    rawResults = try await HNSWSearchCPU.search(
+                        query: normalizedQuery,
+                        vectors: extractedVectors,
+                        hnsw: hnsw,
+                        baseGraph: extractedGraph,
+                        k: max(1, effectiveK),
+                        ef: max(1, effectiveEf),
+                        metric: searchMetric
+                    )
+                } else {
+                    rawResults = try await BeamSearchCPU.search(
+                        query: normalizedQuery,
+                        vectors: extractedVectors,
+                        graph: extractedGraph,
+                        entryPoint: Int(entryPoint),
+                        k: max(1, effectiveK),
+                        ef: max(1, effectiveEf),
+                        metric: searchMetric
+                    )
+                }
+            }
         } else {
             if configuration.hnswConfiguration.enabled, hnsw == nil {
                 try rebuildHNSWFromCurrentState()
@@ -505,7 +597,7 @@ public actor ANNSIndex {
             let extractedVectors = extractVectors(from: vectors)
             let extractedGraph = extractGraph(from: graph)
 
-            if let hnsw {
+            if let hnsw, searchMetric == configuration.metric {
                 rawResults = try await HNSWSearchCPU.search(
                     query: normalizedQuery,
                     vectors: extractedVectors,
@@ -581,17 +673,53 @@ public actor ANNSIndex {
         let searchEf = min(vectors.count, max(configuration.efSearch, searchK * 2))
 
         let rawResults: [SearchResult]
-        if let context, supportsGPUSearch(for: vectors), searchMetric != .hamming {
-            rawResults = try await FullGPUSearch.search(
-                context: context,
-                query: normalizedQuery,
-                vectors: vectors,
-                graph: graph,
-                entryPoint: Int(entryPoint),
-                k: max(1, searchK),
-                ef: max(1, searchEf),
-                metric: searchMetric
-            )
+        let canAttemptGPU = supportsGPUSearch(for: vectors)
+            && searchMetric != .hamming
+            && searchK <= Self.fullGPUMaxEF
+            && searchEf <= Self.fullGPUMaxEF
+
+        if let context, canAttemptGPU {
+            do {
+                rawResults = try await FullGPUSearch.search(
+                    context: context,
+                    query: normalizedQuery,
+                    vectors: vectors,
+                    graph: graph,
+                    entryPoint: Int(entryPoint),
+                    k: max(1, searchK),
+                    ef: max(1, searchEf),
+                    metric: searchMetric
+                )
+            } catch {
+                if configuration.hnswConfiguration.enabled, hnsw == nil {
+                    try rebuildHNSWFromCurrentState()
+                }
+
+                let extractedVectors = extractVectors(from: vectors)
+                let extractedGraph = extractGraph(from: graph)
+
+                if let hnsw, searchMetric == configuration.metric {
+                    rawResults = try await HNSWSearchCPU.search(
+                        query: normalizedQuery,
+                        vectors: extractedVectors,
+                        hnsw: hnsw,
+                        baseGraph: extractedGraph,
+                        k: max(1, searchK),
+                        ef: max(1, searchEf),
+                        metric: searchMetric
+                    )
+                } else {
+                    rawResults = try await BeamSearchCPU.search(
+                        query: normalizedQuery,
+                        vectors: extractedVectors,
+                        graph: extractedGraph,
+                        entryPoint: Int(entryPoint),
+                        k: max(1, searchK),
+                        ef: max(1, searchEf),
+                        metric: searchMetric
+                    )
+                }
+            }
         } else {
             if configuration.hnswConfiguration.enabled, hnsw == nil {
                 try rebuildHNSWFromCurrentState()
@@ -600,7 +728,7 @@ public actor ANNSIndex {
             let extractedVectors = extractVectors(from: vectors)
             let extractedGraph = extractGraph(from: graph)
 
-            if let hnsw {
+            if let hnsw, searchMetric == configuration.metric {
                 rawResults = try await HNSWSearchCPU.search(
                     query: normalizedQuery,
                     vectors: extractedVectors,
@@ -877,10 +1005,6 @@ public actor ANNSIndex {
             return
         }
         guard let vectors, let graph else {
-            hnsw = nil
-            return
-        }
-        if context != nil {
             hnsw = nil
             return
         }

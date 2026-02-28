@@ -25,18 +25,26 @@ public enum IndexSerializer {
         guard nodeCount == graph.nodeCount else {
             throw ANNSError.constructionFailed("Vector and graph node counts do not match")
         }
+        guard nodeCount <= Int(UInt32.max),
+              degree <= Int(UInt32.max),
+              vectors.dim <= Int(UInt32.max) else {
+            throw ANNSError.constructionFailed("Index dimensions exceed supported serialization limits")
+        }
+
         let storageType: UInt32
         let vectorByteCount: Int
         if let binaryBuffer = vectors as? BinaryVectorBuffer {
             storageType = 2
-            vectorByteCount = nodeCount * binaryBuffer.bytesPerVector
+            vectorByteCount = try checkedMultiply(nodeCount, binaryBuffer.bytesPerVector)
         } else {
             storageType = vectors.isFloat16 ? 1 : 0
             let bytesPerElement = vectors.isFloat16 ? MemoryLayout<UInt16>.stride : MemoryLayout<Float>.stride
-            vectorByteCount = nodeCount * vectors.dim * bytesPerElement
+            let vectorElementCount = try checkedMultiply(nodeCount, vectors.dim)
+            vectorByteCount = try checkedMultiply(vectorElementCount, bytesPerElement)
         }
-        let adjacencyByteCount = nodeCount * degree * MemoryLayout<UInt32>.stride
-        let distanceByteCount = nodeCount * degree * MemoryLayout<Float>.stride
+        let edgeCount = try checkedMultiply(nodeCount, degree)
+        let adjacencyByteCount = try checkedMultiply(edgeCount, MemoryLayout<UInt32>.stride)
+        let distanceByteCount = try checkedMultiply(edgeCount, MemoryLayout<Float>.stride)
 
         var filePayload = Data()
         append(magic: headerMagic, to: &filePayload)
@@ -52,12 +60,14 @@ public enum IndexSerializer {
         filePayload.append(Data(bytes: graph.distanceBuffer.contents(), count: distanceByteCount))
 
         let idMapData = try JSONEncoder().encode(idMap)
+        guard idMapData.count <= Int(UInt32.max) else {
+            throw ANNSError.constructionFailed("ID map payload exceeds supported size")
+        }
         append(uint32: UInt32(idMapData.count), to: &filePayload)
         filePayload.append(idMapData)
         append(uint32: entryPoint, to: &filePayload)
 
-        try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try filePayload.write(to: fileURL)
+        try atomicWrite(filePayload, to: fileURL)
     }
 
     public static func saveMmapCompatible(
@@ -78,18 +88,26 @@ public enum IndexSerializer {
             throw ANNSError.constructionFailed("Vector and graph node counts do not match")
         }
 
+        guard nodeCount <= Int(UInt32.max),
+              degree <= Int(UInt32.max),
+              vectors.dim <= Int(UInt32.max) else {
+            throw ANNSError.constructionFailed("Index dimensions exceed supported serialization limits")
+        }
+
         let storageType: UInt32
         let vectorByteCount: Int
         if let binaryBuffer = vectors as? BinaryVectorBuffer {
             storageType = 2
-            vectorByteCount = nodeCount * binaryBuffer.bytesPerVector
+            vectorByteCount = try checkedMultiply(nodeCount, binaryBuffer.bytesPerVector)
         } else {
             storageType = vectors.isFloat16 ? 1 : 0
             let bytesPerElement = vectors.isFloat16 ? MemoryLayout<UInt16>.stride : MemoryLayout<Float>.stride
-            vectorByteCount = nodeCount * vectors.dim * bytesPerElement
+            let vectorElementCount = try checkedMultiply(nodeCount, vectors.dim)
+            vectorByteCount = try checkedMultiply(vectorElementCount, bytesPerElement)
         }
-        let adjacencyByteCount = nodeCount * degree * MemoryLayout<UInt32>.stride
-        let distanceByteCount = nodeCount * degree * MemoryLayout<Float>.stride
+        let edgeCount = try checkedMultiply(nodeCount, degree)
+        let adjacencyByteCount = try checkedMultiply(edgeCount, MemoryLayout<UInt32>.stride)
+        let distanceByteCount = try checkedMultiply(edgeCount, MemoryLayout<Float>.stride)
 
         var filePayload = Data()
         append(magic: headerMagic, to: &filePayload)
@@ -109,12 +127,14 @@ public enum IndexSerializer {
         appendPagePadding(to: &filePayload)
 
         let idMapData = try JSONEncoder().encode(idMap)
+        guard idMapData.count <= Int(UInt32.max) else {
+            throw ANNSError.constructionFailed("ID map payload exceeds supported size")
+        }
         append(uint32: UInt32(idMapData.count), to: &filePayload)
         filePayload.append(idMapData)
         append(uint32: entryPoint, to: &filePayload)
 
-        try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try filePayload.write(to: fileURL)
+        try atomicWrite(filePayload, to: fileURL)
     }
 
     public static func load(from fileURL: URL, device: MTLDevice? = nil) throws -> (
@@ -155,67 +175,88 @@ public enum IndexSerializer {
         guard storageType == 0 || storageType == 1 || storageType == 2 else {
             throw ANNSError.corruptFile("Unsupported storage type \(storageType)")
         }
+        guard nodeCount > 0 else {
+            throw ANNSError.corruptFile("Node count must be greater than zero")
+        }
+        guard degree > 0 else {
+            throw ANNSError.corruptFile("Degree must be greater than zero")
+        }
+        guard dim > 0 else {
+            throw ANNSError.corruptFile("Dimension must be greater than zero")
+        }
 
         let vectorByteCount: Int
         if storageType == 2 {
             guard dim % 8 == 0 else {
                 throw ANNSError.corruptFile("Binary index has dim not divisible by 8")
             }
-            vectorByteCount = nodeCount * (dim / 8)
+            vectorByteCount = try checkedMultiply(nodeCount, dim / 8)
         } else {
             let bytesPerElement = storageType == 1 ? MemoryLayout<UInt16>.stride : MemoryLayout<Float>.stride
-            vectorByteCount = nodeCount * dim * bytesPerElement
+            let vectorElementCount = try checkedMultiply(nodeCount, dim)
+            vectorByteCount = try checkedMultiply(vectorElementCount, bytesPerElement)
         }
-        let adjacencyByteCount = nodeCount * degree * MemoryLayout<UInt32>.stride
-        let distanceByteCount = nodeCount * degree * MemoryLayout<Float>.stride
+        let edgeCount = try checkedMultiply(nodeCount, degree)
+        let adjacencyByteCount = try checkedMultiply(edgeCount, MemoryLayout<UInt32>.stride)
+        let distanceByteCount = try checkedMultiply(edgeCount, MemoryLayout<Float>.stride)
 
         let vectorData: Data.SubSequence
         let adjacencyData: Data.SubSequence
         let distanceData: Data.SubSequence
 
         if formatVersion == mmapVersion {
-            let vectorStart = alignedOffset(cursor)
-            guard payload.count >= vectorStart + vectorByteCount else {
+            let vectorStart = try alignedOffset(cursor)
+            let vectorEnd = try checkedAdd(vectorStart, vectorByteCount)
+            guard payload.count >= vectorEnd else {
                 throw ANNSError.corruptFile("Corrupt or truncated vector payload")
             }
-            vectorData = payload[vectorStart..<vectorStart + vectorByteCount]
+            vectorData = payload[vectorStart..<vectorEnd]
 
-            let adjacencyStart = alignedOffset(vectorStart + vectorByteCount)
-            guard payload.count >= adjacencyStart + adjacencyByteCount else {
+            let adjacencyStart = try alignedOffset(vectorEnd)
+            let adjacencyEnd = try checkedAdd(adjacencyStart, adjacencyByteCount)
+            guard payload.count >= adjacencyEnd else {
                 throw ANNSError.corruptFile("Corrupt or truncated adjacency payload")
             }
-            adjacencyData = payload[adjacencyStart..<adjacencyStart + adjacencyByteCount]
+            adjacencyData = payload[adjacencyStart..<adjacencyEnd]
 
-            let distanceStart = alignedOffset(adjacencyStart + adjacencyByteCount)
-            guard payload.count >= distanceStart + distanceByteCount else {
+            let distanceStart = try alignedOffset(adjacencyEnd)
+            let distanceEnd = try checkedAdd(distanceStart, distanceByteCount)
+            guard payload.count >= distanceEnd else {
                 throw ANNSError.corruptFile("Corrupt or truncated distance payload")
             }
-            distanceData = payload[distanceStart..<distanceStart + distanceByteCount]
+            distanceData = payload[distanceStart..<distanceEnd]
 
-            cursor = alignedOffset(distanceStart + distanceByteCount)
+            cursor = try alignedOffset(distanceEnd)
         } else {
-            let expectedBodyLength = vectorByteCount + adjacencyByteCount + distanceByteCount
-            guard payload.count >= cursor + expectedBodyLength + 4 else {
+            let expectedBodyLength = try checkedAdd(vectorByteCount, try checkedAdd(adjacencyByteCount, distanceByteCount))
+            let bodyEnd = try checkedAdd(cursor, expectedBodyLength)
+            let minimumTail = try checkedAdd(bodyEnd, MemoryLayout<UInt32>.size)
+            guard payload.count >= minimumTail else {
                 throw ANNSError.corruptFile("Corrupt or truncated body")
             }
 
-            vectorData = payload[cursor..<cursor + vectorByteCount]
-            cursor += vectorByteCount
+            let vectorEnd = try checkedAdd(cursor, vectorByteCount)
+            vectorData = payload[cursor..<vectorEnd]
+            cursor = vectorEnd
 
-            adjacencyData = payload[cursor..<cursor + adjacencyByteCount]
-            cursor += adjacencyByteCount
+            let adjacencyEnd = try checkedAdd(cursor, adjacencyByteCount)
+            adjacencyData = payload[cursor..<adjacencyEnd]
+            cursor = adjacencyEnd
 
-            distanceData = payload[cursor..<cursor + distanceByteCount]
-            cursor += distanceByteCount
+            let distanceEnd = try checkedAdd(cursor, distanceByteCount)
+            distanceData = payload[cursor..<distanceEnd]
+            cursor = distanceEnd
         }
 
         let idMapByteCount = Int(try readUInt32(payload, &cursor))
-        guard payload.count >= cursor + idMapByteCount + 4 else {
+        let idMapEnd = try checkedAdd(cursor, idMapByteCount)
+        let entryPointEnd = try checkedAdd(idMapEnd, MemoryLayout<UInt32>.size)
+        guard payload.count >= entryPointEnd else {
             throw ANNSError.corruptFile("Truncated or invalid IDMap payload")
         }
 
-        let idMapData = payload[cursor..<cursor + idMapByteCount]
-        cursor += idMapByteCount
+        let idMapData = payload[cursor..<idMapEnd]
+        cursor = idMapEnd
 
         let entryPoint = try readUInt32(payload, &cursor)
 
@@ -252,6 +293,12 @@ public enum IndexSerializer {
             idMap = try JSONDecoder().decode(IDMap.self, from: idMapData)
         } catch {
             throw ANNSError.corruptFile("IDMap payload is corrupt")
+        }
+        guard idMap.count == nodeCount else {
+            throw ANNSError.corruptFile("ID map size does not match node count")
+        }
+        guard Int(entryPoint) < nodeCount else {
+            throw ANNSError.corruptFile("Entry point is out of bounds")
         }
 
         return (vectors: vectors, graph: graph, idMap: idMap, entryPoint: entryPoint, metric: metric)
@@ -301,12 +348,48 @@ public enum IndexSerializer {
         }
     }
 
-    private static func alignedOffset(_ value: Int) -> Int {
+    private static func alignedOffset(_ value: Int) throws -> Int {
         let remainder = value % pageSize
         if remainder == 0 {
             return value
         }
-        return value + (pageSize - remainder)
+        return try checkedAdd(value, pageSize - remainder)
+    }
+
+    private static func checkedMultiply(_ lhs: Int, _ rhs: Int) throws -> Int {
+        let (product, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        if overflow {
+            throw ANNSError.corruptFile("Integer overflow while computing serialized sizes")
+        }
+        return product
+    }
+
+    private static func checkedAdd(_ lhs: Int, _ rhs: Int) throws -> Int {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        if overflow {
+            throw ANNSError.corruptFile("Integer overflow while computing serialized offsets")
+        }
+        return sum
+    }
+
+    private static func atomicWrite(_ data: Data, to fileURL: URL) throws {
+        let fileManager = FileManager.default
+        let parentURL = fileURL.deletingLastPathComponent()
+        try fileManager.createDirectory(at: parentURL, withIntermediateDirectories: true)
+
+        let tempURL = parentURL.appendingPathComponent(".\(fileURL.lastPathComponent).tmp-\(UUID().uuidString)")
+        do {
+            try data.write(to: tempURL)
+
+            if fileManager.fileExists(atPath: fileURL.path) {
+                _ = try fileManager.replaceItemAt(fileURL, withItemAt: tempURL)
+            } else {
+                try fileManager.moveItem(at: tempURL, to: fileURL)
+            }
+        } catch {
+            try? fileManager.removeItem(at: tempURL)
+            throw error
+        }
     }
 
     private static func readUInt32(_ payload: Data, _ cursor: inout Int) throws -> UInt32 {

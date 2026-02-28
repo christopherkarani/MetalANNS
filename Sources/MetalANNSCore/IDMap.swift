@@ -8,9 +8,27 @@ public struct IDMap: Sendable, Codable {
 
     public init() {}
 
+    /// The next internal ID that will be assigned.
+    public var nextInternalID: UInt32 {
+        nextID
+    }
+
+    /// Returns true if at least `count` additional IDs can be assigned.
+    public func canAllocate(_ count: Int) -> Bool {
+        guard count >= 0 else {
+            return false
+        }
+        // Reserve UInt32.max as invalid/sentinel in graph structures.
+        let remaining = Int(UInt32.max &- nextID)
+        return count <= remaining
+    }
+
     /// Assigns a new internal ID. Returns nil if the external ID already exists.
     public mutating func assign(externalID: String) -> UInt32? {
         guard externalToInternal[externalID] == nil else {
+            return nil
+        }
+        guard nextID < UInt32.max else {
             return nil
         }
 

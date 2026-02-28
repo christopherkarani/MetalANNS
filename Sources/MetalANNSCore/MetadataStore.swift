@@ -51,6 +51,16 @@ public struct MetadataStore: Sendable, Codable {
                 return Float(intValue) < value
             }
             return false
+        case .greaterThanInt(let column, let value):
+            if let intValue = intColumns[column]?[id] {
+                return intValue > value
+            }
+            return false
+        case .lessThanInt(let column, let value):
+            if let intValue = intColumns[column]?[id] {
+                return intValue < value
+            }
+            return false
         case .in(let column, let values):
             guard let value = stringColumns[column]?[id] else {
                 return false

@@ -10,8 +10,8 @@ public enum NNDescentGPU {
         nodeCount: Int,
         seed: UInt32 = 42
     ) async throws {
-        guard nodeCount > 0, nodeCount <= graph.capacity else {
-            throw ANNSError.constructionFailed("nodeCount out of bounds for graph capacity")
+        guard nodeCount > 1, nodeCount <= graph.capacity else {
+            throw ANNSError.constructionFailed("nodeCount must be at least 2 and within graph capacity")
         }
 
         let pipeline = try await context.pipelineCache.pipeline(for: "random_init")
@@ -48,8 +48,8 @@ public enum NNDescentGPU {
         nodeCount: Int,
         metric: Metric
     ) async throws {
-        guard nodeCount > 0, nodeCount <= graph.capacity, nodeCount <= vectors.capacity else {
-            throw ANNSError.constructionFailed("nodeCount out of bounds for graph/vector capacity")
+        guard nodeCount > 1, nodeCount <= graph.capacity, nodeCount <= vectors.capacity else {
+            throw ANNSError.constructionFailed("nodeCount must be at least 2 and within graph/vector capacity")
         }
 
         let kernelName = vectors.isFloat16 ? "compute_initial_distances_f16" : "compute_initial_distances"
@@ -233,6 +233,9 @@ public enum NNDescentGPU {
         let degree = graph.degree
         if degree <= 1 {
             return
+        }
+        guard degree <= 64 else {
+            throw ANNSError.constructionFailed("Bitonic sort supports degree up to 64")
         }
         guard (degree & (degree - 1)) == 0 else {
             throw ANNSError.constructionFailed("Bitonic sort requires degree to be a power of two")

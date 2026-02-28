@@ -113,6 +113,35 @@ struct ANNSIndexTests {
         #expect(results.allSatisfy { $0.count == 5 })
     }
 
+    @Test("Build rejects invalid node count and degree combinations")
+    func buildValidationRejectsInvalidDegree() async throws {
+        let singleVector = [[Float]](repeating: [0, 1, 2, 3], count: 1)
+        let singleIDs = ["only"]
+        let index = ANNSIndex(configuration: IndexConfiguration(degree: 1, metric: .cosine))
+        do {
+            try await index.build(vectors: singleVector, ids: singleIDs)
+            #expect(Bool(false), "Expected construction failure for single-vector build")
+        } catch let error as ANNSError {
+            guard case .constructionFailed = error else {
+                #expect(Bool(false), "Expected constructionFailed, got \(error)")
+                return
+            }
+        }
+
+        let vectors = makeVectors(count: 5, dim: 4, seedOffset: 1000)
+        let ids = (0..<5).map { "bad-\($0)" }
+        let invalidDegreeIndex = ANNSIndex(configuration: IndexConfiguration(degree: 5, metric: .cosine))
+        do {
+            try await invalidDegreeIndex.build(vectors: vectors, ids: ids)
+            #expect(Bool(false), "Expected construction failure for degree >= node count")
+        } catch let error as ANNSError {
+            guard case .constructionFailed = error else {
+                #expect(Bool(false), "Expected constructionFailed, got \(error)")
+                return
+            }
+        }
+    }
+
     private func makeVectors(count: Int, dim: Int, seedOffset: Int) -> [[Float]] {
         (0..<count).map { row in
             (0..<dim).map { col in

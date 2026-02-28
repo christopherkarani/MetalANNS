@@ -22,6 +22,9 @@ public enum GPUADCSearch {
         let m = pq.numSubspaces
         let ks = pq.centroidsPerSubspace
         let subspaceDim = pq.subspaceDimension
+        guard ks <= Int(UInt8.max) + 1 else {
+            throw ANNSError.searchFailed("GPU ADC supports at most 256 centroids per subspace")
+        }
         let originalVectorCount = codes.count
         let paddedVectorCount = roundUp(originalVectorCount, toMultipleOf: scanLoadStride)
 
@@ -30,6 +33,11 @@ public enum GPUADCSearch {
         for (index, code) in codes.enumerated() {
             guard code.count == m else {
                 throw ANNSError.searchFailed("Invalid PQ code size at index \(index)")
+            }
+            for value in code {
+                guard Int(value) < ks else {
+                    throw ANNSError.searchFailed("PQ code value out of range at index \(index)")
+                }
             }
             candidateCodes.append(contentsOf: code)
         }

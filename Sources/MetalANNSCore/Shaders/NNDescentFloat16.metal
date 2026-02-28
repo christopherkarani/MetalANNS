@@ -105,7 +105,7 @@ inline bool try_insert_neighbor_f16(
     uint candidate,
     uint node_count,
     uint degree,
-    uint candidate_dist_bits,
+    float candidate_distance,
     device atomic_uint *update_counter
 ) {
     if (node >= node_count || candidate >= node_count || node == candidate) {
@@ -123,18 +123,22 @@ inline bool try_insert_neighbor_f16(
 
     uint worst_slot = 0u;
     uint worst_bits = atomic_load_explicit(&adj_dists_bits[base], memory_order_relaxed);
+    float worst_distance = as_type<float>(worst_bits);
     for (uint slot = 1; slot < degree; slot++) {
         uint bits = atomic_load_explicit(&adj_dists_bits[base + slot], memory_order_relaxed);
-        if (bits > worst_bits) {
+        float distance = as_type<float>(bits);
+        if (distance > worst_distance) {
             worst_bits = bits;
+            worst_distance = distance;
             worst_slot = slot;
         }
     }
 
-    if (candidate_dist_bits >= worst_bits) {
+    if (candidate_distance >= worst_distance) {
         return false;
     }
 
+    uint candidate_dist_bits = as_type<uint>(candidate_distance);
     uint expected = worst_bits;
     bool exchanged = atomic_compare_exchange_weak_explicit(
         &adj_dists_bits[base + worst_slot],
@@ -201,28 +205,28 @@ kernel void local_join_f16(
                 continue;
             }
 
-            float dist = compute_metric_distance_f16(vectors, a, b, dim, metric_type);
-            uint dist_bits = as_type<uint>(dist);
+            float distA = compute_metric_distance_f16(vectors, tid, a, dim, metric_type);
+            float distB = compute_metric_distance_f16(vectors, tid, b, dim, metric_type);
 
             try_insert_neighbor_f16(
                 adj_ids,
                 adj_dists_bits,
+                tid,
                 a,
-                b,
                 node_count,
                 degree,
-                dist_bits,
+                distA,
                 update_counter
             );
 
             try_insert_neighbor_f16(
                 adj_ids,
                 adj_dists_bits,
+                tid,
                 b,
-                a,
                 node_count,
                 degree,
-                dist_bits,
+                distB,
                 update_counter
             );
         }
