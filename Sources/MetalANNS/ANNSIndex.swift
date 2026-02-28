@@ -497,7 +497,7 @@ public actor ANNSIndex {
         let effectiveK = min(vectors.count, k + max(deletedCount, 10))
         let effectiveEf = max(configuration.efSearch, effectiveK)
         let needsPredicate = filter != nil || deletedCount > 0
-        let searchPredicate: (@Sendable (UInt32) -> Bool)?
+        let searchPredicate: ((UInt32) -> Bool)?
         if needsPredicate {
             let deletionSnapshot = softDeletion
             let metadataSnapshot = metadataStore
@@ -615,7 +615,7 @@ public actor ANNSIndex {
         let searchK = min(vectors.count, limit + deletedCount)
         let searchEf = min(vectors.count, max(configuration.efSearch, searchK * 2))
         let needsPredicate = filter != nil || deletedCount > 0
-        let searchPredicate: (@Sendable (UInt32) -> Bool)?
+        let searchPredicate: ((UInt32) -> Bool)?
         if needsPredicate {
             let deletionSnapshot = softDeletion
             let metadataSnapshot = metadataStore

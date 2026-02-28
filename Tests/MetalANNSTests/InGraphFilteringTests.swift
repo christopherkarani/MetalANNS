@@ -187,6 +187,62 @@ struct InGraphFilteringTests {
         #expect(results.allSatisfy { extractIndex(from: $0.id) < 100 })
     }
 
+    @Test("Range search with filter returns only matching IDs")
+    func rangeSearchFilterCorrectness() async throws {
+        let dim = 32
+        let count = 180
+        let vectors = makeVectors(count: count, dim: dim)
+        let ids = (0..<count).map { "v\($0)" }
+
+        let index = ANNSIndex(
+            configuration: IndexConfiguration(degree: 8, metric: .l2, efSearch: 96),
+            context: nil
+        )
+        try await index.build(vectors: vectors, ids: ids)
+
+        for i in 0..<count {
+            try await index.setMetadata("category", value: i < 90 ? "A" : "B", for: "v\(i)")
+        }
+
+        let results = try await index.rangeSearch(
+            query: vectors[11],
+            maxDistance: 10_000,
+            limit: 20,
+            filter: .equals(column: "category", value: "A")
+        )
+
+        #expect(results.count == 20)
+        #expect(results.allSatisfy { extractIndex(from: $0.id) < 90 })
+    }
+
+    @Test("Range search excludes soft-deleted IDs")
+    func rangeSearchExcludesSoftDeleted() async throws {
+        let dim = 16
+        let count = 100
+        let vectors = makeVectors(count: count, dim: dim)
+        let ids = (0..<count).map { "v\($0)" }
+
+        let index = ANNSIndex(
+            configuration: IndexConfiguration(degree: 8, metric: .l2, efSearch: 96),
+            context: nil
+        )
+        try await index.build(vectors: vectors, ids: ids)
+
+        try await index.delete(id: "v0")
+        try await index.delete(id: "v1")
+        try await index.delete(id: "v2")
+
+        let results = try await index.rangeSearch(
+            query: vectors[4],
+            maxDistance: 10_000,
+            limit: 80
+        )
+
+        #expect(!results.contains { $0.id == "v0" })
+        #expect(!results.contains { $0.id == "v1" })
+        #expect(!results.contains { $0.id == "v2" })
+    }
+
     private func makeVectors(count: Int, dim: Int) -> [[Float]] {
         (0..<count).map { row in
             (0..<dim).map { col in

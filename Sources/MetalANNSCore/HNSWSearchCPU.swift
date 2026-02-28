@@ -10,7 +10,7 @@ public enum HNSWSearchCPU {
         k: Int,
         ef: Int,
         metric: Metric,
-        predicate: (@Sendable (UInt32) -> Bool)? = nil
+        predicate: ((UInt32) -> Bool)? = nil
     ) async throws(ANNSError) -> [SearchResult] {
         guard k > 0 else {
             return []

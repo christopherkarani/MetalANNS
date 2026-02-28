@@ -14,7 +14,7 @@ public enum BeamSearchCPU {
         k: Int,
         ef: Int,
         metric: Metric,
-        predicate: (@Sendable (UInt32) -> Bool)? = nil
+        predicate: ((UInt32) -> Bool)? = nil
     ) async throws -> [SearchResult] {
         guard !vectors.isEmpty else {
             throw ANNSError.indexEmpty
