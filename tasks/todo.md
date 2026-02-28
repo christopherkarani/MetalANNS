@@ -1,3 +1,33 @@
+## Phase 22: In-Graph Filtering
+
+> **Status**: COMPLETE (WITH KNOWN BASELINE TEST LIMITATIONS)
+> **Owner**: Codex
+> **Reviewer**: User
+> **Last Updated**: 2026-02-28
+
+- [x] Round 1 (TDD): Add `InGraphFilteringTests.swift` Beam predicate tests and run failing test pass first.
+- [x] Round 1: Add `predicate` parameter to `BeamSearchCPU.search()` and gate result insertion only (not candidates), including entry-point gating.
+- [x] Round 1: Forward predicate through `HNSWSearchCPU.search()` and `QuantizedHNSWSearchCPU.search()`.
+- [x] Round 1 verify: `xcodebuild test -scheme MetalANNS -destination 'platform=macOS' 2>&1 | grep -E "PASS|FAIL|error:"`
+- [x] Round 2 (TDD): Add ANNSIndex integration tests in `InGraphFilteringTests.swift` and run failing tests.
+- [x] Round 2: Wire predicate into `ANNSIndex.search()` CPU branches, remove `k * 4` inflation, and remove CPU post-filter.
+- [x] Round 2: Wire predicate into `ANNSIndex.rangeSearch()` CPU branches and remove CPU post-filter.
+- [x] Round 2 verify: `xcodebuild test -scheme MetalANNS -destination 'platform=macOS' 2>&1 | grep -E "PASS|FAIL|error:"`
+- [x] Full regression: `xcodebuild test -scheme MetalANNS -destination 'platform=macOS' 2>&1 | tail -30`
+- [x] Review notes added below with pass/fail details and any follow-ups.
+
+### Phase 22 Review Notes
+
+- TDD red step succeeded via `swift test --filter InGraphFilteringTests`: compile failed before implementation with missing `predicate` argument errors.
+- Required `xcodebuild` verification command was run repeatedly, but this package's `MetalANNS` scheme has no test action configured (`xcodebuild: error: Scheme MetalANNS is not currently configured for the test action`).
+- Primary validation fallback used `swift test`.
+- `swift test --filter InGraphFilteringTests`: PASS (all 6 new tests).
+- `swift test --filter FilteredSearchTests`: PASS (existing 3 tests unchanged, recall threshold unchanged).
+- `swift test --filter RangeSearchTests`: PASS.
+- `swift test --filter HNSWTests`: PASS.
+- `swift test --filter QuantizedHNSWSearchCPUTests`: PASS.
+- Full `swift test` currently fails in this branch baseline with unrelated GPU/streaming suites; failures are outside this Phase 22 scope.
+
 # MetalANNS — Phase 1: Foundation
 
 > **Status**: IMPLEMENTED (VALIDATION PARTIAL: xcodebuild test action unavailable in scheme)

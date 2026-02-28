@@ -9,7 +9,8 @@ public enum HNSWSearchCPU {
         baseGraph: [[(UInt32, Float)]],
         k: Int,
         ef: Int,
-        metric: Metric
+        metric: Metric,
+        predicate: (@Sendable (UInt32) -> Bool)? = nil
     ) async throws(ANNSError) -> [SearchResult] {
         guard k > 0 else {
             return []
@@ -48,7 +49,8 @@ public enum HNSWSearchCPU {
                 entryPoint: currentEntry,
                 k: k,
                 ef: ef,
-                metric: metric
+                metric: metric,
+                predicate: predicate
             )
         } catch let error as ANNSError {
             throw error

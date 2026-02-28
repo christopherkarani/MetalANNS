@@ -492,18 +492,31 @@ public actor ANNSIndex {
         }
 
         let searchMetric = metric ?? configuration.metric
-        let hasFilter = filter != nil
+        let useGPUPath = context != nil && supportsGPUSearch(for: vectors)
         let deletedCount = softDeletion.deletedCount
-        let effectiveK: Int
-        if hasFilter {
-            effectiveK = min(vectors.count, k * 4 + deletedCount)
-        } else {
-            effectiveK = min(vectors.count, k + deletedCount)
-        }
+        let effectiveK = min(vectors.count, k + max(deletedCount, 10))
         let effectiveEf = max(configuration.efSearch, effectiveK)
+        let needsPredicate = filter != nil || deletedCount > 0
+        let searchPredicate: (@Sendable (UInt32) -> Bool)?
+        if needsPredicate {
+            let deletionSnapshot = softDeletion
+            let metadataSnapshot = metadataStore
+            let filterSnapshot = filter
+            searchPredicate = { id in
+                guard !deletionSnapshot.isDeleted(id) else {
+                    return false
+                }
+                guard let filterSnapshot else {
+                    return true
+                }
+                return metadataSnapshot.matches(id: id, filter: filterSnapshot)
+            }
+        } else {
+            searchPredicate = nil
+        }
 
         let rawResults: [SearchResult]
-        if let context, supportsGPUSearch(for: vectors) {
+        if useGPUPath, let context {
             rawResults = try await FullGPUSearch.search(
                 context: context,
                 query: query,
@@ -530,7 +543,8 @@ public actor ANNSIndex {
                     baseGraph: extractedGraph,
                     k: max(1, effectiveK),
                     ef: max(1, effectiveEf),
-                    metric: searchMetric
+                    metric: searchMetric,
+                    predicate: searchPredicate
                 )
             } else if let hnsw {
                 rawResults = try await HNSWSearchCPU.search(
@@ -540,7 +554,8 @@ public actor ANNSIndex {
                     baseGraph: extractedGraph,
                     k: max(1, effectiveK),
                     ef: max(1, effectiveEf),
-                    metric: searchMetric
+                    metric: searchMetric,
+                    predicate: searchPredicate
                 )
             } else {
                 rawResults = try await BeamSearchCPU.search(
@@ -550,15 +565,20 @@ public actor ANNSIndex {
                     entryPoint: Int(entryPoint),
                     k: max(1, effectiveK),
                     ef: max(1, effectiveEf),
-                    metric: searchMetric
+                    metric: searchMetric,
+                    predicate: searchPredicate
                 )
             }
         }
 
-        var filtered = softDeletion.filterResults(rawResults)
-        if let filter {
-            filtered = filtered.filter { metadataStore.matches(id: $0.internalID, filter: filter) }
-        }
+        let filtered = useGPUPath
+            ? softDeletion.filterResults(rawResults).filter { result in
+                guard let filter else {
+                    return true
+                }
+                return metadataStore.matches(id: result.internalID, filter: filter)
+            }
+            : rawResults
 
         let mapped = filtered.compactMap { result -> SearchResult? in
             guard let externalID = idMap.externalID(for: result.internalID) else {
@@ -590,12 +610,31 @@ public actor ANNSIndex {
         }
 
         let searchMetric = metric ?? configuration.metric
+        let useGPUPath = context != nil && supportsGPUSearch(for: vectors)
         let deletedCount = softDeletion.deletedCount
         let searchK = min(vectors.count, limit + deletedCount)
         let searchEf = min(vectors.count, max(configuration.efSearch, searchK * 2))
+        let needsPredicate = filter != nil || deletedCount > 0
+        let searchPredicate: (@Sendable (UInt32) -> Bool)?
+        if needsPredicate {
+            let deletionSnapshot = softDeletion
+            let metadataSnapshot = metadataStore
+            let filterSnapshot = filter
+            searchPredicate = { id in
+                guard !deletionSnapshot.isDeleted(id) else {
+                    return false
+                }
+                guard let filterSnapshot else {
+                    return true
+                }
+                return metadataSnapshot.matches(id: id, filter: filterSnapshot)
+            }
+        } else {
+            searchPredicate = nil
+        }
 
         let rawResults: [SearchResult]
-        if let context, supportsGPUSearch(for: vectors) {
+        if useGPUPath, let context {
             rawResults = try await FullGPUSearch.search(
                 context: context,
                 query: query,
@@ -622,7 +661,8 @@ public actor ANNSIndex {
                     baseGraph: extractedGraph,
                     k: max(1, searchK),
                     ef: max(1, searchEf),
-                    metric: searchMetric
+                    metric: searchMetric,
+                    predicate: searchPredicate
                 )
             } else if let hnsw {
                 rawResults = try await HNSWSearchCPU.search(
@@ -632,7 +672,8 @@ public actor ANNSIndex {
                     baseGraph: extractedGraph,
                     k: max(1, searchK),
                     ef: max(1, searchEf),
-                    metric: searchMetric
+                    metric: searchMetric,
+                    predicate: searchPredicate
                 )
             } else {
                 rawResults = try await BeamSearchCPU.search(
@@ -642,15 +683,20 @@ public actor ANNSIndex {
                     entryPoint: Int(entryPoint),
                     k: max(1, searchK),
                     ef: max(1, searchEf),
-                    metric: searchMetric
+                    metric: searchMetric,
+                    predicate: searchPredicate
                 )
             }
         }
 
-        var filtered = softDeletion.filterResults(rawResults)
-        if let filter {
-            filtered = filtered.filter { metadataStore.matches(id: $0.internalID, filter: filter) }
-        }
+        let filtered = useGPUPath
+            ? softDeletion.filterResults(rawResults).filter { result in
+                guard let filter else {
+                    return true
+                }
+                return metadataStore.matches(id: result.internalID, filter: filter)
+            }
+            : rawResults
         let withinRange = filtered.filter { $0.score <= maxDistance }
 
         let mapped = withinRange.compactMap { result -> SearchResult? in

@@ -13,7 +13,8 @@ public enum BeamSearchCPU {
         entryPoint: Int,
         k: Int,
         ef: Int,
-        metric: Metric
+        metric: Metric,
+        predicate: (@Sendable (UInt32) -> Bool)? = nil
     ) async throws -> [SearchResult] {
         guard !vectors.isEmpty else {
             throw ANNSError.indexEmpty
@@ -45,10 +46,14 @@ public enum BeamSearchCPU {
         let efLimit = min(vectors.count, ef)
         let entryID = UInt32(entryPoint)
         let entryDistance = SIMDDistance.distance(query, vectors[entryPoint], metric: metric)
+        let entryCandidate = Candidate(nodeID: entryID, distance: entryDistance)
 
         var visited: Set<UInt32> = [entryID]
-        var candidates: [Candidate] = [Candidate(nodeID: entryID, distance: entryDistance)]
-        var results: [Candidate] = [Candidate(nodeID: entryID, distance: entryDistance)]
+        var candidates: [Candidate] = [entryCandidate]
+        var results: [Candidate] = []
+        if predicate?(entryID) ?? true {
+            results = [entryCandidate]
+        }
 
         while !candidates.isEmpty {
             let current = candidates.removeFirst()
@@ -75,9 +80,11 @@ public enum BeamSearchCPU {
                 if results.count < efLimit || candidateDistance < results[results.count - 1].distance {
                     let candidate = Candidate(nodeID: neighborID, distance: candidateDistance)
                     insertSorted(candidate, into: &candidates)
-                    insertSorted(candidate, into: &results)
-                    if results.count > efLimit {
-                        results.removeLast()
+                    if predicate?(neighborID) ?? true {
+                        insertSorted(candidate, into: &results)
+                        if results.count > efLimit {
+                            results.removeLast()
+                        }
                     }
                 }
             }
