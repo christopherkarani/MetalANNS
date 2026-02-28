@@ -46,6 +46,14 @@ public struct AccelerateBackend: ComputeBackend, Sendable {
                 dim: dim,
                 results: &results
             )
+        case .hamming:
+            computeHammingDistances(
+                query: query,
+                vectors: vectors,
+                vectorCount: vectorCount,
+                dim: dim,
+                results: &results
+            )
         }
 
         return results
@@ -129,6 +137,27 @@ public struct AccelerateBackend: ComputeBackend, Sendable {
             var dot: Float = 0
             vDSP_dotpr(queryBase, 1, vectorBase, 1, &dot, vDSP_Length(dim))
             results[index] = -dot
+        }
+    }
+
+    private func computeHammingDistances(
+        query: [Float],
+        vectors: UnsafeBufferPointer<Float>,
+        vectorCount: Int,
+        dim: Int,
+        results: inout [Float]
+    ) {
+        guard let vectorsBase = vectors.baseAddress else {
+            return
+        }
+
+        for index in 0..<vectorCount {
+            let vectorBase = vectorsBase + (index * dim)
+            var mismatches = 0
+            for d in 0..<dim where query[d] != vectorBase[d] {
+                mismatches += 1
+            }
+            results[index] = Float(mismatches)
         }
     }
 }

@@ -57,6 +57,12 @@ public enum NNDescentCPU {
                     dot += vectors[lhs][d] * vectors[rhs][d]
                 }
                 return -dot
+            case .hamming:
+                var mismatches = 0
+                for d in 0..<dim where vectors[lhs][d] != vectors[rhs][d] {
+                    mismatches += 1
+                }
+                return Float(mismatches)
             }
         }
 

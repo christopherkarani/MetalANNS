@@ -25,11 +25,18 @@ public enum IndexSerializer {
         guard nodeCount == graph.nodeCount else {
             throw ANNSError.constructionFailed("Vector and graph node counts do not match")
         }
-        let bytesPerElement = vectors.isFloat16 ? MemoryLayout<UInt16>.stride : MemoryLayout<Float>.stride
-        let vectorByteCount = nodeCount * vectors.dim * bytesPerElement
+        let storageType: UInt32
+        let vectorByteCount: Int
+        if let binaryBuffer = vectors as? BinaryVectorBuffer {
+            storageType = 2
+            vectorByteCount = nodeCount * binaryBuffer.bytesPerVector
+        } else {
+            storageType = vectors.isFloat16 ? 1 : 0
+            let bytesPerElement = vectors.isFloat16 ? MemoryLayout<UInt16>.stride : MemoryLayout<Float>.stride
+            vectorByteCount = nodeCount * vectors.dim * bytesPerElement
+        }
         let adjacencyByteCount = nodeCount * degree * MemoryLayout<UInt32>.stride
         let distanceByteCount = nodeCount * degree * MemoryLayout<Float>.stride
-        let storageType: UInt32 = vectors.isFloat16 ? 1 : 0
 
         var filePayload = Data()
         append(magic: headerMagic, to: &filePayload)
@@ -71,11 +78,18 @@ public enum IndexSerializer {
             throw ANNSError.constructionFailed("Vector and graph node counts do not match")
         }
 
-        let bytesPerElement = vectors.isFloat16 ? MemoryLayout<UInt16>.stride : MemoryLayout<Float>.stride
-        let vectorByteCount = nodeCount * vectors.dim * bytesPerElement
+        let storageType: UInt32
+        let vectorByteCount: Int
+        if let binaryBuffer = vectors as? BinaryVectorBuffer {
+            storageType = 2
+            vectorByteCount = nodeCount * binaryBuffer.bytesPerVector
+        } else {
+            storageType = vectors.isFloat16 ? 1 : 0
+            let bytesPerElement = vectors.isFloat16 ? MemoryLayout<UInt16>.stride : MemoryLayout<Float>.stride
+            vectorByteCount = nodeCount * vectors.dim * bytesPerElement
+        }
         let adjacencyByteCount = nodeCount * degree * MemoryLayout<UInt32>.stride
         let distanceByteCount = nodeCount * degree * MemoryLayout<Float>.stride
-        let storageType: UInt32 = vectors.isFloat16 ? 1 : 0
 
         var filePayload = Data()
         append(magic: headerMagic, to: &filePayload)
@@ -138,12 +152,20 @@ public enum IndexSerializer {
         } else {
             0
         }
-        guard storageType == 0 || storageType == 1 else {
+        guard storageType == 0 || storageType == 1 || storageType == 2 else {
             throw ANNSError.corruptFile("Unsupported storage type \(storageType)")
         }
 
-        let bytesPerElement = storageType == 1 ? MemoryLayout<UInt16>.stride : MemoryLayout<Float>.stride
-        let vectorByteCount = nodeCount * dim * bytesPerElement
+        let vectorByteCount: Int
+        if storageType == 2 {
+            guard dim % 8 == 0 else {
+                throw ANNSError.corruptFile("Binary index has dim not divisible by 8")
+            }
+            vectorByteCount = nodeCount * (dim / 8)
+        } else {
+            let bytesPerElement = storageType == 1 ? MemoryLayout<UInt16>.stride : MemoryLayout<Float>.stride
+            vectorByteCount = nodeCount * dim * bytesPerElement
+        }
         let adjacencyByteCount = nodeCount * degree * MemoryLayout<UInt32>.stride
         let distanceByteCount = nodeCount * degree * MemoryLayout<Float>.stride
 
@@ -203,7 +225,9 @@ public enum IndexSerializer {
 
         let mutableCapacity = max(nodeCount + 1, nodeCount * 2)
         let vectors: any VectorStorage
-        if storageType == 1 {
+        if storageType == 2 {
+            vectors = try BinaryVectorBuffer(capacity: mutableCapacity, dim: dim, device: device)
+        } else if storageType == 1 {
             vectors = try Float16VectorBuffer(capacity: mutableCapacity, dim: dim, device: device)
         } else {
             vectors = try VectorBuffer(capacity: mutableCapacity, dim: dim, device: device)
@@ -241,6 +265,8 @@ public enum IndexSerializer {
             return 1
         case .innerProduct:
             return 2
+        case .hamming:
+            return 3
         }
     }
 
@@ -252,6 +278,8 @@ public enum IndexSerializer {
             return .l2
         case 2:
             return .innerProduct
+        case 3:
+            return .hamming
         default:
             throw ANNSError.corruptFile("Unsupported metric code")
         }

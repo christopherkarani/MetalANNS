@@ -258,6 +258,12 @@ struct BenchmarkRunner {
                 dot += query[d] * vector[d]
             }
             return -dot
+        case .hamming:
+            var mismatches = 0
+            for d in 0..<query.count where query[d] != vector[d] {
+                mismatches += 1
+            }
+            return Float(mismatches)
         }
     }
 

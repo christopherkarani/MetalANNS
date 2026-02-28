@@ -1,3 +1,38 @@
+# MetalANNS — Phase 23: Binary Quantization + Hamming Distance
+
+> **Status**: IMPLEMENTED (VALIDATION PARTIAL: `xcodebuild test` test-action unavailable; `swift test` used)
+> **Owner**: Codex
+> **Last Updated**: 2026-02-28
+
+## Task Checklist
+
+- [x] Round 1 — Add failing `BinaryQuantizationTests` for buffer-only behavior.
+- [x] Round 1 — Implement `BinaryVectorBuffer` with 1-bit packing, unpack adapter, and `VectorStorage` conformance.
+- [x] Round 2 — Add failing hamming tests in `SIMDDistanceTests` and `BinaryQuantizationTests`.
+- [x] Round 2 — Add `Metric.hamming` and `SIMDDistance` hamming overloads.
+- [x] Round 2 — Add compile-safe `.hamming` handling across switch sites (CPU impls + GPU unsupported guards).
+- [x] Round 3 — Add failing binary integration tests (build/search/recall/persistence/config guards).
+- [x] Round 3 — Add `IndexConfiguration.useBinary` with default/init/decode fallback.
+- [x] Round 3 — Wire `ANNSIndex` binary storage dispatch, CPU NN-Descent fallback, GPU-search disable for binary, and loaded-state `useBinary`.
+- [x] Round 3 — Update `IndexSerializer` for metric code `3` and storage type `2` with binary byte sizing.
+- [x] Round 3 — Add `Shaders/HammingDistance.metal` (not pipeline-wired).
+- [x] Regression — Update metric-count/config tests and benchmark metric round-trip tests.
+- [x] Regression — Validate new binary tests and targeted legacy suites with `swift test`.
+
+## Review Results
+
+- Required command run after each round:
+  - `xcodebuild test -scheme MetalANNS -destination 'platform=macOS' 2>&1 | grep -E "PASS|FAIL|error:"`
+  - Result in this environment: `xcodebuild: error: Scheme MetalANNS is not currently configured for the test action.`
+- Final required command:
+  - `xcodebuild test -scheme MetalANNS -destination 'platform=macOS' 2>&1 | tail -30`
+  - Result: same scheme test-action configuration error.
+- Executed validation via SwiftPM:
+  - `swift test --filter BinaryQuantizationTests` → 12 passed, 0 failed.
+  - `swift test --filter "(BinaryQuantizationTests|SIMDDistanceTests|ConfigurationTests|PersistenceTests|ANNSIndexTests|FilteredSearchTests|HNSWTests|MmapTests|DiskBackedTests|CompactionTests|BenchmarkDatasetTests)"` → 52 passed, 0 failed.
+  - `swift test --filter BenchmarkDatasetTests` → 5 passed, 0 failed.
+  - `swift test` full suite still has pre-existing environment-specific Metal-library load failures in GPU suites (`no default library was found`).
+
 # MetalANNS — Phase 1: Foundation
 
 > **Status**: IMPLEMENTED (VALIDATION PARTIAL: xcodebuild test action unavailable in scheme)

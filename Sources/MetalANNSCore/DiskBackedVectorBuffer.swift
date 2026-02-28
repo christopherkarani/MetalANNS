@@ -8,6 +8,7 @@ public final class DiskBackedVectorBuffer: @unchecked Sendable {
     public let capacity: Int
     public private(set) var count: Int
     public let isFloat16: Bool
+    public let isBinary: Bool
 
     private let mmapPointer: UnsafeRawPointer
     private let dataOffset: Int
@@ -24,6 +25,7 @@ public final class DiskBackedVectorBuffer: @unchecked Sendable {
         dim: Int,
         count: Int,
         isFloat16: Bool,
+        isBinary: Bool,
         device: MTLDevice,
         cacheCapacity: Int = 1024
     ) throws {
@@ -33,7 +35,12 @@ public final class DiskBackedVectorBuffer: @unchecked Sendable {
         self.capacity = count
         self.count = count
         self.isFloat16 = isFloat16
-        self.bytesPerVector = dim * (isFloat16 ? MemoryLayout<UInt16>.stride : MemoryLayout<Float>.stride)
+        self.isBinary = isBinary
+        self.bytesPerVector = if isBinary {
+            dim / 8
+        } else {
+            dim * (isFloat16 ? MemoryLayout<UInt16>.stride : MemoryLayout<Float>.stride)
+        }
         self.cacheCapacity = max(1, cacheCapacity)
 
         guard let stagingBuffer = device.makeBuffer(
@@ -48,7 +55,18 @@ public final class DiskBackedVectorBuffer: @unchecked Sendable {
     private func readVector(at index: Int) -> [Float] {
         let byteOffset = dataOffset + index * bytesPerVector
 
-        if isFloat16 {
+        if isBinary {
+            let pointer = mmapPointer.advanced(by: byteOffset).assumingMemoryBound(to: UInt8.self)
+            var unpacked = [Float](repeating: 0, count: dim)
+            for byteIndex in 0..<bytesPerVector {
+                let byte = pointer[byteIndex]
+                for bit in 0..<8 {
+                    let dimIndex = byteIndex * 8 + bit
+                    unpacked[dimIndex] = ((byte >> (7 - bit)) & 1) == 1 ? 1.0 : 0.0
+                }
+            }
+            return unpacked
+        } else if isFloat16 {
             let pointer = mmapPointer.advanced(by: byteOffset).assumingMemoryBound(to: UInt16.self)
             var result = [Float](repeating: 0, count: dim)
             for dimIndex in 0..<dim {
@@ -120,6 +138,7 @@ public enum DiskBackedIndexLoader {
         public let idMap: IDMap
         public let entryPoint: UInt32
         public let metric: Metric
+        public let isBinary: Bool
         public let mmapLifetime: AnyObject
 
         public init(
@@ -128,6 +147,7 @@ public enum DiskBackedIndexLoader {
             idMap: IDMap,
             entryPoint: UInt32,
             metric: Metric,
+            isBinary: Bool,
             mmapLifetime: AnyObject
         ) {
             self.vectors = vectors
@@ -135,6 +155,7 @@ public enum DiskBackedIndexLoader {
             self.idMap = idMap
             self.entryPoint = entryPoint
             self.metric = metric
+            self.isBinary = isBinary
             self.mmapLifetime = mmapLifetime
         }
     }
@@ -188,13 +209,21 @@ public enum DiskBackedIndexLoader {
         guard dim > 0 else {
             throw ANNSError.corruptFile("Dimension must be greater than zero")
         }
-        guard storageType == 0 || storageType == 1 else {
+        guard storageType == 0 || storageType == 1 || storageType == 2 else {
             throw ANNSError.corruptFile("Unsupported storage type \(storageType)")
         }
-
-        let bytesPerElement = storageType == 1 ? MemoryLayout<UInt16>.stride : MemoryLayout<Float>.stride
-        let vectorElements = try checkedMultiply(nodeCount, dim)
-        let vectorByteCount = try checkedMultiply(vectorElements, bytesPerElement)
+        let isBinary = storageType == 2
+        let vectorByteCount: Int
+        if isBinary {
+            guard dim % 8 == 0 else {
+                throw ANNSError.corruptFile("Binary index has dim not divisible by 8")
+            }
+            vectorByteCount = try checkedMultiply(nodeCount, dim / 8)
+        } else {
+            let bytesPerElement = storageType == 1 ? MemoryLayout<UInt16>.stride : MemoryLayout<Float>.stride
+            let vectorElements = try checkedMultiply(nodeCount, dim)
+            vectorByteCount = try checkedMultiply(vectorElements, bytesPerElement)
+        }
 
         let edgeElements = try checkedMultiply(nodeCount, degree)
         let adjacencyByteCount = try checkedMultiply(edgeElements, MemoryLayout<UInt32>.stride)
@@ -234,6 +263,7 @@ public enum DiskBackedIndexLoader {
             dim: dim,
             count: nodeCount,
             isFloat16: storageType == 1,
+            isBinary: isBinary,
             device: metalDevice
         )
 
@@ -285,6 +315,7 @@ public enum DiskBackedIndexLoader {
             idMap: idMap,
             entryPoint: entryPoint,
             metric: metric,
+            isBinary: isBinary,
             mmapLifetime: region
         )
     }
@@ -297,6 +328,8 @@ public enum DiskBackedIndexLoader {
             return .l2
         case 2:
             return .innerProduct
+        case 3:
+            return .hamming
         default:
             throw ANNSError.corruptFile("Unsupported metric code")
         }

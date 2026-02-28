@@ -36,6 +36,7 @@ public struct StreamingConfiguration: Sendable, Codable, Equatable {
             && lhs.indexConfiguration.efSearch == rhs.indexConfiguration.efSearch
             && lhs.indexConfiguration.maxIterations == rhs.indexConfiguration.maxIterations
             && lhs.indexConfiguration.useFloat16 == rhs.indexConfiguration.useFloat16
+            && lhs.indexConfiguration.useBinary == rhs.indexConfiguration.useBinary
             && lhs.indexConfiguration.convergenceThreshold == rhs.indexConfiguration.convergenceThreshold
             && lhs.indexConfiguration.hnswConfiguration.enabled == rhs.indexConfiguration.hnswConfiguration.enabled
             && lhs.indexConfiguration.hnswConfiguration.M == rhs.indexConfiguration.hnswConfiguration.M
