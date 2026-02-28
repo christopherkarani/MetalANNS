@@ -75,15 +75,27 @@ public actor ANNSIndex {
                 throw ANNSError.idAlreadyExists(id)
             }
         }
+        if configuration.metric == .hamming, !configuration.useBinary {
+            throw ANNSError.constructionFailed("metric .hamming requires useBinary == true")
+        }
 
         let capacity = max(2, inputVectors.count * 2)
         let device = context?.device
         let vectorBuffer: any VectorStorage
-        if configuration.useFloat16 {
+        if configuration.useBinary {
+            guard configuration.metric == .hamming else {
+                throw ANNSError.constructionFailed("useBinary requires metric == .hamming")
+            }
+            guard dim % 8 == 0 else {
+                throw ANNSError.constructionFailed("Binary index requires dim % 8 == 0, got dim=\(dim)")
+            }
+            vectorBuffer = try BinaryVectorBuffer(capacity: capacity, dim: dim, device: device)
+        } else if configuration.useFloat16 {
             vectorBuffer = try Float16VectorBuffer(capacity: capacity, dim: dim, device: device)
         } else {
             vectorBuffer = try VectorBuffer(capacity: capacity, dim: dim, device: device)
         }
+
         let graphBuffer = try GraphBuffer(capacity: capacity, degree: configuration.degree, device: device)
         try vectorBuffer.batchInsert(vectors: inputVectors, startingAt: 0)
         vectorBuffer.setCount(inputVectors.count)
@@ -96,7 +108,8 @@ public actor ANNSIndex {
         }
 
         let builtEntryPoint: UInt32
-        if let context {
+        let cpuVectors = (0..<inputVectors.count).map { vectorBuffer.vector(at: $0) }
+        if let context, !configuration.useBinary, configuration.metric != .hamming {
             try await NNDescentGPU.build(
                 context: context,
                 vectors: vectorBuffer,
@@ -109,7 +122,7 @@ public actor ANNSIndex {
             builtEntryPoint = 0
         } else {
             let cpuResult = try await NNDescentCPU.build(
-                vectors: inputVectors,
+                vectors: cpuVectors,
                 degree: configuration.degree,
                 metric: configuration.metric,
                 maxIterations: configuration.maxIterations,
@@ -174,6 +187,7 @@ public actor ANNSIndex {
             throw ANNSError.idAlreadyExists(id)
         }
 
+        let graphVector = vectors is BinaryVectorBuffer ? Self.quantizeForHamming(vector) : vector
         let slot = Int(assignedID)
         try vectors.insert(vector: vector, at: slot)
         if vectors.count < slot + 1 {
@@ -181,7 +195,7 @@ public actor ANNSIndex {
         }
 
         try IncrementalBuilder.insert(
-            vector: vector,
+            vector: graphVector,
             at: slot,
             into: graph,
             vectors: vectors,
@@ -257,8 +271,15 @@ public actor ANNSIndex {
             vectorStorage.setCount(newMaxCount)
         }
 
+        let graphVectors: [[Float]]
+        if vectorStorage is BinaryVectorBuffer {
+            graphVectors = vectors.map(Self.quantizeForHamming)
+        } else {
+            graphVectors = vectors
+        }
+
         try BatchIncrementalBuilder.batchInsert(
-            vectors: vectors,
+            vectors: graphVectors,
             startingAt: startSlot,
             into: graph,
             vectorStorage: vectorStorage,
@@ -357,7 +378,8 @@ public actor ANNSIndex {
             context: context,
             maxIterations: configuration.maxIterations,
             convergenceThreshold: configuration.convergenceThreshold,
-            useFloat16: configuration.useFloat16
+            useFloat16: configuration.useFloat16,
+            useBinary: configuration.useBinary
         )
 
         var remapping: [UInt32: UInt32] = [:]
@@ -424,6 +446,12 @@ public actor ANNSIndex {
         }
 
         let searchMetric = metric ?? configuration.metric
+        if searchMetric == .hamming, !configuration.useBinary {
+            throw ANNSError.searchFailed("metric .hamming requires a binary index")
+        }
+        let normalizedQuery = (searchMetric == .hamming && configuration.useBinary)
+            ? Self.quantizeForHamming(query)
+            : query
         let hasFilter = filter != nil
         let deletedCount = softDeletion.deletedCount
         let effectiveK: Int
@@ -435,10 +463,10 @@ public actor ANNSIndex {
         let effectiveEf = max(configuration.efSearch, effectiveK)
 
         let rawResults: [SearchResult]
-        if let context, supportsGPUSearch(for: vectors) {
+        if let context, supportsGPUSearch(for: vectors), searchMetric != .hamming {
             rawResults = try await FullGPUSearch.search(
                 context: context,
-                query: query,
+                query: normalizedQuery,
                 vectors: vectors,
                 graph: graph,
                 entryPoint: Int(entryPoint),
@@ -456,7 +484,7 @@ public actor ANNSIndex {
 
             if let hnsw {
                 rawResults = try await HNSWSearchCPU.search(
-                    query: query,
+                    query: normalizedQuery,
                     vectors: extractedVectors,
                     hnsw: hnsw,
                     baseGraph: extractedGraph,
@@ -466,7 +494,7 @@ public actor ANNSIndex {
                 )
             } else {
                 rawResults = try await BeamSearchCPU.search(
-                    query: query,
+                    query: normalizedQuery,
                     vectors: extractedVectors,
                     graph: extractedGraph,
                     entryPoint: Int(entryPoint),
@@ -504,7 +532,7 @@ public actor ANNSIndex {
         guard query.count == vectors.dim else {
             throw ANNSError.dimensionMismatch(expected: vectors.dim, got: query.count)
         }
-        guard maxDistance > 0 else {
+        guard maxDistance >= 0 else {
             return []
         }
         guard limit > 0 else {
@@ -512,15 +540,21 @@ public actor ANNSIndex {
         }
 
         let searchMetric = metric ?? configuration.metric
+        if searchMetric == .hamming, !configuration.useBinary {
+            throw ANNSError.searchFailed("metric .hamming requires a binary index")
+        }
+        let normalizedQuery = (searchMetric == .hamming && configuration.useBinary)
+            ? Self.quantizeForHamming(query)
+            : query
         let deletedCount = softDeletion.deletedCount
         let searchK = min(vectors.count, limit + deletedCount)
         let searchEf = min(vectors.count, max(configuration.efSearch, searchK * 2))
 
         let rawResults: [SearchResult]
-        if let context, supportsGPUSearch(for: vectors) {
+        if let context, supportsGPUSearch(for: vectors), searchMetric != .hamming {
             rawResults = try await FullGPUSearch.search(
                 context: context,
-                query: query,
+                query: normalizedQuery,
                 vectors: vectors,
                 graph: graph,
                 entryPoint: Int(entryPoint),
@@ -538,7 +572,7 @@ public actor ANNSIndex {
 
             if let hnsw {
                 rawResults = try await HNSWSearchCPU.search(
-                    query: query,
+                    query: normalizedQuery,
                     vectors: extractedVectors,
                     hnsw: hnsw,
                     baseGraph: extractedGraph,
@@ -548,7 +582,7 @@ public actor ANNSIndex {
                 )
             } else {
                 rawResults = try await BeamSearchCPU.search(
-                    query: query,
+                    query: normalizedQuery,
                     vectors: extractedVectors,
                     graph: extractedGraph,
                     entryPoint: Int(entryPoint),
@@ -680,6 +714,7 @@ public actor ANNSIndex {
         var resolvedConfiguration = persistedMetadata?.configuration ?? .default
         resolvedConfiguration.metric = loaded.metric
         resolvedConfiguration.useFloat16 = loaded.vectors.isFloat16
+        resolvedConfiguration.useBinary = loaded.vectors is BinaryVectorBuffer
 
         await index.applyLoadedState(
             configuration: resolvedConfiguration,
@@ -704,6 +739,7 @@ public actor ANNSIndex {
         var resolvedConfiguration = persistedMetadata?.configuration ?? .default
         resolvedConfiguration.metric = loaded.metric
         resolvedConfiguration.useFloat16 = loaded.vectors.isFloat16
+        resolvedConfiguration.useBinary = loaded.isBinary
 
         await index.applyLoadedState(
             configuration: resolvedConfiguration,
@@ -731,6 +767,7 @@ public actor ANNSIndex {
         var resolvedConfiguration = persistedMetadata?.configuration ?? .default
         resolvedConfiguration.metric = diskBacked.metric
         resolvedConfiguration.useFloat16 = diskBacked.vectors.isFloat16
+        resolvedConfiguration.useBinary = diskBacked.isBinary
 
         await index.applyLoadedState(
             configuration: resolvedConfiguration,
@@ -764,7 +801,7 @@ public actor ANNSIndex {
     }
 
     private func supportsGPUSearch(for vectors: any VectorStorage) -> Bool {
-        !(vectors is DiskBackedVectorBuffer)
+        !(vectors is DiskBackedVectorBuffer) && !(vectors is BinaryVectorBuffer)
     }
 
     private func applyLoadedState(
@@ -831,6 +868,10 @@ public actor ANNSIndex {
                 .filter { $0.0 != UInt32.max }
                 .map { ($0.0, $0.1) }
         }
+    }
+
+    private nonisolated static func quantizeForHamming(_ vector: [Float]) -> [Float] {
+        vector.map { $0 >= 0 ? 1.0 : 0.0 }
     }
 
     private nonisolated static func metadataURL(for fileURL: URL) -> URL {

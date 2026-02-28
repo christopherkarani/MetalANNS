@@ -79,6 +79,55 @@ public enum SIMDDistance {
         return -dot
     }
 
+    /// Hamming distance between two unpacked vectors where values are expected to be 0/1.
+    public static func hamming(_ a: [Float], _ b: [Float]) -> Float {
+        precondition(a.count == b.count)
+        var count = 0
+        for index in 0..<a.count where a[index] != b[index] {
+            count += 1
+        }
+        return Float(count)
+    }
+
+    /// Hamming distance between two packed byte arrays.
+    public static func hamming(packed a: [UInt8], packed b: [UInt8]) -> Float {
+        precondition(a.count == b.count)
+        var bits = 0
+        let wordCount = a.count / MemoryLayout<UInt64>.stride
+
+        a.withUnsafeBytes { aRaw in
+            b.withUnsafeBytes { bRaw in
+                let aWords = aRaw.bindMemory(to: UInt64.self)
+                let bWords = bRaw.bindMemory(to: UInt64.self)
+                for index in 0..<wordCount {
+                    bits += (aWords[index] ^ bWords[index]).nonzeroBitCount
+                }
+            }
+        }
+
+        for index in (wordCount * MemoryLayout<UInt64>.stride)..<a.count {
+            bits += Int((a[index] ^ b[index]).nonzeroBitCount)
+        }
+        return Float(bits)
+    }
+
+    public static func hamming(
+        _ a: UnsafePointer<Float>,
+        _ b: UnsafePointer<Float>,
+        dim: Int
+    ) -> Float {
+        precondition(dim >= 0)
+        guard dim > 0 else {
+            return 0
+        }
+
+        var count = 0
+        for index in 0..<dim where a[index] != b[index] {
+            count += 1
+        }
+        return Float(count)
+    }
+
     public static func distance(_ a: [Float], _ b: [Float], metric: Metric) -> Float {
         switch metric {
         case .cosine:
@@ -87,6 +136,8 @@ public enum SIMDDistance {
             l2(a, b)
         case .innerProduct:
             innerProduct(a, b)
+        case .hamming:
+            hamming(a, b)
         }
     }
 
@@ -103,6 +154,8 @@ public enum SIMDDistance {
             l2(a, b, dim: dim)
         case .innerProduct:
             innerProduct(a, b, dim: dim)
+        case .hamming:
+            hamming(a, b, dim: dim)
         }
     }
 }

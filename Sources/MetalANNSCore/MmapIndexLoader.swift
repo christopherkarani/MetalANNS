@@ -13,6 +13,7 @@ public enum MmapIndexLoader {
         public let idMap: IDMap
         public let entryPoint: UInt32
         public let metric: Metric
+        public let isBinary: Bool
         public let mmapLifetime: AnyObject
 
         public init(
@@ -21,6 +22,7 @@ public enum MmapIndexLoader {
             idMap: IDMap,
             entryPoint: UInt32,
             metric: Metric,
+            isBinary: Bool,
             mmapLifetime: AnyObject
         ) {
             self.vectors = vectors
@@ -28,6 +30,7 @@ public enum MmapIndexLoader {
             self.idMap = idMap
             self.entryPoint = entryPoint
             self.metric = metric
+            self.isBinary = isBinary
             self.mmapLifetime = mmapLifetime
         }
     }
@@ -64,12 +67,20 @@ public enum MmapIndexLoader {
         guard degree > 0 else {
             throw ANNSError.corruptFile("Degree must be greater than zero")
         }
-        guard storageType == 0 || storageType == 1 else {
+        guard storageType == 0 || storageType == 1 || storageType == 2 else {
             throw ANNSError.corruptFile("Unsupported storage type \(storageType)")
         }
-
-        let bytesPerElement = storageType == 1 ? MemoryLayout<UInt16>.stride : MemoryLayout<Float>.stride
-        let vectorByteCount = nodeCount * dim * bytesPerElement
+        let isBinary = storageType == 2
+        let vectorByteCount: Int
+        if isBinary {
+            guard dim % 8 == 0 else {
+                throw ANNSError.corruptFile("Binary index has dim not divisible by 8")
+            }
+            vectorByteCount = nodeCount * (dim / 8)
+        } else {
+            let bytesPerElement = storageType == 1 ? MemoryLayout<UInt16>.stride : MemoryLayout<Float>.stride
+            vectorByteCount = nodeCount * dim * bytesPerElement
+        }
         let adjacencyByteCount = nodeCount * degree * MemoryLayout<UInt32>.stride
         let distanceByteCount = nodeCount * degree * MemoryLayout<Float>.stride
 
@@ -123,7 +134,8 @@ public enum MmapIndexLoader {
             buffer: vectorBuffer,
             dim: dim,
             count: nodeCount,
-            isFloat16: storageType == 1
+            isFloat16: storageType == 1,
+            isBinary: isBinary
         )
         let graph = try GraphBuffer(
             adjacencyBuffer: adjacencyBuffer,
@@ -156,6 +168,7 @@ public enum MmapIndexLoader {
             idMap: idMap,
             entryPoint: entryPoint,
             metric: metric,
+            isBinary: isBinary,
             mmapLifetime: region
         )
     }
@@ -168,6 +181,8 @@ public enum MmapIndexLoader {
             return .l2
         case 2:
             return .innerProduct
+        case 3:
+            return .hamming
         default:
             throw ANNSError.corruptFile("Unsupported metric code")
         }
@@ -266,13 +281,17 @@ private final class MmapVectorStorage: VectorStorage, @unchecked Sendable {
     let capacity: Int
     private(set) var count: Int
     let isFloat16: Bool
+    let isBinary: Bool
+    private let bytesPerVector: Int
 
-    init(buffer: MTLBuffer, dim: Int, count: Int, isFloat16: Bool) {
+    init(buffer: MTLBuffer, dim: Int, count: Int, isFloat16: Bool, isBinary: Bool) {
         self.buffer = buffer
         self.dim = dim
         self.capacity = count
         self.count = count
         self.isFloat16 = isFloat16
+        self.isBinary = isBinary
+        self.bytesPerVector = isBinary ? (dim / 8) : 0
     }
 
     func setCount(_ newCount: Int) {
@@ -290,7 +309,19 @@ private final class MmapVectorStorage: VectorStorage, @unchecked Sendable {
     func vector(at index: Int) -> [Float] {
         precondition(index >= 0 && index < count, "Index out of bounds")
 
-        if isFloat16 {
+        if isBinary {
+            let pointer = buffer.contents().bindMemory(to: UInt8.self, capacity: max(1, capacity * bytesPerVector))
+            let base = index * bytesPerVector
+            var unpacked = [Float](repeating: 0, count: dim)
+            for byteIndex in 0..<bytesPerVector {
+                let byte = pointer[base + byteIndex]
+                for bit in 0..<8 {
+                    let dimIndex = byteIndex * 8 + bit
+                    unpacked[dimIndex] = ((byte >> (7 - bit)) & 1) == 1 ? 1.0 : 0.0
+                }
+            }
+            return unpacked
+        } else if isFloat16 {
             let pointer = buffer.contents().bindMemory(to: UInt16.self, capacity: max(1, capacity * dim))
             let base = index * dim
             var result = [Float](repeating: 0, count: dim)

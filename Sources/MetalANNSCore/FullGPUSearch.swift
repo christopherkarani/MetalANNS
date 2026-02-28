@@ -67,6 +67,9 @@ public enum FullGPUSearch {
         var kValue = UInt32(kLimit)
         var efValue = UInt32(efLimit)
         var entryPointValue = UInt32(entryPoint)
+        guard metric != .hamming else {
+            throw ANNSError.searchFailed("FullGPUSearch does not support metric .hamming")
+        }
         var metricType: UInt32 = switch metric {
         case .cosine:
             0
@@ -74,6 +77,8 @@ public enum FullGPUSearch {
             1
         case .innerProduct:
             2
+        case .hamming:
+            0
         }
 
         try await context.execute { commandBuffer in

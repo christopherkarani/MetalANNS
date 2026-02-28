@@ -38,6 +38,8 @@ public final class MetalBackend: ComputeBackend, @unchecked Sendable {
             functionName = "l2_distance"
         case .innerProduct:
             functionName = "inner_product_distance"
+        case .hamming:
+            throw ANNSError.searchFailed("Metric .hamming is not supported by MetalBackend")
         }
 
         let pipeline = try await context.pipelineCache.pipeline(for: functionName)

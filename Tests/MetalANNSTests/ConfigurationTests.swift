@@ -17,10 +17,10 @@ struct ConfigurationTests {
         #expect(config.hnswConfiguration.maxLayers == 6)
     }
 
-    @Test("Metric enum has all three cases")
+    @Test("Metric enum has all cases")
     func metricCases() {
-        let metrics: [Metric] = [.cosine, .l2, .innerProduct]
-        #expect(metrics.count == 3)
+        let metrics: [Metric] = [.cosine, .l2, .innerProduct, .hamming]
+        #expect(metrics.count == 4)
     }
 
     @Test("ANNSError cases are distinct")

@@ -299,6 +299,12 @@ public struct BenchmarkDataset: Sendable {
                 dot += query[d] * vector[d]
             }
             return -dot
+        case .hamming:
+            var mismatches = 0
+            for d in 0..<query.count where query[d] != vector[d] {
+                mismatches += 1
+            }
+            return Float(mismatches)
         }
     }
 
@@ -310,6 +316,8 @@ public struct BenchmarkDataset: Sendable {
             return 1
         case .innerProduct:
             return 2
+        case .hamming:
+            return 3
         }
     }
 
@@ -321,6 +329,8 @@ public struct BenchmarkDataset: Sendable {
             return .l2
         case 2:
             return .innerProduct
+        case 3:
+            return .hamming
         default:
             return nil
         }

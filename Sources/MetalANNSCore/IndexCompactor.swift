@@ -31,7 +31,8 @@ public enum IndexCompactor {
         context: MetalContext?,
         maxIterations: Int,
         convergenceThreshold: Float,
-        useFloat16: Bool
+        useFloat16: Bool,
+        useBinary: Bool
     ) async throws -> CompactionResult {
         _ = graph
 
@@ -56,7 +57,9 @@ public enum IndexCompactor {
         let device = context?.device
 
         let compactedVectors: any VectorStorage
-        if useFloat16 {
+        if useBinary {
+            compactedVectors = try BinaryVectorBuffer(capacity: newCapacity, dim: vectors.dim, device: device)
+        } else if useFloat16 {
             compactedVectors = try Float16VectorBuffer(capacity: newCapacity, dim: vectors.dim, device: device)
         } else {
             compactedVectors = try VectorBuffer(capacity: newCapacity, dim: vectors.dim, device: device)
@@ -69,7 +72,13 @@ public enum IndexCompactor {
         for (newIndex, oldID) in survivingOldIDs.enumerated() {
             let vector = vectors.vector(at: Int(oldID))
             denseVectors.append(vector)
-            try compactedVectors.insert(vector: vector, at: newIndex)
+            let storageVector: [Float]
+            if useBinary {
+                storageVector = vector.map { $0 > 0.5 ? 1.0 : -1.0 }
+            } else {
+                storageVector = vector
+            }
+            try compactedVectors.insert(vector: storageVector, at: newIndex)
 
             guard let externalID = idMap.externalID(for: oldID) else {
                 throw ANNSError.constructionFailed("Missing external ID for internal ID \(oldID)")
@@ -138,7 +147,7 @@ public enum IndexCompactor {
         let nodeCount = denseVectors.count
         let entryPoint: UInt32
 
-        if let context {
+        if let context, metric != .hamming {
             try await NNDescentGPU.build(
                 context: context,
                 vectors: vectorStorage,

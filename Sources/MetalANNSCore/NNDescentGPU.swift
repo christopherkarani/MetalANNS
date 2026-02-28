@@ -58,10 +58,14 @@ public enum NNDescentGPU {
         var n = UInt32(nodeCount)
         var degree = UInt32(graph.degree)
         var dim = UInt32(vectors.dim)
+        guard metric != .hamming else {
+            throw ANNSError.constructionFailed("NNDescentGPU does not support metric .hamming")
+        }
         var metricType: UInt32 = switch metric {
         case .cosine: 0
         case .l2: 1
         case .innerProduct: 2
+        case .hamming: 0
         }
 
         let totalThreads = nodeCount * graph.degree
@@ -139,10 +143,14 @@ public enum NNDescentGPU {
         var d = UInt32(degree)
         var maxR = UInt32(maxReverse)
         var dim = UInt32(vectors.dim)
+        guard metric != .hamming else {
+            throw ANNSError.constructionFailed("NNDescentGPU does not support metric .hamming")
+        }
         var metricType: UInt32 = switch metric {
         case .cosine: 0
         case .l2: 1
         case .innerProduct: 2
+        case .hamming: 0
         }
 
         let reverseCounts = reverseCountBuffer.contents().bindMemory(to: UInt32.self, capacity: nodeCount)

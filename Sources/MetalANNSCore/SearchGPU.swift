@@ -110,13 +110,16 @@ public enum SearchGPU {
             return []
         }
 
-        let functionName: String = switch metric {
+        let functionName: String
+        switch metric {
         case .cosine:
-            vectors.isFloat16 ? "cosine_distance_f16" : "cosine_distance"
+            functionName = vectors.isFloat16 ? "cosine_distance_f16" : "cosine_distance"
         case .l2:
-            vectors.isFloat16 ? "l2_distance_f16" : "l2_distance"
+            functionName = vectors.isFloat16 ? "l2_distance_f16" : "l2_distance"
         case .innerProduct:
-            vectors.isFloat16 ? "inner_product_distance_f16" : "inner_product_distance"
+            functionName = vectors.isFloat16 ? "inner_product_distance_f16" : "inner_product_distance"
+        case .hamming:
+            throw ANNSError.searchFailed("SearchGPU does not support metric .hamming")
         }
 
         let pipeline = try await context.pipelineCache.pipeline(for: functionName)

@@ -60,7 +60,7 @@ struct BenchmarkDatasetTests {
 
     @Test("metricRoundTrip")
     func metricRoundTrip() throws {
-        for metric in [Metric.cosine, .l2, .innerProduct] {
+        for metric in [Metric.cosine, .l2, .innerProduct, .hamming] {
             let dataset = sampleDataset(metric: metric)
             let path = temporaryPath(name: "metric-\(metric.rawValue)")
             defer { try? FileManager.default.removeItem(atPath: path) }

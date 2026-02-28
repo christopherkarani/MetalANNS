@@ -37,6 +37,30 @@ struct SIMDDistanceTests {
         #expect(abs(simd - scalar) < 1e-5)
     }
 
+    @Test("hammingMatchesScalar")
+    func hammingMatchesScalar() {
+        let a: [Float] = [1, 0, 1, 0, 1, 1, 0, 0]
+        let b: [Float] = [0, 0, 1, 1, 1, 0, 0, 1]
+
+        let simd = SIMDDistance.hamming(a, b)
+        let scalar = scalarHamming(a, b)
+        #expect(simd == scalar)
+        #expect(SIMDDistance.distance(a, b, metric: .hamming) == scalar)
+    }
+
+    @Test("packedHammingMatchesScalar")
+    func packedHammingMatchesScalar() {
+        let a: [Float] = [1, 0, 1, 0, 1, 1, 0, 0]
+        let b: [Float] = [0, 0, 1, 1, 1, 0, 0, 1]
+
+        let packedA = packBinary(a)
+        let packedB = packBinary(b)
+
+        let packedDistance = SIMDDistance.hamming(packed: packedA, packed: packedB)
+        let scalar = scalarHamming(a, b)
+        #expect(packedDistance == scalar)
+    }
+
     @Test("simdFasterThanScalar")
     func simdFasterThanScalar() {
         let dim = 256
@@ -105,5 +129,28 @@ struct SIMDDistanceTests {
             dot += a[i] * b[i]
         }
         return -dot
+    }
+
+    private func scalarHamming(_ a: [Float], _ b: [Float]) -> Float {
+        var count = 0
+        for index in 0..<a.count where a[index] != b[index] {
+            count += 1
+        }
+        return Float(count)
+    }
+
+    private func packBinary(_ vector: [Float]) -> [UInt8] {
+        precondition(vector.count % 8 == 0)
+        let bytes = vector.count / 8
+        var packed = [UInt8](repeating: 0, count: bytes)
+
+        for byteIndex in 0..<bytes {
+            var byte: UInt8 = 0
+            for bit in 0..<8 where vector[byteIndex * 8 + bit] > 0.5 {
+                byte |= (1 << (7 - bit))
+            }
+            packed[byteIndex] = byte
+        }
+        return packed
     }
 }
