@@ -1,4 +1,5 @@
 import Foundation
+import Metal
 import Testing
 @testable import MetalANNS
 @testable import MetalANNSCore
@@ -7,10 +8,9 @@ import Testing
 struct GPUADCSearchTests {
     @Test("GPU ADC distances match CPU ADC distances (tolerance 1e-3)")
     func gpuDistancesMatchCPU() async throws {
-        #if targetEnvironment(simulator)
-        return
-        #else
-        guard let context = try? MetalContext() else { return }
+        guard let context = makeGPUContextOrSkip() else {
+            return
+        }
 
         let pq = try trainPQ(dim: 64, M: 8)
         let corpus = makeRandomVectors(count: 200, dim: 64, seed: 302)
@@ -29,15 +29,13 @@ struct GPUADCSearchTests {
             let cpu = pq.approximateDistance(query: query, codes: codes[i], metric: .l2)
             #expect(abs(gpu[i] - cpu) < 1e-3, "Difference at \(i): cpu=\(cpu) gpu=\(gpu[i])")
         }
-        #endif
     }
 
     @Test("Empty code input returns empty distance output")
     func emptyCodesReturnsEmpty() async throws {
-        #if targetEnvironment(simulator)
-        return
-        #else
-        guard let context = try? MetalContext() else { return }
+        guard let context = makeGPUContextOrSkip() else {
+            return
+        }
 
         let pq = try trainPQ(dim: 64, M: 8)
         let query = makeRandomVectors(count: 1, dim: 64, seed: 304)[0]
@@ -50,7 +48,6 @@ struct GPUADCSearchTests {
         )
 
         #expect(distances.isEmpty)
-        #endif
     }
 
     @Test("Flatten codebooks uses M x Ks x subspaceDim layout")
@@ -65,10 +62,9 @@ struct GPUADCSearchTests {
 
     @Test("Providing cached flat codebooks matches nil flatCodebooks path")
     func cachedFlatCodebooksSkipsRecomputation() async throws {
-        #if targetEnvironment(simulator)
-        return
-        #else
-        guard let context = try? MetalContext() else { return }
+        guard let context = makeGPUContextOrSkip() else {
+            return
+        }
 
         let pq = try trainPQ(dim: 64, M: 8)
         let corpus = makeRandomVectors(count: 200, dim: 64, seed: 305)
@@ -96,15 +92,13 @@ struct GPUADCSearchTests {
         for i in 0..<cached.count {
             #expect(abs(cached[i] - recomputed[i]) < 1e-6)
         }
-        #endif
     }
 
     @Test("IVFPQ search parity after GPUADCSearch delegation")
     func ivfpqRegressionAfterRewire() async throws {
-        #if targetEnvironment(simulator)
-        return
-        #else
-        guard let _ = try? MetalContext() else { return }
+        guard makeGPUContextOrSkip() != nil else {
+            return
+        }
 
         let config = IVFPQConfiguration(
             numSubspaces: 8,
@@ -131,15 +125,13 @@ struct GPUADCSearchTests {
         #expect(gpu.count == 10)
         #expect(cpu.count == 10)
         #expect(Set(gpu.map(\.id)) == Set(cpu.map(\.id)))
-        #endif
     }
 
     @Test("search returns sorted top-k and top-1 matches CPU brute-force ADC")
     func searchReturnsTopK() async throws {
-        #if targetEnvironment(simulator)
-        return
-        #else
-        guard let context = try? MetalContext() else { return }
+        guard let context = makeGPUContextOrSkip() else {
+            return
+        }
 
         let pq = try trainPQ(dim: 64, M: 8)
         let corpus = makeRandomVectors(count: 300, dim: 64, seed: 501)
@@ -168,15 +160,13 @@ struct GPUADCSearchTests {
         .first
 
         #expect(results.first?.id == cpuTop?.0)
-        #endif
     }
 
     @Test("search returns all results when k exceeds corpus size")
     func searchKLargerThanCorpus() async throws {
-        #if targetEnvironment(simulator)
-        return
-        #else
-        guard let context = try? MetalContext() else { return }
+        guard let context = makeGPUContextOrSkip() else {
+            return
+        }
 
         let pq = try trainPQ(dim: 64, M: 8)
         let corpus = makeRandomVectors(count: 5, dim: 64, seed: 503)
@@ -196,6 +186,89 @@ struct GPUADCSearchTests {
         #expect(results.count == 5)
         for i in 1..<results.count {
             #expect(results[i].score >= results[i - 1].score)
+        }
+    }
+
+    @Test("small corpus GPU ADC remains correct")
+    func gpuDistancesMatchCPUSmallCorpus() async throws {
+        guard let context = makeGPUContextOrSkip() else {
+            return
+        }
+
+        let pq = try trainPQ(dim: 64, M: 8)
+        let corpus = makeRandomVectors(count: 5, dim: 64, seed: 701)
+        let codes = try corpus.map { try pq.encode(vector: $0) }
+        let query = makeRandomVectors(count: 1, dim: 64, seed: 702)[0]
+
+        let gpu = try await GPUADCSearch.computeDistances(
+            context: context,
+            query: query,
+            pq: pq,
+            codes: codes
+        )
+
+        #expect(gpu.count == codes.count)
+        for i in 0..<codes.count {
+            let cpu = pq.approximateDistance(query: query, codes: codes[i], metric: .l2)
+            #expect(abs(gpu[i] - cpu) < 1e-3, "Difference at \(i): cpu=\(cpu) gpu=\(gpu[i])")
+        }
+    }
+
+    @Test("rankDistances sorts and truncates without GPU")
+    func rankDistancesSortAndTopK() throws {
+        let distances: [Float] = [3.0, 1.0, 2.0, 0.5]
+        let ids = ["d", "b", "c", "a"]
+
+        let results = try GPUADCSearch.rankDistances(
+            distances: distances,
+            ids: ids,
+            k: 3
+        )
+
+        #expect(results.count == 3)
+        #expect(results.map(\.id) == ["a", "b", "c"])
+        #expect(results.map(\.internalID) == [3, 1, 2])
+    }
+
+    @Test("rankDistances validates input and k edge cases without GPU")
+    func rankDistancesValidationAndKEdges() throws {
+        #expect(throws: ANNSError.self) {
+            _ = try GPUADCSearch.rankDistances(
+                distances: [1.0, 2.0],
+                ids: ["only-one"],
+                k: 1
+            )
+        }
+
+        let emptyForZeroK = try GPUADCSearch.rankDistances(
+            distances: [1.0, 2.0],
+            ids: ["a", "b"],
+            k: 0
+        )
+        #expect(emptyForZeroK.isEmpty)
+
+        let emptyForNoDistances = try GPUADCSearch.rankDistances(
+            distances: [],
+            ids: [],
+            k: 5
+        )
+        #expect(emptyForNoDistances.isEmpty)
+    }
+
+    private func makeGPUContextOrSkip() -> MetalContext? {
+        #if targetEnvironment(simulator)
+        print("Skipping GPU ADC tests on simulator")
+        return nil
+        #else
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            print("Skipping GPU ADC tests: no Metal device available")
+            return nil
+        }
+        do {
+            return try MetalContext()
+        } catch {
+            print("Skipping GPU ADC tests: MetalContext unavailable (\(error))")
+            return nil
         }
         #endif
     }

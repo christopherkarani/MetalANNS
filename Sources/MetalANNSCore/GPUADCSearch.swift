@@ -2,6 +2,8 @@ import Foundation
 import Metal
 
 public enum GPUADCSearch {
+    private static let scanLoadStride = 32
+
     public static func computeDistances(
         context: MetalContext,
         query: [Float],
@@ -20,14 +22,24 @@ public enum GPUADCSearch {
         let m = pq.numSubspaces
         let ks = pq.centroidsPerSubspace
         let subspaceDim = pq.subspaceDimension
+        let originalVectorCount = codes.count
+        let paddedVectorCount = roundUp(originalVectorCount, toMultipleOf: scanLoadStride)
 
         var candidateCodes: [UInt8] = []
-        candidateCodes.reserveCapacity(codes.count * m)
+        candidateCodes.reserveCapacity(paddedVectorCount * m)
         for (index, code) in codes.enumerated() {
             guard code.count == m else {
                 throw ANNSError.searchFailed("Invalid PQ code size at index \(index)")
             }
             candidateCodes.append(contentsOf: code)
+        }
+        if paddedVectorCount > originalVectorCount {
+            candidateCodes.append(
+                contentsOf: repeatElement(
+                    UInt8(0),
+                    count: (paddedVectorCount - originalVectorCount) * m
+                )
+            )
         }
 
         let flattenedCodebooks = flatCodebooks ?? flattenCodebooks(from: pq)
@@ -39,7 +51,7 @@ public enum GPUADCSearch {
         }
 
         let tableLengthBytes = m * ks * MemoryLayout<Float>.stride
-        let distancesLengthBytes = codes.count * MemoryLayout<Float>.stride
+        let distancesLengthBytes = paddedVectorCount * MemoryLayout<Float>.stride
         let codesLengthBytes = candidateCodes.count * MemoryLayout<UInt8>.stride
 
         guard
@@ -76,7 +88,13 @@ public enum GPUADCSearch {
         var mU32 = UInt32(m)
         var ksU32 = UInt32(ks)
         var subspaceDimU32 = UInt32(subspaceDim)
-        var vectorCountU32 = UInt32(codes.count)
+        var vectorCountU32 = UInt32(paddedVectorCount)
+
+        guard scanPipeline.maxTotalThreadsPerThreadgroup >= scanLoadStride else {
+            throw ANNSError.searchFailed(
+                "pq_adc_scan requires at least \(scanLoadStride) threads per threadgroup"
+            )
+        }
 
         try await context.execute { commandBuffer in
             guard let tableEncoder = commandBuffer.makeComputeCommandEncoder() else {
@@ -109,18 +127,16 @@ public enum GPUADCSearch {
             scanEncoder.setBytes(&vectorCountU32, length: MemoryLayout<UInt32>.stride, index: 5)
             scanEncoder.setThreadgroupMemoryLength(tableLengthBytes, index: 0)
 
-            let scanGrid = MTLSize(width: codes.count, height: 1, depth: 1)
-            let scanThreadWidth = max(
-                1,
-                min(codes.count, scanPipeline.maxTotalThreadsPerThreadgroup)
-            )
+            let scanGrid = MTLSize(width: paddedVectorCount, height: 1, depth: 1)
+            let scanThreadWidth = scanLoadStride
             let scanThreads = MTLSize(width: scanThreadWidth, height: 1, depth: 1)
             scanEncoder.dispatchThreads(scanGrid, threadsPerThreadgroup: scanThreads)
             scanEncoder.endEncoding()
         }
 
-        let base = distancesBuffer.contents().bindMemory(to: Float.self, capacity: codes.count)
-        return Array(UnsafeBufferPointer(start: base, count: codes.count))
+        let base = distancesBuffer.contents().bindMemory(to: Float.self, capacity: paddedVectorCount)
+        let allDistances = Array(UnsafeBufferPointer(start: base, count: paddedVectorCount))
+        return Array(allDistances.prefix(originalVectorCount))
     }
 
     public static func search(
@@ -132,16 +148,6 @@ public enum GPUADCSearch {
         k: Int,
         flatCodebooks: [Float]? = nil
     ) async throws -> [SearchResult] {
-        guard codes.count == ids.count else {
-            throw ANNSError.constructionFailed("codes and ids count mismatch")
-        }
-        guard k > 0 else {
-            return []
-        }
-        guard !codes.isEmpty else {
-            return []
-        }
-
         let distances = try await computeDistances(
             context: context,
             query: query,
@@ -149,17 +155,7 @@ public enum GPUADCSearch {
             codes: codes,
             flatCodebooks: flatCodebooks
         )
-
-        var results: [SearchResult] = []
-        results.reserveCapacity(min(k, distances.count))
-        for (index, distance) in distances.enumerated() {
-            results.append(SearchResult(id: ids[index], score: distance, internalID: UInt32(index)))
-        }
-        results.sort { $0.score < $1.score }
-        if results.count > k {
-            results.removeSubrange(k...)
-        }
-        return results
+        return try rankDistances(distances: distances, ids: ids, k: k)
     }
 
     public static func flattenCodebooks(from pq: ProductQuantizer) -> [Float] {
@@ -173,5 +169,36 @@ public enum GPUADCSearch {
             }
         }
         return flattened
+    }
+
+    static func rankDistances(
+        distances: [Float],
+        ids: [String],
+        k: Int
+    ) throws -> [SearchResult] {
+        guard distances.count == ids.count else {
+            throw ANNSError.constructionFailed("codes and ids count mismatch")
+        }
+        guard k > 0 else {
+            return []
+        }
+        guard !distances.isEmpty else {
+            return []
+        }
+
+        var results: [SearchResult] = []
+        results.reserveCapacity(min(k, distances.count))
+        for (index, distance) in distances.enumerated() {
+            results.append(SearchResult(id: ids[index], score: distance, internalID: UInt32(index)))
+        }
+        results.sort { $0.score < $1.score }
+        if results.count > k {
+            results.removeSubrange(k...)
+        }
+        return results
+    }
+
+    private static func roundUp(_ value: Int, toMultipleOf multiple: Int) -> Int {
+        ((value + multiple - 1) / multiple) * multiple
     }
 }
