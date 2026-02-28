@@ -40,6 +40,22 @@ struct IndexMetricsTests {
         #expect(snapshot.searchCount == 10)
     }
 
+    @Test("Range search increments search count")
+    func rangeSearchCountIncrements() async throws {
+        let (index, vectors, _) = try await makeIndexFixture()
+        let metrics = IndexMetrics()
+        await index.setMetrics(metrics)
+
+        for i in 0..<7 {
+            _ = try await index.rangeSearch(query: vectors[i], maxDistance: 10_000, limit: 8)
+        }
+
+        let snapshot = await metrics.snapshot()
+        #expect(snapshot.searchCount == 7)
+        let histogram = await metrics.searchLatencyHistogram
+        #expect(histogram.reduce(0, +) == 7)
+    }
+
     @Test("Insert count increments")
     func insertCountIncrements() async throws {
         let (index, _, _) = try await makeIndexFixture()
@@ -139,6 +155,23 @@ struct IndexMetricsTests {
 
         let snapshot = await metrics.snapshot()
         #expect(snapshot.mergeCount >= 1)
+    }
+
+    @Test("Streaming single-record merge path not recorded")
+    func streamingSingleRecordMergeNotRecorded() async throws {
+        let streaming = StreamingIndex(config: StreamingConfiguration(
+            deltaCapacity: 5,
+            mergeStrategy: .blocking,
+            indexConfiguration: IndexConfiguration(degree: 8, metric: .cosine, hnswConfiguration: .init(enabled: false))
+        ))
+        let metrics = IndexMetrics()
+        await streaming.setMetrics(metrics)
+
+        try await streaming.insert(makeVector(row: 65_000, dim: 16), id: "single")
+        try await streaming.flush()
+
+        let snapshot = await metrics.snapshot()
+        #expect(snapshot.mergeCount == 0)
     }
 
     @Test("Shared metrics across indexes")

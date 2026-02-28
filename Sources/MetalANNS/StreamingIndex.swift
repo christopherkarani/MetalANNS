@@ -71,7 +71,9 @@ public actor StreamingIndex {
             throw ANNSError.idAlreadyExists(id)
         }
         try validateDimension(of: vector)
-        await synchronizeChildMetricsIfNeeded()
+        if metricsNeedsPropagation {
+            await synchronizeChildMetricsIfNeeded()
+        }
 
         allIDs.insert(id)
         allIDsList.append(id)
@@ -101,7 +103,9 @@ public actor StreamingIndex {
         for vector in vectors {
             try validateDimension(of: vector)
         }
-        await synchronizeChildMetricsIfNeeded()
+        if metricsNeedsPropagation {
+            await synchronizeChildMetricsIfNeeded()
+        }
 
         for id in ids {
             allIDs.insert(id)
@@ -125,7 +129,9 @@ public actor StreamingIndex {
         guard k > 0 else {
             return []
         }
-        await synchronizeChildMetricsIfNeeded()
+        if metricsNeedsPropagation {
+            await synchronizeChildMetricsIfNeeded()
+        }
 
         let searchMetric = metric ?? config.indexConfiguration.metric
         var combined: [SearchResult] = []
@@ -185,7 +191,9 @@ public actor StreamingIndex {
         guard limit > 0 else {
             return []
         }
-        await synchronizeChildMetricsIfNeeded()
+        if metricsNeedsPropagation {
+            await synchronizeChildMetricsIfNeeded()
+        }
 
         let searchMetric = metric ?? config.indexConfiguration.metric
         var combined: [SearchResult] = []
@@ -304,7 +312,9 @@ public actor StreamingIndex {
     }
 
     public func flush() async throws {
-        await synchronizeChildMetricsIfNeeded()
+        if metricsNeedsPropagation {
+            await synchronizeChildMetricsIfNeeded()
+        }
 
         if let task = mergeTask {
             defer { mergeTask = nil }
