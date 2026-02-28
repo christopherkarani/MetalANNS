@@ -92,7 +92,7 @@ public actor IVFPQIndex: Sendable {
 
         self.coarseCentroids = trainedCoarseCentroids
         self.pq = trainedPQ
-        self.flattenedCodebooks = flattenCodebooks(from: trainedPQ)
+        self.flattenedCodebooks = GPUADCSearch.flattenCodebooks(from: trainedPQ)
         self.vectorBuffer = try PQVectorBuffer(capacity: capacity, dim: dimension, pq: trainedPQ)
         self.invertedLists = Array(repeating: [], count: trainedCoarseCentroids.count)
         self.coarseAssignments = []
@@ -434,120 +434,19 @@ public actor IVFPQIndex: Sendable {
             return []
         }
 
-        let m = pq.numSubspaces
-        let ks = pq.centroidsPerSubspace
-        let subspaceDim = pq.subspaceDimension
-
-        var candidateCodes: [UInt8] = []
-        candidateCodes.reserveCapacity(candidateIDs.count * m)
-        for internalID in candidateIDs {
-            let code = vectorBuffer.code(at: Int(internalID))
-            guard code.count == m else {
-                throw ANNSError.searchFailed("Invalid PQ code size for internal ID \(internalID)")
-            }
-            candidateCodes.append(contentsOf: code)
-        }
+        let codes = candidateIDs.map { vectorBuffer.code(at: Int($0)) }
 
         if flattenedCodebooks.isEmpty {
-            flattenedCodebooks = flattenCodebooks(from: pq)
+            flattenedCodebooks = GPUADCSearch.flattenCodebooks(from: pq)
         }
 
-        let tableLengthBytes = m * ks * MemoryLayout<Float>.stride
-        let distancesLengthBytes = candidateIDs.count * MemoryLayout<Float>.stride
-        let codesLengthBytes = candidateCodes.count * MemoryLayout<UInt8>.stride
-
-        guard
-            let queryBuffer = context.device.makeBuffer(
-                bytes: queryResidual,
-                length: queryResidual.count * MemoryLayout<Float>.stride,
-                options: .storageModeShared
-            ),
-            let codebookBuffer = context.device.makeBuffer(
-                bytes: flattenedCodebooks,
-                length: flattenedCodebooks.count * MemoryLayout<Float>.stride,
-                options: .storageModeShared
-            ),
-            let distanceTableBuffer = context.device.makeBuffer(
-                length: tableLengthBytes,
-                options: .storageModeShared
-            ),
-            let codesBuffer = context.device.makeBuffer(
-                bytes: candidateCodes,
-                length: codesLengthBytes,
-                options: .storageModeShared
-            ),
-            let distancesBuffer = context.device.makeBuffer(
-                length: distancesLengthBytes,
-                options: .storageModeShared
-            )
-        else {
-            throw ANNSError.constructionFailed("Failed to allocate Metal buffers for GPU ADC")
-        }
-
-        let tablePipeline = try await context.pipelineCache.pipeline(for: "pq_compute_distance_table")
-        let scanPipeline = try await context.pipelineCache.pipeline(for: "pq_adc_scan")
-
-        var mU32 = UInt32(m)
-        var ksU32 = UInt32(ks)
-        var subspaceDimU32 = UInt32(subspaceDim)
-        var vectorCountU32 = UInt32(candidateIDs.count)
-
-        try await context.execute { commandBuffer in
-            guard let tableEncoder = commandBuffer.makeComputeCommandEncoder() else {
-                throw ANNSError.constructionFailed("Failed to create distance-table encoder")
-            }
-
-            tableEncoder.setComputePipelineState(tablePipeline)
-            tableEncoder.setBuffer(queryBuffer, offset: 0, index: 0)
-            tableEncoder.setBuffer(codebookBuffer, offset: 0, index: 1)
-            tableEncoder.setBuffer(distanceTableBuffer, offset: 0, index: 2)
-            tableEncoder.setBytes(&mU32, length: MemoryLayout<UInt32>.stride, index: 3)
-            tableEncoder.setBytes(&ksU32, length: MemoryLayout<UInt32>.stride, index: 4)
-            tableEncoder.setBytes(&subspaceDimU32, length: MemoryLayout<UInt32>.stride, index: 5)
-
-            let tableGrid = MTLSize(width: m, height: ks, depth: 1)
-            let tableThreads = MTLSize(width: 8, height: 8, depth: 1)
-            tableEncoder.dispatchThreads(tableGrid, threadsPerThreadgroup: tableThreads)
-            tableEncoder.endEncoding()
-
-            guard let scanEncoder = commandBuffer.makeComputeCommandEncoder() else {
-                throw ANNSError.constructionFailed("Failed to create ADC scan encoder")
-            }
-
-            scanEncoder.setComputePipelineState(scanPipeline)
-            scanEncoder.setBuffer(codesBuffer, offset: 0, index: 0)
-            scanEncoder.setBuffer(distanceTableBuffer, offset: 0, index: 1)
-            scanEncoder.setBuffer(distancesBuffer, offset: 0, index: 2)
-            scanEncoder.setBytes(&mU32, length: MemoryLayout<UInt32>.stride, index: 3)
-            scanEncoder.setBytes(&ksU32, length: MemoryLayout<UInt32>.stride, index: 4)
-            scanEncoder.setBytes(&vectorCountU32, length: MemoryLayout<UInt32>.stride, index: 5)
-            scanEncoder.setThreadgroupMemoryLength(tableLengthBytes, index: 0)
-
-            let scanGrid = MTLSize(width: candidateIDs.count, height: 1, depth: 1)
-            let scanThreadWidth = max(
-                1,
-                min(candidateIDs.count, scanPipeline.maxTotalThreadsPerThreadgroup)
-            )
-            let scanThreads = MTLSize(width: scanThreadWidth, height: 1, depth: 1)
-            scanEncoder.dispatchThreads(scanGrid, threadsPerThreadgroup: scanThreads)
-            scanEncoder.endEncoding()
-        }
-
-        let base = distancesBuffer.contents().bindMemory(to: Float.self, capacity: candidateIDs.count)
-        return Array(UnsafeBufferPointer(start: base, count: candidateIDs.count))
-    }
-
-    private func flattenCodebooks(from pq: ProductQuantizer) -> [Float] {
-        var flattened: [Float] = []
-        flattened.reserveCapacity(
-            pq.numSubspaces * pq.centroidsPerSubspace * pq.subspaceDimension
+        return try await GPUADCSearch.computeDistances(
+            context: context,
+            query: queryResidual,
+            pq: pq,
+            codes: codes,
+            flatCodebooks: flattenedCodebooks
         )
-        for subspace in 0..<pq.numSubspaces {
-            for centroid in 0..<pq.centroidsPerSubspace {
-                flattened.append(contentsOf: pq.codebooks[subspace][centroid])
-            }
-        }
-        return flattened
     }
 
     private func restore(from state: PersistedState) throws {
@@ -558,7 +457,7 @@ public actor IVFPQIndex: Sendable {
 
         self.coarseCentroids = state.coarseCentroids
         self.pq = state.pq
-        self.flattenedCodebooks = flattenCodebooks(from: state.pq)
+        self.flattenedCodebooks = GPUADCSearch.flattenCodebooks(from: state.pq)
         self.vectorBuffer = rebuiltBuffer
         self.invertedLists = state.invertedLists
         self.coarseAssignments = state.coarseAssignments

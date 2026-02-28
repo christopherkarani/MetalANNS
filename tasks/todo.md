@@ -11,10 +11,10 @@
 - [x] Round 1 — Run `swift test --filter GPUADCSearchTests` and confirm RED state before implementation.
 - [x] Round 1 — Implement `Sources/MetalANNSCore/GPUADCSearch.swift` low-level API (`computeDistances`, `flattenCodebooks`).
 - [x] Round 1 verify — Re-run required xcodebuild command and `swift test --filter GPUADCSearchTests` to GREEN.
-- [ ] Round 2 (TDD) — Add failing IVFPQ regression test (`ivfpqRegressionAfterRewire`) for GPU/CPU top-k parity.
-- [ ] Round 2 — Rewire `IVFPQIndex.gpuADCDistances()` to delegate to `GPUADCSearch.computeDistances()`.
-- [ ] Round 2 — Replace IVFPQ flatten callers with `GPUADCSearch.flattenCodebooks(from:)` and delete private IVFPQ flatten helper.
-- [ ] Round 2 verify — Re-run required xcodebuild command and targeted regressions (`IVFPQGPUTests`, `IVFPQIndexTests`, `IVFPQPersistenceTests`, `GPUADCSearchTests`).
+- [x] Round 2 (TDD) — Add failing IVFPQ regression test (`ivfpqRegressionAfterRewire`) for GPU/CPU top-k parity.
+- [x] Round 2 — Rewire `IVFPQIndex.gpuADCDistances()` to delegate to `GPUADCSearch.computeDistances()`.
+- [x] Round 2 — Replace IVFPQ flatten callers with `GPUADCSearch.flattenCodebooks(from:)` and delete private IVFPQ flatten helper.
+- [x] Round 2 verify — Re-run required xcodebuild command and targeted regressions (`IVFPQGPUTests`, `IVFPQIndexTests`, `IVFPQPersistenceTests`, `GPUADCSearchTests`).
 - [ ] Round 3 (TDD) — Add failing high-level `GPUADCSearch.search()` tests (`searchReturnsTopK`, `searchKLargerThanCorpus`).
 - [ ] Round 3 — Implement `GPUADCSearch.search()` sorted top-k API.
 - [ ] Round 3 verify — Re-run required xcodebuild command and targeted suites (`GPUADCSearchTests`, `IVFPQGPUTests`).
@@ -31,6 +31,10 @@
   - `xcodebuild test -scheme MetalANNS -destination 'platform=macOS' 2>&1 | grep -E "PASS|FAIL|error:"`
   - Result: same scheme test-action error in this environment.
   - `swift test --filter GPUADCSearchTests` → PASS (4 tests).
+- Round 2:
+  - `xcodebuild test -scheme MetalANNS -destination 'platform=macOS' 2>&1 | grep -E "PASS|FAIL|error:"`
+  - Result: same scheme test-action error in this environment.
+  - `swift test --filter "(GPUADCSearchTests|IVFPQGPUTests|IVFPQIndexTests|IVFPQPersistenceTests)"` → PASS (12 tests).
 
 ## MetalANNS — Phase 24: Index Observability
 

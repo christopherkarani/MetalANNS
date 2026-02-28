@@ -98,6 +98,41 @@ struct GPUADCSearchTests {
         }
         #endif
     }
+
+    @Test("IVFPQ search parity after GPUADCSearch delegation")
+    func ivfpqRegressionAfterRewire() async throws {
+        #if targetEnvironment(simulator)
+        return
+        #else
+        guard let _ = try? MetalContext() else { return }
+
+        let config = IVFPQConfiguration(
+            numSubspaces: 8,
+            numCentroids: 256,
+            numCoarseCentroids: 32,
+            nprobe: 8,
+            metric: .l2,
+            trainingIterations: 6
+        )
+        let index = try IVFPQIndex(capacity: 2_500, dimension: 128, config: config)
+
+        let centers = makeClusterCenters(dim: 128, clusters: 32, seed: 401)
+        let training = sampleClusteredVectors(count: 1_000, centers: centers, seed: 402)
+        try await index.train(vectors: training)
+
+        let database = sampleClusteredVectors(count: 600, centers: centers, seed: 403)
+        let ids = (0..<database.count).map { "ivfpq-\($0)" }
+        try await index.add(vectors: database, ids: ids)
+
+        let query = sampleClusteredVectors(count: 1, centers: centers, seed: 404)[0]
+        let gpu = await index.search(query: query, k: 10, nprobe: 8, forceGPU: true)
+        let cpu = await index.search(query: query, k: 10, nprobe: 8, forceGPU: false)
+
+        #expect(gpu.count == 10)
+        #expect(cpu.count == 10)
+        #expect(Set(gpu.map(\.id)) == Set(cpu.map(\.id)))
+        #endif
+    }
 }
 
 private func trainPQ(dim: Int = 64, M: Int = 8) throws -> ProductQuantizer {
@@ -114,6 +149,24 @@ private func makeRandomVectors(count: Int, dim: Int, seed: UInt64) -> [[Float]] 
     var rng = SeededGenerator(state: seed == 0 ? 1 : seed)
     return (0..<count).map { _ in
         (0..<dim).map { _ in Float.random(in: -1.0...1.0, using: &rng) }
+    }
+}
+
+private func makeClusterCenters(dim: Int, clusters: Int, seed: UInt64) -> [[Float]] {
+    var rng = SeededGenerator(state: seed == 0 ? 1 : seed)
+    return (0..<clusters).map { _ in
+        (0..<dim).map { _ in Float.random(in: -1.0...1.0, using: &rng) }
+    }
+}
+
+private func sampleClusteredVectors(count: Int, centers: [[Float]], seed: UInt64) -> [[Float]] {
+    var rng = SeededGenerator(state: seed == 0 ? 1 : seed)
+    let clusters = centers.count
+    return (0..<count).map { row in
+        let cluster = row % clusters
+        return centers[cluster].map { center in
+            center + Float.random(in: -0.02...0.02, using: &rng)
+        }
     }
 }
 
