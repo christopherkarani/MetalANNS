@@ -307,28 +307,27 @@ kernel void local_join(
                 continue;
             }
 
-            float distA = compute_metric_distance(vectors, tid, a, dim, metric_type);
-            float distB = compute_metric_distance(vectors, tid, b, dim, metric_type);
+            float pair_dist = compute_metric_distance(vectors, a, b, dim, metric_type);
 
             try_insert_neighbor(
                 adj_ids,
                 adj_dists_bits,
-                tid,
                 a,
+                b,
                 node_count,
                 degree,
-                distA,
+                pair_dist,
                 update_counter
             );
 
             try_insert_neighbor(
                 adj_ids,
                 adj_dists_bits,
-                tid,
                 b,
+                a,
                 node_count,
                 degree,
-                distB,
+                pair_dist,
                 update_counter
             );
         }

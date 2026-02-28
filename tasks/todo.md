@@ -1,3 +1,34 @@
+## MetalANNS — P1 Fix: Restore Pairwise GPU local_join Updates
+
+> **Status**: IMPLEMENTED (VALIDATION PARTIAL: GPU suites blocked by Metal default-library environment issue)
+> **Owner**: Codex
+> **Last Updated**: 2026-02-28
+
+## Task Checklist
+
+- [x] Add deterministic regression tests for `local_join` pairwise propagation in `NNDescentGPUTests` (float32 and float16).
+- [x] Restore pairwise candidate updates in `NNDescent.metal` `local_join` (`a <- b` and `b <- a` using `dist(a,b)`).
+- [x] Restore pairwise candidate updates in `NNDescentFloat16.metal` `local_join_f16` (`a <- b` and `b <- a` using `dist(a,b)`).
+- [x] Run targeted verification: `swift test --filter NNDescentGPUTests`.
+- [x] Run targeted verification: `swift test --filter "(NNDescentGPUTests|Float16Tests|MetalSearchTests)"`.
+
+## Review Results
+
+- Regression addressed:
+  - Fixed the P1 logic regression where local join inserted neighbors into `tid` instead of refining candidate pairs `(a,b)`.
+  - Applied in both float32 and float16 kernels.
+- Test coverage added:
+  - `local_join updates candidate pairs (float32)`
+  - `local_join_f16 updates candidate pairs (float16)`
+  - These tests construct a deterministic mini-graph and assert one local-join pass performs cross-node pair insertion.
+- Validation output:
+  - `swift test --filter NNDescentGPUTests` failed due environment-wide Metal shader library load issue:
+    - `Failed to load Metal shader library ... no default library was found`
+  - `swift test --filter "(NNDescentGPUTests|Float16Tests|MetalSearchTests)"` summary:
+    - 9 tests total, 2 passed, 7 failed.
+    - `Float16Tests` passed (2/2).
+    - All 7 failures were the same known environment Metal library issue in GPU suites.
+
 ## MetalANNS — Fix All Reported Errors (Post-Audit Remediation)
 
 > **Status**: COMPLETE
