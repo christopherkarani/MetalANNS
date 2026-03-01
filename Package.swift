@@ -11,6 +11,9 @@ let package = Package(
     products: [
         .library(name: "MetalANNS", targets: ["MetalANNS"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
+    ],
     targets: [
         .target(
             name: "MetalANNSCore",
@@ -19,12 +22,20 @@ let package = Package(
         ),
         .target(
             name: "MetalANNS",
-            dependencies: ["MetalANNSCore"],
+            dependencies: [
+                "MetalANNSCore",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
             name: "MetalANNSTests",
-            dependencies: ["MetalANNS", "MetalANNSCore", "MetalANNSBenchmarks"],
+            dependencies: [
+                "MetalANNS",
+                "MetalANNSCore",
+                "MetalANNSBenchmarks",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .executableTarget(
