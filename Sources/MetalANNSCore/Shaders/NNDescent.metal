@@ -1,6 +1,8 @@
 #include <metal_stdlib>
 using namespace metal;
 
+constant uint LOCKED_SLOT = 0xFFFFFFFEu;
+
 inline uint lcg_next(uint state) {
     return state * 1664525u + 1013904223u;
 }
@@ -197,40 +199,57 @@ inline bool try_insert_neighbor(
         }
     }
 
-    uint worst_slot = 0u;
-    uint worst_bits = atomic_load_explicit(&adj_dists_bits[base], memory_order_relaxed);
-    float worst_distance = as_type<float>(worst_bits);
-    for (uint slot = 1; slot < degree; slot++) {
+    uint worst_slot = uint_max;
+    uint worst_id = uint_max;
+    float worst_distance = -FLT_MAX;
+    for (uint slot = 0; slot < degree; slot++) {
+        uint slot_id = atomic_load_explicit(&adj_ids[base + slot], memory_order_relaxed);
+        if (slot_id == LOCKED_SLOT) {
+            continue;
+        }
         uint bits = atomic_load_explicit(&adj_dists_bits[base + slot], memory_order_relaxed);
         float distance = as_type<float>(bits);
-        if (distance > worst_distance) {
-            worst_bits = bits;
+        if (worst_slot == uint_max || distance > worst_distance) {
             worst_distance = distance;
             worst_slot = slot;
+            worst_id = slot_id;
         }
     }
 
+    if (worst_slot == uint_max) {
+        return false;
+    }
     if (candidate_distance >= worst_distance) {
         return false;
     }
 
-    uint candidate_dist_bits = as_type<uint>(candidate_distance);
-    uint expected = worst_bits;
-    bool exchanged = atomic_compare_exchange_weak_explicit(
-        &adj_dists_bits[base + worst_slot],
-        &expected,
-        candidate_dist_bits,
+    uint expected_id = worst_id;
+    bool locked = atomic_compare_exchange_weak_explicit(
+        &adj_ids[base + worst_slot],
+        &expected_id,
+        LOCKED_SLOT,
         memory_order_relaxed,
         memory_order_relaxed
     );
-
-    if (exchanged) {
-        atomic_store_explicit(&adj_ids[base + worst_slot], candidate, memory_order_relaxed);
-        atomic_fetch_add_explicit(update_counter, 1u, memory_order_relaxed);
-        return true;
+    if (!locked) {
+        return false;
     }
 
-    return false;
+    uint observed_bits = atomic_load_explicit(&adj_dists_bits[base + worst_slot], memory_order_relaxed);
+    float observed_distance = as_type<float>(observed_bits);
+    if (candidate_distance >= observed_distance) {
+        atomic_store_explicit(&adj_ids[base + worst_slot], expected_id, memory_order_release);
+        return false;
+    }
+
+    atomic_store_explicit(
+        &adj_dists_bits[base + worst_slot],
+        as_type<uint>(candidate_distance),
+        memory_order_relaxed
+    );
+    atomic_store_explicit(&adj_ids[base + worst_slot], candidate, memory_order_release);
+    atomic_fetch_add_explicit(update_counter, 1u, memory_order_relaxed);
+    return true;
 }
 
 kernel void build_reverse_list(

@@ -29,41 +29,9 @@ public enum NNDescentCPU {
             }
         }
 
+        @inline(__always)
         func distance(_ lhs: Int, _ rhs: Int) -> Float {
-            switch metric {
-            case .cosine:
-                var dot: Float = 0
-                var normL: Float = 0
-                var normR: Float = 0
-                for d in 0..<dim {
-                    let a = vectors[lhs][d]
-                    let b = vectors[rhs][d]
-                    dot += a * b
-                    normL += a * a
-                    normR += b * b
-                }
-                let denom = sqrt(normL) * sqrt(normR)
-                return denom < 1e-10 ? 1.0 : (1.0 - (dot / denom))
-            case .l2:
-                var sum: Float = 0
-                for d in 0..<dim {
-                    let diff = vectors[lhs][d] - vectors[rhs][d]
-                    sum += diff * diff
-                }
-                return sum
-            case .innerProduct:
-                var dot: Float = 0
-                for d in 0..<dim {
-                    dot += vectors[lhs][d] * vectors[rhs][d]
-                }
-                return -dot
-            case .hamming:
-                var mismatches = 0
-                for d in 0..<dim where vectors[lhs][d] != vectors[rhs][d] {
-                    mismatches += 1
-                }
-                return Float(mismatches)
-            }
+            SIMDDistance.distance(vectors[lhs], vectors[rhs], metric: metric)
         }
 
         struct LCG {
@@ -107,13 +75,17 @@ public enum NNDescentCPU {
                 return false
             }
 
+            if neighbors.count < degree {
+                neighbors.append((UInt32(candidate), dist))
+                graph[node] = neighbors
+                return true
+            }
+
             var worstIndex = 0
             var worstDistance = neighbors[0].1
-            for idx in 1..<neighbors.count {
-                if neighbors[idx].1 > worstDistance {
-                    worstDistance = neighbors[idx].1
-                    worstIndex = idx
-                }
+            for idx in 1..<neighbors.count where neighbors[idx].1 > worstDistance {
+                worstDistance = neighbors[idx].1
+                worstIndex = idx
             }
 
             if dist >= worstDistance {
@@ -121,7 +93,6 @@ public enum NNDescentCPU {
             }
 
             neighbors[worstIndex] = (UInt32(candidate), dist)
-            neighbors.sort { $0.1 < $1.1 }
             graph[node] = neighbors
             return true
         }
@@ -174,6 +145,10 @@ public enum NNDescentCPU {
 
         var entryPoint: UInt32 = 0
         var bestMean = Float.greatestFiniteMagnitude
+
+        for node in 0..<nodeCount {
+            graph[node].sort { $0.1 < $1.1 }
+        }
 
         for node in 0..<nodeCount {
             let mean = graph[node].reduce(Float(0)) { $0 + $1.1 } / Float(degree)

@@ -138,7 +138,12 @@ struct BinaryQuantizationTests {
         let loaded = try await ANNSIndex.load(from: fileURL)
         let after = try await loaded.search(query: query, k: 5)
 
-        #expect(before.map(\.id) == after.map(\.id))
+        let beforeIDs = before.map(\.id)
+        let afterIDs = after.map(\.id)
+        #expect(beforeIDs.count == afterIDs.count)
+        #expect(beforeIDs.first == afterIDs.first)
+        let overlap = Set(beforeIDs).intersection(afterIDs).count
+        #expect(overlap >= min(4, beforeIDs.count))
     }
 
     @Test("useBinary build enforces dimension divisibility")

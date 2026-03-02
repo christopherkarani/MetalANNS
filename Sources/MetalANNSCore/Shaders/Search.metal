@@ -2,8 +2,6 @@
 using namespace metal;
 
 constant uint MAX_EF = 256;
-constant uint MAX_VISITED = 4096;
-constant uint MAX_PROBES = 32;
 constant uint EMPTY_SLOT = 0xFFFFFFFFu;
 
 struct CandidateEntry {
@@ -50,24 +48,23 @@ inline float compute_distance(
     return (denom < 1e-10f) ? 1.0f : (1.0f - (dot / denom));
 }
 
-inline bool try_visit(threadgroup atomic_uint *visited, uint nodeID) {
-    uint hash = nodeID * 2654435761u;
-
-    for (uint probe = 0; probe < MAX_PROBES; probe++) {
-        uint slot = (hash + probe) & (MAX_VISITED - 1);
-        uint expected = EMPTY_SLOT;
+inline bool try_visit_global(
+    device atomic_uint *visited_generation,
+    uint nodeID,
+    uint generation
+) {
+    uint observed = atomic_load_explicit(&visited_generation[nodeID], memory_order_relaxed);
+    while (observed != generation) {
+        uint expected = observed;
         if (atomic_compare_exchange_weak_explicit(
-                &visited[slot],
+                &visited_generation[nodeID],
                 &expected,
-                nodeID,
+                generation,
                 memory_order_relaxed,
                 memory_order_relaxed)) {
             return true;
         }
-
-        if (expected == nodeID) {
-            return false;
-        }
+        observed = expected;
     }
 
     return false;
@@ -128,29 +125,28 @@ kernel void beam_search(
     constant uint &ef [[buffer(9)]],
     constant uint &entry_point [[buffer(10)]],
     constant uint &metric_type [[buffer(11)]],
+    device atomic_uint *visited_generation [[buffer(12)]],
+    constant uint &visit_generation [[buffer(13)]],
     uint tid [[thread_index_in_threadgroup]],
     uint threads_per_group [[threads_per_threadgroup]]
 ) {
     threadgroup CandidateEntry candidates[MAX_EF];
     threadgroup CandidateEntry results[MAX_EF];
-    threadgroup atomic_uint visited[MAX_VISITED];
+    threadgroup CandidateEntry frontier[MAX_EF];
     threadgroup atomic_uint candidate_count;
     threadgroup atomic_uint result_count;
     threadgroup uint candidate_head;
-    threadgroup CandidateEntry current;
+    threadgroup uint active_frontier_count;
     threadgroup uint should_stop;
 
     uint ef_limit = min(min(ef, node_count), MAX_EF);
     uint output_k = min(k, ef_limit);
 
-    for (uint index = tid; index < MAX_VISITED; index += threads_per_group) {
-        atomic_store_explicit(&visited[index], EMPTY_SLOT, memory_order_relaxed);
-    }
-
     if (tid == 0) {
         atomic_store_explicit(&candidate_count, 0, memory_order_relaxed);
         atomic_store_explicit(&result_count, 0, memory_order_relaxed);
         candidate_head = 0;
+        active_frontier_count = 0;
         should_stop = 0;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -162,7 +158,7 @@ kernel void beam_search(
         results[0] = entry;
         atomic_store_explicit(&candidate_count, 1, memory_order_relaxed);
         atomic_store_explicit(&result_count, 1, memory_order_relaxed);
-        (void)try_visit(visited, entry_point);
+        (void)try_visit_global(visited_generation, entry_point, visit_generation);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -175,14 +171,26 @@ kernel void beam_search(
 
             if (candidate_head >= local_candidate_count || candidate_head >= ef_limit) {
                 should_stop = 1;
+                active_frontier_count = 0;
             } else {
-                current = candidates[candidate_head];
-                candidate_head += 1;
+                uint remaining = min(local_candidate_count - candidate_head, ef_limit - candidate_head);
+                active_frontier_count = min(remaining, min(threads_per_group, MAX_EF));
+                for (uint i = 0; i < active_frontier_count; i++) {
+                    frontier[i] = candidates[candidate_head + i];
+                }
+                candidate_head += active_frontier_count;
                 should_stop = 0;
 
                 if (local_result_count >= ef_limit && local_result_count > 0) {
                     float worst = results[local_result_count - 1].distance;
-                    if (current.distance > worst) {
+                    bool all_worse = true;
+                    for (uint i = 0; i < active_frontier_count; i++) {
+                        if (frontier[i].distance <= worst) {
+                            all_worse = false;
+                            break;
+                        }
+                    }
+                    if (all_worse) {
                         should_stop = 1;
                     }
                 }
@@ -194,15 +202,18 @@ kernel void beam_search(
             break;
         }
 
-        if (tid < degree) {
-            uint neighbor_index = current.nodeID * degree + tid;
-            uint neighbor_id = adjacency[neighbor_index];
-            if (neighbor_id != EMPTY_SLOT && neighbor_id < node_count) {
-                if (try_visit(visited, neighbor_id)) {
-                    float dist = compute_distance(vectors, query, neighbor_id, dim, metric_type);
-                    CandidateEntry next = { neighbor_id, dist };
-                    append_entry(results, result_count, MAX_EF, next);
-                    append_entry(candidates, candidate_count, MAX_EF, next);
+        if (tid < active_frontier_count) {
+            CandidateEntry current = frontier[tid];
+            for (uint neighbor_slot = 0; neighbor_slot < degree; neighbor_slot++) {
+                uint neighbor_index = current.nodeID * degree + neighbor_slot;
+                uint neighbor_id = adjacency[neighbor_index];
+                if (neighbor_id != EMPTY_SLOT && neighbor_id < node_count) {
+                    if (try_visit_global(visited_generation, neighbor_id, visit_generation)) {
+                        float dist = compute_distance(vectors, query, neighbor_id, dim, metric_type);
+                        CandidateEntry next = { neighbor_id, dist };
+                        append_entry(results, result_count, MAX_EF, next);
+                        append_entry(candidates, candidate_count, MAX_EF, next);
+                    }
                 }
             }
         }

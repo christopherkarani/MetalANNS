@@ -4,6 +4,62 @@ public enum HNSWSearchCPU {
     /// Search using HNSW layer hierarchy and beam search at layer 0.
     public static func search(
         query: [Float],
+        vectors: any VectorStorage,
+        hnsw: HNSWLayers,
+        baseGraph: [[(UInt32, Float)]],
+        k: Int,
+        ef: Int,
+        metric: Metric
+    ) async throws(ANNSError) -> [SearchResult] {
+        guard k > 0 else {
+            return []
+        }
+        guard vectors.count > 0 else {
+            throw ANNSError.indexEmpty
+        }
+        guard vectors.count == baseGraph.count else {
+            throw ANNSError.searchFailed("Graph size does not match vector count")
+        }
+        guard query.count == vectors.dim else {
+            throw ANNSError.dimensionMismatch(expected: vectors.dim, got: query.count)
+        }
+
+        var currentEntry = Int(hnsw.entryPoint)
+        if hnsw.maxLayer > 0 {
+            for layer in stride(from: hnsw.maxLayer, through: 1, by: -1) {
+                currentEntry = Int(
+                    try greedySearchLayer(
+                        query: query,
+                        vectorCount: vectors.count,
+                        vectorAt: { vectors.vector(at: $0) },
+                        hnsw: hnsw,
+                        layer: layer,
+                        entryPoint: currentEntry,
+                        metric: metric
+                    )
+                )
+            }
+        }
+
+        do {
+            return try await BeamSearchCPU.search(
+                query: query,
+                vectors: vectors,
+                graph: baseGraph,
+                entryPoint: currentEntry,
+                k: k,
+                ef: ef,
+                metric: metric
+            )
+        } catch let error as ANNSError {
+            throw error
+        } catch {
+            throw ANNSError.searchFailed("HNSW layer-0 beam search failed: \(error.localizedDescription)")
+        }
+    }
+
+    public static func search(
+        query: [Float],
         vectors: [[Float]],
         hnsw: HNSWLayers,
         baseGraph: [[(UInt32, Float)]],
@@ -34,7 +90,8 @@ public enum HNSWSearchCPU {
                 currentEntry = Int(
                     try greedySearchLayer(
                         query: query,
-                        vectors: vectors,
+                        vectorCount: vectors.count,
+                        vectorAt: { vectors[$0] },
                         hnsw: hnsw,
                         layer: layer,
                         entryPoint: currentEntry,
@@ -63,7 +120,8 @@ public enum HNSWSearchCPU {
 
     static func greedySearchLayer(
         query: [Float],
-        vectors: [[Float]],
+        vectorCount: Int,
+        vectorAt: (Int) -> [Float],
         hnsw: HNSWLayers,
         layer: Int,
         entryPoint: Int,
@@ -72,12 +130,12 @@ public enum HNSWSearchCPU {
         guard layer > 0, layer <= hnsw.maxLayer else {
             throw ANNSError.searchFailed("Invalid layer for greedy search")
         }
-        guard entryPoint >= 0, entryPoint < vectors.count else {
+        guard entryPoint >= 0, entryPoint < vectorCount else {
             throw ANNSError.searchFailed("Entry point out of bounds")
         }
 
         var current = UInt32(entryPoint)
-        var currentDistance = SIMDDistance.distance(query, vectors[entryPoint], metric: metric)
+        var currentDistance = SIMDDistance.distance(query, vectorAt(entryPoint), metric: metric)
         var improved = true
         var iterations = 0
         let maxIterations = 128
@@ -94,12 +152,12 @@ public enum HNSWSearchCPU {
             var bestDistance = currentDistance
 
             for neighborID in neighbors {
-                if neighborID == UInt32.max || Int(neighborID) >= vectors.count {
+                if neighborID == UInt32.max || Int(neighborID) >= vectorCount {
                     continue
                 }
                 let neighborDistance = SIMDDistance.distance(
                     query,
-                    vectors[Int(neighborID)],
+                    vectorAt(Int(neighborID)),
                     metric: metric
                 )
                 if neighborDistance < bestDistance {

@@ -72,7 +72,12 @@ let package = Package(
         ),
         .testTarget(
             name: "MetalANNSTests",
-            dependencies: ["MetalANNS", "MetalANNSCore", "MetalANNSBenchmarks"],
+            dependencies: [
+                "MetalANNS",
+                "MetalANNSCore",
+                "MetalANNSBenchmarks",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .executableTarget(
@@ -223,6 +228,14 @@ public final class IndexDatabase: Sendable {
 
         try migrator.migrate(pool)
     }
+
+    /// Flush WAL state so `.db` can be moved/replaced safely with sidecars.
+    public func prepareForFileMove() throws {
+        try pool.writeWithoutTransaction { db in
+            // Merge WAL back into the main DB file.
+            try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
+        }
+    }
 }
 ```
 
@@ -244,6 +257,7 @@ git commit -m "feat: add IndexDatabase foundation with schema v1"
 
 **Files:**
 - Modify: `Sources/MetalANNS/Storage/IndexDatabase.swift`
+- Modify: `Sources/MetalANNSCore/IDMap.swift` (internal persistence constructor)
 - Test: `Tests/MetalANNSTests/Storage/IndexDatabaseTests.swift`
 
 **Step 1: Write the failing tests**
@@ -301,35 +315,24 @@ func testLoadIDMapFromEmptyDatabase() throws {
     XCTAssertEqual(loaded.count, 0)
     XCTAssertEqual(loaded.nextInternalID, 0)
 }
-
-func testSaveAndLoadIDMapWithGaps() throws {
-    let path = tempDBPath()
-    defer { try? FileManager.default.removeItem(atPath: path) }
-    let db = try IndexDatabase(path: path)
-
-    // Simulate an IDMap where some internal IDs were removed (compaction gap).
-    // IDs 0, 1, 2 assigned but nextInternalID could be higher after compaction.
-    var idMap = IDMap()
-    _ = idMap.assign(externalID: "a")  // 0
-    _ = idMap.assign(externalID: "b")  // 1
-    _ = idMap.assign(externalID: "c")  // 2
-
-    try db.saveIDMap(idMap)
-    let loaded = try db.loadIDMap()
-
-    // nextInternalID should be restored from the stored value, not inferred
-    XCTAssertEqual(loaded.nextInternalID, 3)
-}
 ```
 
 **Step 2: Run test to verify it fails**
 
-Run: `swift test --filter "testSaveAndLoadIDMap|testSaveIDMapOverwritesPrevious|testLoadIDMapFromEmptyDatabase|testSaveAndLoadIDMapWithGaps" 2>&1 | tail -10`
+Run: `swift test --filter "testSaveAndLoadIDMap|testSaveIDMapOverwritesPrevious|testLoadIDMapFromEmptyDatabase" 2>&1 | tail -10`
 Expected: FAIL — `saveIDMap`/`loadIDMap` not found.
 
 **Step 3: Add IDMap CRUD to IndexDatabase**
 
-Add to `IndexDatabase.swift` — imports need `import MetalANNSCore`:
+Add to `IndexDatabase.swift` — imports need `import MetalANNSCore`.
+Also add an internal constructor in `IDMap.swift` used only for persistence rebuild:
+
+```swift
+// MetalANNSCore/IDMap.swift (internal API)
+static func makeForPersistence(rows: [(String, UInt32)], nextID: UInt32) -> IDMap
+```
+
+Then implement persistence methods:
 
 ```swift
 import MetalANNSCore
@@ -346,12 +349,12 @@ extension IndexDatabase {
                 INSERT INTO idmap (externalID, internalID) VALUES (?, ?)
                 """)
 
-            for internalID in 0 ..< UInt32(idMap.count) {
+            for internalID in 0 ..< idMap.nextInternalID {
                 guard let externalID = idMap.externalID(for: internalID) else { continue }
                 try stmt.execute(arguments: [externalID, Int64(internalID)])
             }
 
-            // Store nextID in config for reconstruction (handles gaps from compaction)
+            // Persist nextInternalID so gaps can be restored exactly.
             try db.execute(
                 sql: "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
                 arguments: ["idmap.nextID", String(idMap.nextInternalID)]
@@ -360,29 +363,37 @@ extension IndexDatabase {
     }
 
     /// Loads the full IDMap from the database.
-    ///
-    /// Restores nextInternalID from the stored config value to handle gaps
-    /// from compaction (where nextID > count of entries).
     public func loadIDMap() throws -> IDMap {
         try pool.read { db in
             let rows = try Row.fetchAll(db, sql: "SELECT externalID, internalID FROM idmap ORDER BY internalID")
-            let nextIDStr = try String.fetchOne(db, sql: "SELECT value FROM config WHERE key = 'idmap.nextID'")
 
             var idMap = IDMap()
             for row in rows {
                 let externalID: String = row["externalID"]
-                // assign() auto-increments, so we rely on insertion order matching internalID order
+                // assign() auto-increments, relying on insertion order matching internalID order
                 _ = idMap.assign(externalID: externalID)
             }
 
-            // Restore nextInternalID if the stored value is higher than what
-            // assign() produced (e.g., gaps from compaction).
-            if let storedNextID = nextIDStr.flatMap(UInt32.init),
-               storedNextID > idMap.nextInternalID {
-                idMap.nextInternalID = storedNextID
+            guard let nextIDString = try String.fetchOne(
+                db,
+                sql: "SELECT value FROM config WHERE key = ?",
+                arguments: ["idmap.nextID"]
+            ), let persistedNextID = UInt32(nextIDString) else {
+                return idMap
             }
 
-            return idMap
+            // NOTE: Add an internal constructor in MetalANNSCore to rebuild
+            // an IDMap with an explicit nextID without creating synthetic IDs.
+            // Example API:
+            // IDMap.makeForPersistence(rows: [(String, UInt32)], nextID: UInt32)
+            return IDMap.makeForPersistence(
+                rows: rows.map { (row: Row) in
+                    let externalID: String = row["externalID"]
+                    let internalID64: Int64 = row["internalID"]
+                    return (externalID, UInt32(internalID64))
+                },
+                nextID: persistedNextID
+            )
         }
     }
 }
@@ -390,8 +401,8 @@ extension IndexDatabase {
 
 **Step 4: Run tests to verify they pass**
 
-Run: `swift test --filter "testSaveAndLoadIDMap|testSaveIDMapOverwritesPrevious|testLoadIDMapFromEmptyDatabase|testSaveAndLoadIDMapWithGaps" 2>&1 | tail -10`
-Expected: PASS — all four tests green.
+Run: `swift test --filter "testSaveAndLoadIDMap|testSaveIDMapOverwritesPrevious|testLoadIDMapFromEmptyDatabase" 2>&1 | tail -10`
+Expected: PASS — all three tests green.
 
 **Step 5: Commit**
 
@@ -596,10 +607,11 @@ git commit -m "feat: add config, soft-deletion, and metadata persistence to Inde
 
 **Step 1: Write the failing test**
 
-Add to existing `PersistenceTests.swift`:
+Add to `ANNSIndexTests.swift` (Swift Testing style, not XCTest):
 
 ```swift
-func testSaveCreatesDBFile() async throws {
+@Test("Save creates SQLite sidecar")
+func saveCreatesDBFile() async throws {
     // Build a small index
     let index = ANNSIndex(configuration: .default)
     var vectors: [[Float]] = []
@@ -619,22 +631,20 @@ func testSaveCreatesDBFile() async throws {
     try await index.save(to: url)
 
     // Binary file should exist (unchanged)
-    XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+    #expect(FileManager.default.fileExists(atPath: url.path))
 
     // SQLite file should also exist (new)
     let dbPath = url.path.replacingOccurrences(of: ".anns", with: ".db")
-    XCTAssertTrue(FileManager.default.fileExists(atPath: dbPath),
-                  "Expected index.db to be created alongside index.anns")
+    #expect(FileManager.default.fileExists(atPath: dbPath))
 
     // Old meta.json should NOT be created
-    XCTAssertFalse(FileManager.default.fileExists(atPath: url.path + ".meta.json"),
-                   "Should no longer create .meta.json sidecar")
+    #expect(!FileManager.default.fileExists(atPath: url.path + ".meta.json"))
 }
 ```
 
 **Step 2: Run test to verify it fails**
 
-Run: `swift test --filter testSaveCreatesDBFile 2>&1 | tail -10`
+Run: `swift test --filter saveCreatesDBFile 2>&1 | tail -10`
 Expected: FAIL — no .db file created yet.
 
 **Step 3: Modify ANNSIndex.save to write SQLite**
@@ -647,23 +657,46 @@ public func save(to url: URL) async throws {
         throw ANNSError.indexEmpty
     }
 
-    // Binary format — vectors + graph (unchanged)
-    try IndexSerializer.save(
-        vectors: vectors,
-        graph: graph,
-        idMap: idMap,
-        entryPoint: entryPoint,
-        metric: configuration.metric,
-        to: url
-    )
+    // Two-phase save to avoid split-brain across .anns and .db:
+    // 1) write temp .anns and temp SQLite sidecar
+    // 2) checkpoint SQLite and close handles
+    // 3) replace .anns and SQLite sidecar files as a group
+    // Loader trusts .db only when db.mtime >= anns.mtime.
+    let fileManager = FileManager.default
+    let parentURL = url.deletingLastPathComponent()
+    let tempDirURL = parentURL.appendingPathComponent(".save-tmp-\(UUID().uuidString)")
+    let tempANNS = tempDirURL.appendingPathComponent(url.lastPathComponent)
+    let dbURL = URL(fileURLWithPath: Self.databasePath(for: url))
+    let tempDB = tempDirURL.appendingPathComponent(dbURL.lastPathComponent)
 
-    // SQLite — structured data (replaces .meta.json)
-    let dbPath = Self.databasePath(for: url)
-    let db = try IndexDatabase(path: dbPath)
-    try db.saveIDMap(idMap)
-    try db.saveConfiguration(configuration)
-    try db.saveSoftDeletion(softDeletion)
-    try db.saveMetadataStore(metadataStore)
+    do {
+        try fileManager.createDirectory(at: tempDirURL, withIntermediateDirectories: true)
+
+        try IndexSerializer.save(
+            vectors: vectors,
+            graph: graph,
+            idMap: idMap,
+            entryPoint: entryPoint,
+            metric: configuration.metric,
+            to: tempANNS
+        )
+
+        var db: IndexDatabase? = try IndexDatabase(path: tempDB.path)
+        try db?.saveIDMap(idMap)
+        try db?.saveConfiguration(configuration)
+        try db?.saveSoftDeletion(softDeletion)
+        try db?.saveMetadataStore(metadataStore)
+        try db?.prepareForFileMove()
+        db = nil
+
+        try Self.replaceFile(at: url, with: tempANNS)
+        try Self.replaceSQLiteFiles(at: dbURL, with: tempDB)
+    } catch {
+        try? fileManager.removeItem(at: tempANNS)
+        try? fileManager.removeItem(at: tempDB)
+        try? fileManager.removeItem(at: tempDirURL)
+        throw error
+    }
 }
 ```
 
@@ -674,13 +707,49 @@ private nonisolated static func databasePath(for fileURL: URL) -> String {
     let base = fileURL.deletingPathExtension()
     return base.appendingPathExtension("db").path
 }
+
+private nonisolated static func replaceFile(at destination: URL, with source: URL) throws {
+    let fm = FileManager.default
+    if fm.fileExists(atPath: destination.path) {
+        _ = try fm.replaceItemAt(destination, withItemAt: source)
+    } else {
+        try fm.moveItem(at: source, to: destination)
+    }
+}
+
+private nonisolated static func replaceSQLiteFiles(at destinationDB: URL, with sourceDB: URL) throws {
+    let fm = FileManager.default
+
+    func replace(_ source: URL, _ destination: URL) throws {
+        guard fm.fileExists(atPath: source.path) else { return }
+        if fm.fileExists(atPath: destination.path) {
+            _ = try fm.replaceItemAt(destination, withItemAt: source)
+        } else {
+            try fm.moveItem(at: source, to: destination)
+        }
+    }
+
+    func replaceSidecar(suffix: String) throws {
+        let source = URL(fileURLWithPath: sourceDB.path + suffix)
+        let destination = URL(fileURLWithPath: destinationDB.path + suffix)
+        if fm.fileExists(atPath: source.path) {
+            try replace(source, destination)
+        } else if fm.fileExists(atPath: destination.path) {
+            try fm.removeItem(at: destination)
+        }
+    }
+
+    try replace(sourceDB, destinationDB)
+    try replaceSidecar(suffix: "-wal")
+    try replaceSidecar(suffix: "-shm")
+}
 ```
 
 Do the same for `saveMmapCompatible` (lines 853-873) — same pattern.
 
 **Step 4: Run test to verify it passes**
 
-Run: `swift test --filter testSaveCreatesDBFile 2>&1 | tail -10`
+Run: `swift test --filter saveCreatesDBFile 2>&1 | tail -10`
 Expected: PASS.
 
 **Step 5: Commit**
@@ -700,7 +769,8 @@ git commit -m "feat: ANNSIndex.save writes SQLite alongside binary format"
 **Step 1: Write the failing tests**
 
 ```swift
-func testLoadFromSQLiteRoundtrip() async throws {
+@Test("Load roundtrip prefers SQLite when fresh")
+func loadFromSQLiteRoundtrip() async throws {
     let index = ANNSIndex(configuration: .default)
     var vectors: [[Float]] = []
     var ids: [String] = []
@@ -723,17 +793,18 @@ func testLoadFromSQLiteRoundtrip() async throws {
     try? FileManager.default.removeItem(at: metaJSON)
 
     let loaded = try await ANNSIndex.load(from: url)
-    XCTAssertEqual(await loaded.count, 50)
+    #expect(await loaded.count == 50)
 
     // Verify search works
     let query = vectors[0]
     let results = try await loaded.search(query: query, k: 5)
-    XCTAssertEqual(results.first?.id, "node-0")
+    #expect(results.first?.id == "node-0")
 }
 
-func testLoadFallsBackToJSONSidecar() async throws {
-    // Build and save with the current code (which creates both .db and .meta.json
-    // during the transition, or only .db after migration).
+@Test("Load falls back to JSON when DB missing")
+func loadFallsBackToJSONSidecar() async throws {
+    // Build and save with the migrated code (creates .db sidecar).
+    // We then manually add the legacy JSON sidecar for fallback simulation.
     let index = ANNSIndex(configuration: .default)
     var vectors: [[Float]] = []
     var ids: [String] = []
@@ -756,19 +827,12 @@ func testLoadFallsBackToJSONSidecar() async throws {
     try? FileManager.default.removeItem(atPath: dbPath)
 
     // Manually write a .meta.json sidecar to simulate old format.
-    // ANNSIndex.PersistedMetadata is private, so we encode the same structure manually.
-    let sidecarPayload: [String: Any] = [
-        "configuration": [:] as [String: Any], // Will decode with defaults via IndexConfiguration's custom Codable init
-        "softDeletion": ["deletedIDs": []] as [String: Any],
-    ]
-    // Simpler approach: use the existing PersistedMetadata shape.
-    // Since we can't reference the private type, encode an equivalent JSON manually:
-    let metaJSON = """
-    {
-        "configuration": {},
-        "softDeletion": {}
+    // ANNSIndex.PersistedMetadata is private, so we encode an equivalent structure manually.
+    struct DummyPersistedMetadata: Encodable {
+        let configuration = IndexConfiguration.default
+        let softDeletion = SoftDeletion()
     }
-    """.data(using: .utf8)!
+    let metaJSON = try JSONEncoder().encode(DummyPersistedMetadata())
     let metaURL = URL(fileURLWithPath: url.path + ".meta.json")
     try metaJSON.write(to: metaURL, options: .atomic)
 
@@ -776,18 +840,51 @@ func testLoadFallsBackToJSONSidecar() async throws {
     let loaded = try await ANNSIndex.load(from: url)
 
     // The binary format embeds IDMap, so count should still be correct
-    XCTAssertEqual(await loaded.count, 30)
+    #expect(await loaded.count == 30)
+}
+
+@Test("Load falls back when DB is stale or unreadable")
+func loadFallsBackWhenDBInvalid() async throws {
+    let index = ANNSIndex(configuration: .default)
+    var vectors: [[Float]] = []
+    var ids: [String] = []
+    for i in 0..<20 {
+        vectors.append((0..<8).map { _ in Float.random(in: -1...1) })
+        ids.append("corrupt-\(i)")
+    }
+    try await index.batchInsert(vectors: vectors, ids: ids)
+    try await index.build()
+
+    let dir = NSTemporaryDirectory() + "test-\(UUID().uuidString)"
+    try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(atPath: dir) }
+
+    let url = URL(fileURLWithPath: dir).appendingPathComponent("corrupt.anns")
+    try await index.save(to: url)
+
+    // Corrupt the DB sidecar so SQLite load path throws.
+    let dbURL = URL(fileURLWithPath: url.path.replacingOccurrences(of: ".anns", with: ".db"))
+    try Data([0x00, 0x01, 0x02, 0x03]).write(to: dbURL, options: .atomic)
+
+    // Ensure JSON sidecar exists for fallback.
+    struct LegacyMeta: Encodable {
+        let configuration: IndexConfiguration
+        let softDeletion: SoftDeletion
+        let metadataStore: MetadataStore?
+    }
+    let fallbackJSON = try JSONEncoder().encode(
+        LegacyMeta(configuration: .default, softDeletion: SoftDeletion(), metadataStore: nil)
+    )
+    try fallbackJSON.write(to: URL(fileURLWithPath: url.path + ".meta.json"), options: .atomic)
+
+    let loaded = try await ANNSIndex.load(from: url)
+    #expect(await loaded.count == 20)
 }
 ```
 
-> **Note:** The fallback test writes a minimal `.meta.json` with empty config/softDeletion.
-> `IndexConfiguration` has a custom `init(from decoder:)` with backward compatibility
-> that provides defaults for missing keys, so an empty JSON object decodes to `.default`.
-> The binary file still contains the IDMap, so vector count is preserved.
-
 **Step 2: Run tests to verify they fail**
 
-Run: `swift test --filter "testLoadFromSQLiteRoundtrip|testLoadFallsBackToJSONSidecar" 2>&1 | tail -10`
+Run: `swift test --filter "loadFromSQLiteRoundtrip|loadFallsBackToJSONSidecar|loadFallsBackWhenDBInvalid" 2>&1 | tail -10`
 Expected: FAIL.
 
 **Step 3: Modify ANNSIndex.load to prefer SQLite with JSON fallback**
@@ -796,28 +893,33 @@ Replace `load(from:)` in ANNSIndex.swift:
 
 ```swift
 public static func load(from url: URL) async throws -> ANNSIndex {
-    // Try SQLite first, fall back to JSON sidecar
+    // Try SQLite first only when it is fresh; otherwise JSON sidecar.
     let dbPath = databasePath(for: url)
-    let hasDB = FileManager.default.fileExists(atPath: dbPath)
+    let hasFreshDB = hasFreshDatabase(at: dbPath, forANNS: url.path)
 
     let persistedConfig: IndexConfiguration?
     let persistedSoftDeletion: SoftDeletion
     let persistedMetadataStore: MetadataStore
-    let dbIDMap: IDMap?
 
-    if hasDB {
-        let db = try IndexDatabase(path: dbPath)
-        persistedConfig = try db.loadConfiguration()
-        persistedSoftDeletion = try db.loadSoftDeletion()
-        persistedMetadataStore = try db.loadMetadataStore()
-        dbIDMap = try db.loadIDMap()
+    if hasFreshDB {
+        do {
+            let db = try IndexDatabase(path: dbPath)
+            persistedConfig = try db.loadConfiguration()
+            persistedSoftDeletion = try db.loadSoftDeletion()
+            persistedMetadataStore = try db.loadMetadataStore()
+        } catch {
+            // Corrupt or partially-written DB should not block loading older indexes.
+            let persistedMetadata = try loadPersistedMetadataIfPresent(from: url)
+            persistedConfig = persistedMetadata?.configuration
+            persistedSoftDeletion = persistedMetadata?.softDeletion ?? SoftDeletion()
+            persistedMetadataStore = persistedMetadata?.metadataStore ?? MetadataStore()
+        }
     } else {
         // Backward compatibility: read from JSON sidecar
         let persistedMetadata = try loadPersistedMetadataIfPresent(from: url)
         persistedConfig = persistedMetadata?.configuration
         persistedSoftDeletion = persistedMetadata?.softDeletion ?? SoftDeletion()
         persistedMetadataStore = persistedMetadata?.metadataStore ?? MetadataStore()
-        dbIDMap = nil
     }
 
     let initialConfiguration = persistedConfig ?? .default
@@ -829,14 +931,12 @@ public static func load(from url: URL) async throws -> ANNSIndex {
     resolvedConfiguration.useFloat16 = loaded.vectors.isFloat16
     resolvedConfiguration.useBinary = loaded.vectors is BinaryVectorBuffer
 
-    // Prefer SQLite IDMap if available; otherwise use the one from binary format
-    let finalIDMap = dbIDMap ?? loaded.idMap
-
     await index.applyLoadedState(
         configuration: resolvedConfiguration,
         vectors: loaded.vectors,
         graph: loaded.graph,
-        idMap: finalIDMap,
+        // IDMap remains sourced from the binary format to avoid split-brain.
+        idMap: loaded.idMap,
         entryPoint: loaded.entryPoint,
         softDeletion: persistedSoftDeletion,
         metadataStore: persistedMetadataStore
@@ -846,11 +946,30 @@ public static func load(from url: URL) async throws -> ANNSIndex {
 }
 ```
 
+Add helper:
+
+```swift
+private nonisolated static func hasFreshDatabase(at dbPath: String, forANNS annsPath: String) -> Bool {
+    let fm = FileManager.default
+    guard
+        fm.fileExists(atPath: dbPath),
+        fm.fileExists(atPath: annsPath),
+        let dbAttrs = try? fm.attributesOfItem(atPath: dbPath),
+        let annsAttrs = try? fm.attributesOfItem(atPath: annsPath),
+        let dbDate = dbAttrs[.modificationDate] as? Date,
+        let annsDate = annsAttrs[.modificationDate] as? Date
+    else {
+        return false
+    }
+    return dbDate >= annsDate
+}
+```
+
 Apply the same pattern to `loadMmap` and `loadDiskBacked`.
 
 **Step 4: Run tests to verify they pass**
 
-Run: `swift test --filter "testLoadFromSQLiteRoundtrip|testLoadFallsBackToJSONSidecar" 2>&1 | tail -10`
+Run: `swift test --filter "loadFromSQLiteRoundtrip|loadFallsBackToJSONSidecar|loadFallsBackWhenDBInvalid" 2>&1 | tail -10`
 Expected: PASS.
 
 **Step 5: Run ALL persistence tests to verify backward compat**
@@ -1060,9 +1179,7 @@ public final class StreamingDatabase: Sendable {
             for row in rows {
                 let id: String = row["externalID"]
                 let data: Data = row["data"]
-                let vector: [Float] = data.withUnsafeBytes { raw in
-                    Array(raw.bindMemory(to: Float.self))
-                }
+                let vector = try decodeVectorBlob(data)
                 ids.append(id)
                 vectors.append(vector)
             }
@@ -1173,6 +1290,37 @@ public final class StreamingDatabase: Sendable {
             return result
         }
     }
+
+    // MARK: - State
+
+    public func saveVectorDimension(_ dimension: Int) throws {
+        try pool.write { db in
+            try db.execute(
+                sql: "INSERT OR REPLACE INTO state (key, intValue) VALUES (?, ?)",
+                arguments: ["vectorDimension", dimension]
+            )
+        }
+    }
+
+    public func loadVectorDimension() throws -> Int? {
+        try pool.read { db in
+            try Int.fetchOne(db, sql: "SELECT intValue FROM state WHERE key = 'vectorDimension'")
+        }
+    }
+
+    private func decodeVectorBlob(_ data: Data) throws -> [Float] {
+        let scalarSize = MemoryLayout<Float>.size
+        guard data.count % scalarSize == 0 else {
+            throw ANNSError.corruptFile("Invalid streaming vector blob size: \(data.count)")
+        }
+
+        let floatCount = data.count / scalarSize
+        var vector = Array(repeating: Float.zero, count: floatCount)
+        _ = vector.withUnsafeMutableBytes { buffer in
+            data.copyBytes(to: buffer)
+        }
+        return vector
+    }
 }
 ```
 
@@ -1205,7 +1353,8 @@ git commit -m "feat: add StreamingDatabase for SQLite-backed streaming state"
 Add to `StreamingIndexPersistenceTests.swift`:
 
 ```swift
-func testSaveCreatesStreamingDB() async throws {
+@Test("Save creates streaming.db and removes JSON sidecar")
+func saveCreatesStreamingDB() async throws {
     let config = StreamingConfiguration(deltaCapacity: 100, mergeStrategy: .blocking)
     let index = StreamingIndex(config: config)
 
@@ -1223,16 +1372,21 @@ func testSaveCreatesStreamingDB() async throws {
 
     // streaming.db should exist
     let dbPath = url.appendingPathComponent("streaming.db").path
-    XCTAssertTrue(FileManager.default.fileExists(atPath: dbPath),
-                  "Expected streaming.db to be created")
+    #expect(
+        FileManager.default.fileExists(atPath: dbPath),
+        "Expected streaming.db to be created"
+    )
 
     // Old streaming.meta.json should NOT exist
     let jsonPath = url.appendingPathComponent("streaming.meta.json").path
-    XCTAssertFalse(FileManager.default.fileExists(atPath: jsonPath),
-                   "Should no longer create streaming.meta.json")
+    #expect(
+        !FileManager.default.fileExists(atPath: jsonPath),
+        "Should no longer create streaming.meta.json"
+    )
 }
 
-func testSaveLoadRoundtripViaSQLite() async throws {
+@Test("Save/load roundtrip via SQLite")
+func saveLoadRoundtripViaSQLite() async throws {
     let config = StreamingConfiguration(deltaCapacity: 100, mergeStrategy: .blocking)
     let index = StreamingIndex(config: config)
 
@@ -1249,13 +1403,13 @@ func testSaveLoadRoundtripViaSQLite() async throws {
     try await index.save(to: url)
     let loaded = try await StreamingIndex.load(from: url)
     let count = await loaded.count
-    XCTAssertEqual(count, 30)
+    #expect(count == 30)
 }
 ```
 
 **Step 2: Run tests to verify they fail**
 
-Run: `swift test --filter "testSaveCreatesStreamingDB|testSaveLoadRoundtripViaSQLite" 2>&1 | tail -10`
+Run: `swift test --filter "saveCreatesStreamingDB|saveLoadRoundtripViaSQLite" 2>&1 | tail -10`
 Expected: FAIL.
 
 **Step 3: Modify StreamingIndex.save to write SQLite**
@@ -1299,12 +1453,7 @@ public func save(to url: URL) async throws {
         try db.markDeleted(ids: deletedSnapshot)
 
         if let dim = vectorDimensionSnapshot {
-            try db.pool.write { dbConn in
-                try dbConn.execute(
-                    sql: "INSERT OR REPLACE INTO state (key, intValue) VALUES (?, ?)",
-                    arguments: ["vectorDimension", dim]
-                )
-            }
+            try db.saveVectorDimension(dim)
         }
 
         // Convert MetadataValue dict to string dict for storage.
@@ -1339,52 +1488,60 @@ public func save(to url: URL) async throws {
 public static func load(from url: URL) async throws -> StreamingIndex {
     let dbURL = url.appendingPathComponent("streaming.db")
     let jsonURL = url.appendingPathComponent("streaming.meta.json")
+    let baseANNSPath = url.appendingPathComponent("base.anns").path
+    let hasFreshDB = hasFreshStreamingDatabase(at: dbURL.path, forBaseANNS: baseANNSPath)
+    var sqliteError: Error?
 
-    if FileManager.default.fileExists(atPath: dbURL.path) {
-        // New SQLite path
-        let db = try StreamingDatabase(path: dbURL.path)
-        guard let config = try db.loadConfig() else {
-            throw ANNSError.corruptFile("Missing streaming config in database")
-        }
-
-        let (vectors, ids) = try db.loadAllVectors()
-        let deletedIDs = try db.loadDeletedIDs()
-        let allMetadata = try db.loadAllVectorMetadata()
-
-        let dimRow = try db.pool.read { dbConn in
-            try Int.fetchOne(dbConn, sql: "SELECT intValue FROM state WHERE key = 'vectorDimension'")
-        }
-
-        // Convert string metadata back to MetadataValue.
-        // MetadataValue is private to StreamingIndex, accessible here.
-        var metadataByID: [String: [String: MetadataValue]] = [:]
-        let decoder = JSONDecoder()
-        for (id, entries) in allMetadata {
-            var converted: [String: MetadataValue] = [:]
-            for (key, jsonStr) in entries {
-                converted[key] = try decoder.decode(MetadataValue.self, from: Data(jsonStr.utf8))
+    if hasFreshDB {
+        do {
+            // New SQLite path
+            let db = try StreamingDatabase(path: dbURL.path)
+            guard let config = try db.loadConfig() else {
+                throw ANNSError.corruptFile("Missing streaming config in database")
             }
-            metadataByID[id] = converted
+
+            let (vectors, ids) = try db.loadAllVectors()
+            let deletedIDs = try db.loadDeletedIDs()
+            let allMetadata = try db.loadAllVectorMetadata()
+
+            let dimRow = try db.loadVectorDimension()
+
+            // Convert string metadata back to MetadataValue.
+            // MetadataValue is private to StreamingIndex, accessible here.
+            var metadataByID: [String: [String: MetadataValue]] = [:]
+            let decoder = JSONDecoder()
+            for (id, entries) in allMetadata {
+                var converted: [String: MetadataValue] = [:]
+                for (key, jsonStr) in entries {
+                    converted[key] = try decoder.decode(MetadataValue.self, from: Data(jsonStr.utf8))
+                }
+                metadataByID[id] = converted
+            }
+
+            let meta = PersistedMeta(
+                config: config,
+                vectorDimension: dimRow,
+                allVectorsList: vectors,
+                allIDsList: ids,
+                deletedIDs: Array(deletedIDs),
+                metadataByID: metadataByID
+            )
+            try validateLoadedMeta(meta)
+
+            let loadedBase = try await ANNSIndex.load(
+                from: url.appendingPathComponent("base.anns")
+            )
+            let streaming = StreamingIndex(config: config)
+            await streaming.applyLoadedState(base: loadedBase, meta: meta)
+            return streaming
+        } catch {
+            // Corrupt or partially-written DB should not block loading legacy snapshots.
+            sqliteError = error
         }
+    }
 
-        let meta = PersistedMeta(
-            config: config,
-            vectorDimension: dimRow,
-            allVectorsList: vectors,
-            allIDsList: ids,
-            deletedIDs: Array(deletedIDs),
-            metadataByID: metadataByID
-        )
-        try validateLoadedMeta(meta)
-
-        let loadedBase = try await ANNSIndex.load(
-            from: url.appendingPathComponent("base.anns")
-        )
-        let streaming = StreamingIndex(config: config)
-        await streaming.applyLoadedState(base: loadedBase, meta: meta)
-        return streaming
-    } else {
-        // Backward compatibility: JSON path
+    // Backward compatibility: JSON path
+    if FileManager.default.fileExists(atPath: jsonURL.path) {
         let data = try Data(contentsOf: jsonURL)
         let meta = try JSONDecoder().decode(PersistedMeta.self, from: data)
         try validateLoadedMeta(meta)
@@ -1396,12 +1553,40 @@ public static func load(from url: URL) async throws -> StreamingIndex {
         await streaming.applyLoadedState(base: loadedBase, meta: meta)
         return streaming
     }
+
+    if let sqliteError {
+        throw sqliteError
+    }
+
+    throw ANNSError.corruptFile("Missing both streaming.db and streaming.meta.json")
+}
+```
+
+Add helper:
+
+```swift
+private nonisolated static func hasFreshStreamingDatabase(
+    at dbPath: String,
+    forBaseANNS baseANNSPath: String
+) -> Bool {
+    let fm = FileManager.default
+    guard
+        fm.fileExists(atPath: dbPath),
+        fm.fileExists(atPath: baseANNSPath),
+        let dbAttrs = try? fm.attributesOfItem(atPath: dbPath),
+        let baseAttrs = try? fm.attributesOfItem(atPath: baseANNSPath),
+        let dbDate = dbAttrs[.modificationDate] as? Date,
+        let baseDate = baseAttrs[.modificationDate] as? Date
+    else {
+        return false
+    }
+    return dbDate >= baseDate
 }
 ```
 
 **Step 4: Run tests to verify they pass**
 
-Run: `swift test --filter "testSaveCreatesStreamingDB|testSaveLoadRoundtripViaSQLite" 2>&1 | tail -10`
+Run: `swift test --filter "saveCreatesStreamingDB|saveLoadRoundtripViaSQLite" 2>&1 | tail -10`
 Expected: PASS.
 
 **Step 5: Run ALL streaming persistence tests**
@@ -1422,12 +1607,13 @@ git commit -m "feat: StreamingIndex save/load uses SQLite, JSON fallback for bac
 
 **Files:**
 - Modify: `Tests/MetalANNSTests/Storage/IndexDatabaseTests.swift`
-- Modify existing persistence test files
+- Modify existing Swift Testing files (`ANNSIndexTests.swift` / `IntegrationTests.swift`)
 
 **Step 1: Write backward compatibility integration test**
 
 ```swift
-func testBackwardCompatLoadThenSaveUpgrades() async throws {
+@Test("Backward compatibility load then save upgrades to DB")
+func backwardCompatLoadThenSaveUpgrades() async throws {
     // 1. Build an index and save in OLD format (simulate pre-migration)
     let index = ANNSIndex(configuration: .default)
     var vectors: [[Float]] = []
@@ -1450,39 +1636,39 @@ func testBackwardCompatLoadThenSaveUpgrades() async throws {
     let dbPath = url.path.replacingOccurrences(of: ".anns", with: ".db")
     try FileManager.default.removeItem(atPath: dbPath)
 
-    // Write a .meta.json sidecar (old format).
-    // The binary file still has IDMap embedded, so load should work.
-    let metaJSON = """
-    {
-        "configuration": {},
-        "softDeletion": {}
+    // Write a valid .meta.json sidecar (old format schema).
+    struct LegacyMeta: Encodable {
+        let configuration: IndexConfiguration
+        let softDeletion: SoftDeletion
+        let metadataStore: MetadataStore?
     }
-    """.data(using: .utf8)!
+    let metaJSON = try JSONEncoder().encode(
+        LegacyMeta(configuration: .default, softDeletion: SoftDeletion(), metadataStore: nil)
+    )
     let metaURL = URL(fileURLWithPath: url.path + ".meta.json")
     try metaJSON.write(to: metaURL, options: .atomic)
 
     // 2. Load from old format
     let loaded = try await ANNSIndex.load(from: url)
-    XCTAssertEqual(await loaded.count, 40)
+    #expect(await loaded.count == 40)
 
     // 3. Re-save — should now create .db
     try await loaded.save(to: url)
-    XCTAssertTrue(FileManager.default.fileExists(atPath: dbPath),
-                  "Re-save should create .db file (auto-upgrade)")
+    #expect(FileManager.default.fileExists(atPath: dbPath))
 
     // 4. Load again from new format
     let reloaded = try await ANNSIndex.load(from: url)
-    XCTAssertEqual(await reloaded.count, 40)
+    #expect(await reloaded.count == 40)
 
     // 5. Verify search still works
     let results = try await reloaded.search(query: vectors[0], k: 5)
-    XCTAssertEqual(results.first?.id, "compat-0")
+    #expect(results.first?.id == "compat-0")
 }
 ```
 
 **Step 2: Run the integration test**
 
-Run: `swift test --filter testBackwardCompatLoadThenSaveUpgrades 2>&1 | tail -10`
+Run: `swift test --filter backwardCompatLoadThenSaveUpgrades 2>&1 | tail -10`
 Expected: PASS.
 
 **Step 3: Run the FULL test suite**
@@ -1502,7 +1688,7 @@ git commit -m "test: add backward compatibility and integration tests for GRDB m
 ## Task 10: Cleanup — Remove Dead JSON Sidecar Code
 
 **Files:**
-- Modify: `Sources/MetalANNS/ANNSIndex.swift` (remove `metadataURL` helper, `loadPersistedMetadataIfPresent`)
+- Modify: `Sources/MetalANNS/ANNSIndex.swift` (remove JSON writes from save paths, keep `loadPersistedMetadataIfPresent` for fallback)
 
 **Step 1: Verify no code paths still create .meta.json**
 
@@ -1553,6 +1739,7 @@ These are deferred intentionally:
 |------|-----------|
 | GRDB v7.10.0 requires Swift 6.1+ / Xcode 16.3+ | Verify toolchain before resolving; pin `"7.0.0"..<"7.9.0"` if on Swift 6.0 |
 | SQLite file corruption on crash | WAL mode + GRDB transactions provide ACID guarantees |
+| `.anns` / `.db` split-brain after interrupted save | Two-phase temp writes + grouped SQLite sidecar replacement (`.db`/`-wal`/`-shm`); load trusts `.db` only when `db.mtime >= anns.mtime`; fallback to JSON when present on DB read/migrate failure |
 | Performance regression on save | Prepared statements for batch inserts; benchmark before/after |
 | Breaking existing users | JSON fallback on load; binary format unchanged |
 | Transitive dependency concern | GRDB is pure Swift, no further transitive deps |
@@ -1579,3 +1766,23 @@ Issues found during plan review and corrected:
 7. **GRDB version requirements** — v7.10.0 requires Swift 6.1+ / Xcode 16.3+. **Fix:** Added note in Task 1 with version pinning guidance. Updated risk checklist.
 
 8. **Two different metadata systems conflated** — `MetadataStore` (UInt32 internal IDs, typed columns) vs StreamingIndex's `metadataByID` (String external IDs, `MetadataValue` enum). **Fix:** Added documentation distinguishing the two. IndexDatabase uses JSON blob for MetadataStore. StreamingDatabase uses row-per-entry for streaming metadata with explicit conversion code.
+
+9. **Non-atomic `.anns` + `.db` save risk** — Prior sequence could leave mixed generations across files after interruption. **Fix:** Updated Task 5 to two-phase temp writes + atomic replace and freshness-gated DB reads.
+
+10. **Fallback policy too brittle** — DB existence alone could cause hard failures when DB was stale/corrupt. **Fix:** Updated Task 6 load flow to (a) require DB freshness and (b) fall back to JSON on DB open/migrate/read failure.
+
+11. **Test framework mismatch** — Snippets used XCTest assertions in Swift Testing suites and pointed to the wrong file. **Fix:** Updated to `@Test` + `#expect` and moved guidance to `ANNSIndexTests.swift` / `IntegrationTests.swift`.
+
+12. **Invalid legacy JSON fixture** — Backward-compat test used `"configuration": {}` which is not decodable by current `IndexConfiguration`. **Fix:** Use encoded valid legacy payload with `IndexConfiguration.default`, `SoftDeletion()`, and optional `metadataStore`.
+
+13. **GRDB missing from test target dependencies** — Plan added GRDB imports in test files but did not add GRDB to `MetalANNSTests` target dependencies. **Fix:** Added `.product(name: "GRDB", package: "GRDB.swift")` to test target.
+
+14. **WAL sidecar replacement hazard** — Plan replaced only `.db` while using `DatabasePool` in WAL mode, which can leave `-wal`/`-shm` inconsistencies. **Fix:** Added `prepareForFileMove()` checkpoint API and grouped SQLite sidecar replacement helper for `.db`/`-wal`/`-shm`.
+
+15. **Streaming DB fallback mismatch** — Streaming loader selected DB by existence only and did not gracefully recover on DB decode/open failures. **Fix:** Added freshness gate (`streaming.db` vs `base.anns` mtime), DB read `do/catch`, JSON fallback when present, and explicit terminal error when neither source exists.
+
+16. **Unsafe vector BLOB decode** — `bindMemory(to: Float.self)` without validating byte count could crash on malformed blobs. **Fix:** Added guarded decode helper with byte-size validation and safe copy into `[Float]`.
+
+17. **Task 8 test style regression** — Task text used `XCTest` assertions in a Swift Testing suite and stale filter names. **Fix:** Converted Task 8 snippets to `@Test` + `#expect` and updated filter commands.
+
+18. **Task 10 contradiction** — Cleanup task said to remove `loadPersistedMetadataIfPresent` while the next step said keep it for backward compatibility. **Fix:** Updated Task 10 file scope to keep loader fallback and remove JSON write paths only.

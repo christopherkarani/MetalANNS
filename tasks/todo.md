@@ -1,3 +1,59 @@
+## MetalANNS — Remediation: `docs/code-audit-report.md`
+
+> **Status**: COMPLETE
+> **Owner**: Codex
+> **Last Updated**: 2026-02-28
+
+## Task Checklist
+
+- [x] Batch 1 — Remove host-side vector materialization in `ANNSIndex` CPU/HNSW search fallback paths (consume `VectorStorage` directly).
+- [x] Batch 1 — Replace `StreamingIndex` persistent corpus `[[Float]]` with compact contiguous storage representation.
+- [x] Batch 1 verify — Run targeted tests: `ANNSIndexTests`, `SearchTests`, `StreamingIndex*`.
+- [x] Batch 2 — Overhaul `FullGPUSearch` visited tracking to remove 4096-node threadgroup visited cap.
+- [x] Batch 2 — Parallelize beam expansion over multiple frontier candidates per iteration in `Search.metal` and `SearchFloat16.metal`.
+- [x] Batch 2 verify — Run targeted tests: `FullGPUSearchTests`, `MetalSearchTests`.
+- [x] Batch 3 — Replace `HNSWBuilder` skip-layer all-pairs `O(N^2)` candidate generation with base-graph-guided candidate expansion.
+- [x] Batch 3 — Refactor `NNDescentCPU` to use `SIMDDistance` and avoid redundant per-insertion sorting.
+- [x] Batch 3 verify — Run targeted tests: `HNSWTests`, `NNDescentCPUTests`.
+- [x] Batch 4 — Surface GPU construction constraints (`degree <= 64`, power-of-two) at config/build validation layer with clear API docs.
+- [x] Batch 4 — Fix `local_join` ID/distance update consistency so slots are not observed with mismatched tuple states.
+- [x] Batch 4 verify — Run targeted tests: `ConfigurationTests`, `NNDescentGPUTests`, `BitonicSortTests`.
+- [x] Batch 5 — Execute GRDB migration for structured persistence (ID map + metadata + streaming state), with backward-compatible load fallback.
+- [x] Batch 5 verify — Run targeted tests: `PersistenceTests`, `StreamingIndexPersistenceTests`, `MetadataTests`.
+- [x] Final verify — Run full `swift test`, record residual environment-only failures, and update review results below.
+
+## Review Results
+
+- Batch 1 completed:
+  - `BeamSearchCPU` and `HNSWSearchCPU` now support `VectorStorage` directly, and `ANNSIndex` CPU/HNSW paths no longer snapshot all vectors for fallback search.
+  - `StreamingIndex` persistent corpus representation moved from `[[Float]]` to compact flat storage (`allVectorData` + `vectorDimension`), with legacy decode support.
+- Batch 1 verification:
+  - Targeted suites passed (`ANNSIndexTests`, `SearchTests`, `StreamingIndex*`).
+- Batch 2 completed:
+  - Reworked `Search.metal` / `SearchFloat16.metal` to use global visited-generation tracking and multi-candidate frontier expansion per iteration.
+  - Updated `FullGPUSearch` host integration to allocate and pass global visited state buffers.
+- Batch 2 verification:
+  - GPU-focused suites executed; failures are environment-bound Metal default-library load errors (`MTLLibraryErrorDomain Code=6`).
+- Batch 3 completed:
+  - `HNSWBuilder` skip-layer candidate selection now uses bounded base-graph-guided expansion instead of all-pairs scans.
+  - `NNDescentCPU` now uses `SIMDDistance` and defers sorting to finalization instead of sorting on every insertion.
+- Batch 3 verification:
+  - Targeted suites passed (`HNSWTests`, `NNDescentCPUTests`).
+- Batch 4 completed:
+  - Added API-level GPU degree compatibility surfacing in `IndexConfiguration` plus build-time validation in `ANNSIndex`.
+  - `local_join` kernels now use slot-lock update protocol so neighbor ID/distance updates are tuple-consistent.
+- Batch 4 verification:
+  - `ConfigurationTests` passed.
+  - GPU suites fail in this environment due missing default Metal shader library (`MTLLibraryErrorDomain Code=6`).
+- Batch 5 completed:
+  - Added SQLite-backed structured persistence store for index/streaming metadata, including ID map persistence and load fallback precedence.
+  - Added compatibility tests that remove JSON sidecars and load from SQLite metadata.
+- Batch 5 verification:
+  - Persistence-focused suites passed (`PersistenceTests`, `StreamingIndexPersistenceTests`, `DiskBackedTests`, `ANNSIndexTests`, `BinaryQuantizationTests`).
+- Final verification:
+  - `swift test` summary: **211 tests, 197 passed, 14 failed**.
+  - All 14 failures are environment-only Metal shader library load failures (`MTLLibraryErrorDomain Code=6: no default library was found`).
+
 ## MetalANNS — P1 Fix: Restore Pairwise GPU local_join Updates
 
 > **Status**: IMPLEMENTED (VALIDATION PARTIAL: GPU suites blocked by Metal default-library environment issue)

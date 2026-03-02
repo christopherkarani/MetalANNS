@@ -3,7 +3,6 @@ import Metal
 
 public enum FullGPUSearch {
     private static let maxEF = 256
-    private static let maxVisited = 4096
 
     public static func search(
         context: MetalContext,
@@ -40,11 +39,6 @@ public enum FullGPUSearch {
         guard entryPoint >= 0, entryPoint < nodeCount else {
             throw ANNSError.searchFailed("Entry point is out of bounds")
         }
-        guard nodeCount <= maxVisited else {
-            throw ANNSError.searchFailed(
-                "nodeCount exceeds FullGPUSearch visited-table capacity (\(maxVisited)); use CPU/hybrid search"
-            )
-        }
 
         let kLimit = min(k, nodeCount)
         let efLimit = min(max(ef, kLimit), nodeCount)
@@ -54,6 +48,7 @@ public enum FullGPUSearch {
 
         let floatSize = MemoryLayout<Float>.stride
         let uintSize = MemoryLayout<UInt32>.stride
+        let visitedLength = max(nodeCount * uintSize, uintSize)
 
         guard
             let queryBuffer = context.device.makeBuffer(
@@ -68,10 +63,18 @@ public enum FullGPUSearch {
             let outputIDBuffer = context.device.makeBuffer(
                 length: max(kLimit * uintSize, uintSize),
                 options: .storageModeShared
+            ),
+            let visitedGenerationBuffer = context.device.makeBuffer(
+                length: visitedLength,
+                options: .storageModeShared
             )
         else {
             throw ANNSError.searchFailed("Failed to allocate full GPU search buffers")
         }
+        visitedGenerationBuffer.contents().bindMemory(to: UInt32.self, capacity: max(nodeCount, 1)).initialize(
+            repeating: 0,
+            count: max(nodeCount, 1)
+        )
 
         var nodeCountValue = UInt32(nodeCount)
         var degreeValue = UInt32(graph.degree)
@@ -79,6 +82,7 @@ public enum FullGPUSearch {
         var kValue = UInt32(kLimit)
         var efValue = UInt32(efLimit)
         var entryPointValue = UInt32(entryPoint)
+        var visitGenerationValue: UInt32 = 1
         guard metric != .hamming else {
             throw ANNSError.searchFailed("FullGPUSearch does not support metric .hamming")
         }
@@ -111,13 +115,10 @@ public enum FullGPUSearch {
             encoder.setBytes(&efValue, length: uintSize, index: 9)
             encoder.setBytes(&entryPointValue, length: uintSize, index: 10)
             encoder.setBytes(&metricType, length: uintSize, index: 11)
+            encoder.setBuffer(visitedGenerationBuffer, offset: 0, index: 12)
+            encoder.setBytes(&visitGenerationValue, length: uintSize, index: 13)
 
-            guard graph.degree <= pipeline.maxTotalThreadsPerThreadgroup else {
-                throw ANNSError.searchFailed(
-                    "Graph degree \(graph.degree) exceeds kernel threadgroup capacity \(pipeline.maxTotalThreadsPerThreadgroup)"
-                )
-            }
-            let threadWidth = max(1, graph.degree)
+            let threadWidth = max(1, min(pipeline.maxTotalThreadsPerThreadgroup, max(32, min(efLimit, 128))))
             let threadsPerThreadgroup = MTLSize(width: threadWidth, height: 1, depth: 1)
             let threadgroups = MTLSize(width: 1, height: 1, depth: 1)
             encoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)

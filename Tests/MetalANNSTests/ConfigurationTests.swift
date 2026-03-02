@@ -30,4 +30,26 @@ struct ConfigurationTests {
         #expect(error1.localizedDescription.isEmpty == false)
         _ = error2
     }
+
+    @Test("GPU construction degree constraints are surfaced in configuration")
+    func gpuDegreeConstraints() throws {
+        let valid = IndexConfiguration(degree: 32)
+        #expect(valid.isDegreeCompatibleWithGPUConstruction == true)
+        try valid.validateGPUConstructionConstraints()
+
+        let notPowerOfTwo = IndexConfiguration(degree: 48)
+        #expect(notPowerOfTwo.isDegreeCompatibleWithGPUConstruction == false)
+        do {
+            try notPowerOfTwo.validateGPUConstructionConstraints()
+            #expect(Bool(false), "Expected validation error for non-power-of-two degree")
+        } catch let error as ANNSError {
+            guard case .constructionFailed = error else {
+                #expect(Bool(false), "Expected constructionFailed, got \(error)")
+                return
+            }
+        }
+
+        let tooLarge = IndexConfiguration(degree: 128)
+        #expect(tooLarge.isDegreeCompatibleWithGPUConstruction == false)
+    }
 }

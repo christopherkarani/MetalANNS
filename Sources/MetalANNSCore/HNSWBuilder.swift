@@ -54,6 +54,7 @@ public enum HNSWBuilder {
                     at: layer,
                     nodeLevels: nodeLevels,
                     vectors: vectors,
+                    graph: graph,
                     nodeCount: nodeCount,
                     metric: metric,
                     M: config.M
@@ -85,6 +86,7 @@ public enum HNSWBuilder {
         at layer: Int,
         nodeLevels: [Int],
         vectors: any VectorStorage,
+        graph: [[(UInt32, Float)]],
         nodeCount: Int,
         metric: Metric,
         M: Int
@@ -111,13 +113,21 @@ public enum HNSWBuilder {
         }
 
         var adjacency = Array(repeating: [UInt32](), count: nodesAtLayer.count)
+        let layerNodeSet = Set(nodesAtLayer)
+        let targetCandidatePool = max(M * 8, M)
 
         for (layerIndex, nodeID) in nodesAtLayer.enumerated() {
             let sourceVector = vectors.vector(at: Int(nodeID))
+            let candidateIDs = collectCandidates(
+                for: nodeID,
+                graph: graph,
+                nodesAtLayer: nodesAtLayer,
+                layerNodeSet: layerNodeSet,
+                targetCount: targetCandidatePool
+            )
             var candidates: [(UInt32, Float)] = []
-            candidates.reserveCapacity(max(0, nodesAtLayer.count - 1))
-
-            for otherID in nodesAtLayer where otherID != nodeID {
+            candidates.reserveCapacity(candidateIDs.count)
+            for otherID in candidateIDs where otherID != nodeID {
                 let otherVector = vectors.vector(at: Int(otherID))
                 let distance = SIMDDistance.distance(sourceVector, otherVector, metric: metric)
                 candidates.append((otherID, distance))
@@ -133,5 +143,72 @@ public enum HNSWBuilder {
             layerIndexToNode: layerIndexToNode,
             adjacency: adjacency
         )
+    }
+
+    private static func collectCandidates(
+        for nodeID: UInt32,
+        graph: [[(UInt32, Float)]],
+        nodesAtLayer: [UInt32],
+        layerNodeSet: Set<UInt32>,
+        targetCount: Int
+    ) -> [UInt32] {
+        guard !nodesAtLayer.isEmpty, targetCount > 0 else {
+            return []
+        }
+
+        var candidates = Set<UInt32>()
+        var visited = Set<UInt32>()
+        visited.insert(nodeID)
+
+        var frontier: [UInt32] = []
+        if Int(nodeID) < graph.count {
+            for (neighbor, _) in graph[Int(nodeID)] where neighbor != UInt32.max {
+                if neighbor != nodeID, layerNodeSet.contains(neighbor), visited.insert(neighbor).inserted {
+                    candidates.insert(neighbor)
+                    frontier.append(neighbor)
+                }
+            }
+        }
+
+        let maxExpandedNodes = max(targetCount * 4, targetCount + 8)
+        var frontierIndex = 0
+        while candidates.count < targetCount && frontierIndex < frontier.count && visited.count < maxExpandedNodes {
+            let current = frontier[frontierIndex]
+            frontierIndex += 1
+            guard Int(current) < graph.count else {
+                continue
+            }
+
+            for (neighbor, _) in graph[Int(current)] where neighbor != UInt32.max {
+                if neighbor == nodeID || !layerNodeSet.contains(neighbor) {
+                    continue
+                }
+                if visited.insert(neighbor).inserted {
+                    candidates.insert(neighbor)
+                    frontier.append(neighbor)
+                    if candidates.count >= targetCount || visited.count >= maxExpandedNodes {
+                        break
+                    }
+                }
+            }
+        }
+
+        if candidates.count < targetCount {
+            // Deterministic supplement to maintain connectivity without O(N^2) all-pairs scans.
+            let stride = max(1, nodesAtLayer.count / max(targetCount, 1))
+            var probe = Int((UInt64(nodeID) * 2_654_435_761) % UInt64(nodesAtLayer.count))
+            var scanned = 0
+
+            while candidates.count < targetCount && scanned < nodesAtLayer.count {
+                let candidate = nodesAtLayer[probe]
+                if candidate != nodeID {
+                    candidates.insert(candidate)
+                }
+                probe = (probe + stride) % nodesAtLayer.count
+                scanned += 1
+            }
+        }
+
+        return Array(candidates)
     }
 }

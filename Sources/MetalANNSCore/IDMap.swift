@@ -51,3 +51,19 @@ public struct IDMap: Sendable, Codable {
         externalToInternal.count
     }
 }
+
+//
+// MARK: - Persistence Reconstruction
+extension IDMap {
+    package static func makeForPersistence(rows: [(String, UInt32)], nextID: UInt32) -> IDMap {
+        var map = IDMap()
+        map.externalToInternal.removeAll()
+        map.internalToExternal.removeAll()
+        for (externalID, internalID) in rows {
+            map.externalToInternal[externalID] = internalID
+            map.internalToExternal[internalID] = externalID
+        }
+        map.nextID = nextID
+        return map
+    }
+}

@@ -1,6 +1,8 @@
 import MetalANNSCore
 
 public struct IndexConfiguration: Sendable, Codable {
+    /// Graph out-degree used by NN-Descent and search.
+    /// For GPU construction (`NNDescentGPU` + bitonic sort), this must be a power of two and `<= 64`.
     public var degree: Int
     public var metric: Metric
     public var efConstruction: Int
@@ -47,6 +49,28 @@ public struct IndexConfiguration: Sendable, Codable {
         self.convergenceThreshold = convergenceThreshold
         self.hnswConfiguration = hnswConfiguration
         self.repairConfiguration = repairConfiguration
+    }
+
+    /// Returns true when `degree` satisfies GPU NN-Descent kernel constraints.
+    public var isDegreeCompatibleWithGPUConstruction: Bool {
+        degree > 0
+            && degree <= 64
+            && (degree & (degree - 1)) == 0
+    }
+
+    /// Validates degree requirements for GPU NN-Descent construction.
+    ///
+    /// Runtime kernels still perform defensive checks; this surfaces failures at
+    /// configuration/build validation time with a clearer message.
+    public func validateGPUConstructionConstraints() throws {
+        guard degree <= 64 else {
+            throw ANNSError.constructionFailed("GPU NN-Descent requires degree <= 64, got \(degree)")
+        }
+        guard (degree & (degree - 1)) == 0 else {
+            throw ANNSError.constructionFailed(
+                "GPU NN-Descent requires degree to be a power of two for bitonic sort, got \(degree)"
+            )
+        }
     }
 
     public init(from decoder: Decoder) throws {
