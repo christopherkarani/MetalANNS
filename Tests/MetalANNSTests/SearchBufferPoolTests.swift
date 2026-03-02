@@ -77,7 +77,7 @@ struct SearchBufferPoolTests {
 
         let vectorBuffer = try VectorBuffer(capacity: nodeCount, dim: dim, device: device)
         for (i, vector) in vectors.enumerated() {
-            try vectorBuffer.setVector(vector, at: i)
+            try vectorBuffer.insert(vector: vector, at: i)
         }
         vectorBuffer.setCount(nodeCount)
 
