@@ -12,19 +12,20 @@
 > **Prompt:** `docs/prompts/phase-1-buffer-pool.md`
 > **Branch:** TBD
 > **Depends on:** Nothing (start here)
+> **Note:** `xcodebuild test` is currently blocked by pre-existing shader compile errors in `NNDescent.metal` and `NNDescentFloat16.metal` (`uint_max`, `memory_order_release`).
 
 - [ ] **1.1 Create SearchBufferPool**
-  - [ ] Write 3 failing tests in `Tests/MetalANNSTests/SearchBufferPoolTests.swift`
-  - [ ] Verify tests fail (compilation error — type does not exist)
-  - [ ] Implement `Sources/MetalANNSCore/SearchBufferPool.swift`
+  - [x] Write 3 failing tests in `Tests/MetalANNSTests/SearchBufferPoolTests.swift`
+  - [x] Verify tests fail (compilation error — type does not exist)
+  - [x] Implement `Sources/MetalANNSCore/SearchBufferPool.swift`
   - [ ] Verify 3 tests pass
-  - [ ] Commit: `feat: add SearchBufferPool to eliminate per-search MTLBuffer allocation`
+  - [x] Commit: `feat: add SearchBufferPool to eliminate per-search MTLBuffer allocation`
 
 - [ ] **1.2 Wire pool into FullGPUSearch**
-  - [ ] Write safety test `fullGPUSearchCorrectAfterPoolRefactor` in `SearchBufferPoolTests.swift`
+  - [x] Write safety test `fullGPUSearchCorrectAfterPoolRefactor` in `SearchBufferPoolTests.swift`
   - [ ] Verify safety test passes BEFORE refactoring (baseline)
-  - [ ] Add `searchBufferPool` property to `MetalContext` in `MetalDevice.swift`
-  - [ ] Replace `device.makeBuffer` calls in `FullGPUSearch.swift:58-74` with pool acquire/release
+  - [x] Add `searchBufferPool` property to `MetalContext` in `MetalDevice.swift`
+  - [x] Replace `device.makeBuffer` calls in `FullGPUSearch.swift:58-74` with pool acquire/release
   - [ ] Verify full test suite passes (zero regressions)
   - [ ] Commit: `refactor: wire SearchBufferPool into FullGPUSearch, eliminating per-search allocation`
 

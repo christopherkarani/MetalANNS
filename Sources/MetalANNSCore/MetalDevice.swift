@@ -10,6 +10,7 @@ public final class MetalContext: @unchecked Sendable {
     public let queuePool: CommandQueuePool
     public let library: MTLLibrary
     public let pipelineCache: PipelineCache
+    public let searchBufferPool: SearchBufferPool
 
     public init() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -34,6 +35,7 @@ public final class MetalContext: @unchecked Sendable {
         )
         self.library = library
         self.pipelineCache = PipelineCache(device: device, library: library)
+        self.searchBufferPool = SearchBufferPool(device: device)
 
         logger.debug("MetalContext initialized: \(device.name)")
     }

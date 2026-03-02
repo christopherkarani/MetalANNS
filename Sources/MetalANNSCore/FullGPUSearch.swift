@@ -50,20 +50,19 @@ public enum FullGPUSearch {
         let uintSize = MemoryLayout<UInt32>.stride
         let visitedLength = max(nodeCount * uintSize, uintSize)
 
+        let buffers = try context.searchBufferPool.acquire(queryDim: query.count, maxK: kLimit)
+        defer { context.searchBufferPool.release(buffers) }
+
+        let queryBuffer = buffers.queryBuffer
+        query.withUnsafeBytes { bytes in
+            if let baseAddress = bytes.baseAddress {
+                queryBuffer.contents().copyMemory(from: baseAddress, byteCount: bytes.count)
+            }
+        }
+        let outputDistanceBuffer = buffers.outputDistanceBuffer
+        let outputIDBuffer = buffers.outputIDBuffer
+
         guard
-            let queryBuffer = context.device.makeBuffer(
-                bytes: query,
-                length: query.count * floatSize,
-                options: .storageModeShared
-            ),
-            let outputDistanceBuffer = context.device.makeBuffer(
-                length: max(kLimit * floatSize, floatSize),
-                options: .storageModeShared
-            ),
-            let outputIDBuffer = context.device.makeBuffer(
-                length: max(kLimit * uintSize, uintSize),
-                options: .storageModeShared
-            ),
             let visitedGenerationBuffer = context.device.makeBuffer(
                 length: visitedLength,
                 options: .storageModeShared
