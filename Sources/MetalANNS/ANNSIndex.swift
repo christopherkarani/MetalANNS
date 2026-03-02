@@ -863,6 +863,7 @@ public actor ANNSIndex {
 
             try Self.replaceFile(at: url, with: tempANNS)
             try Self.replaceSQLiteFiles(at: dbURL, with: tempDB)
+            Self.removeLegacyMetadataSidecars(for: url)
             try? fileManager.removeItem(at: tempDirURL)
         } catch {
             try? fileManager.removeItem(at: tempDirURL)
@@ -904,6 +905,7 @@ public actor ANNSIndex {
 
             try Self.replaceFile(at: url, with: tempANNS)
             try Self.replaceSQLiteFiles(at: dbURL, with: tempDB)
+            Self.removeLegacyMetadataSidecars(for: url)
             try? fileManager.removeItem(at: tempDirURL)
         } catch {
             try? fileManager.removeItem(at: tempDirURL)
@@ -1097,6 +1099,20 @@ public actor ANNSIndex {
         URL(fileURLWithPath: fileURL.path + ".meta.db")
     }
 
+    private nonisolated static func removeLegacyMetadataSidecars(for fileURL: URL) {
+        let fileManager = FileManager.default
+        let metadataDB = metadataDBURL(for: fileURL)
+        let sidecars = [
+            metadataURL(for: fileURL),
+            metadataDB,
+            URL(fileURLWithPath: metadataDB.path + "-wal"),
+            URL(fileURLWithPath: metadataDB.path + "-shm"),
+        ]
+        for sidecar in sidecars where fileManager.fileExists(atPath: sidecar.path) {
+            try? fileManager.removeItem(at: sidecar)
+        }
+    }
+
     private nonisolated static func databasePath(for fileURL: URL) -> String {
         fileURL.deletingPathExtension().appendingPathExtension("db").path
     }
@@ -1208,8 +1224,12 @@ public actor ANNSIndex {
     }
 
     private nonisolated static func loadPersistedMetadataIfPresent(from fileURL: URL) throws -> PersistedMetadata? {
-        if let sqliteMeta = try SQLiteStructuredStore.load(PersistedMetadata.self, from: metadataDBURL(for: fileURL)) {
-            return sqliteMeta
+        do {
+            if let sqliteMeta = try SQLiteStructuredStore.load(PersistedMetadata.self, from: metadataDBURL(for: fileURL)) {
+                return sqliteMeta
+            }
+        } catch {
+            // Keep JSON fallback path for legacy metadata recovery.
         }
 
         let metadataURL = metadataURL(for: fileURL)

@@ -240,6 +240,82 @@ struct ANNSIndexTests {
         #expect(await loaded.count == 50)
     }
 
+    @Test("Load falls back to JSON when legacy meta.db is unreadable")
+    func loadFallsBackWhenLegacyMetaDBCorrupt() async throws {
+        let index = ANNSIndex(configuration: .default)
+        var vectors: [[Float]] = []
+        var ids: [String] = []
+        for i in 0..<50 {
+            vectors.append((0..<8).map { _ in Float.random(in: -1...1) })
+            ids.append("legacy-corrupt-\(i)")
+        }
+        try await index.build(vectors: vectors, ids: ids)
+
+        let dir = NSTemporaryDirectory() + "test-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        let url = URL(fileURLWithPath: dir).appendingPathComponent("legacy-corrupt.anns")
+        try await index.save(to: url)
+
+        let dbPath = url.deletingPathExtension().appendingPathExtension("db").path
+        try? FileManager.default.removeItem(atPath: dbPath)
+
+        struct LegacyMeta: Encodable {
+            let configuration: IndexConfiguration
+            let softDeletion: SoftDeletion
+            let metadataStore: MetadataStore?
+        }
+        let fallbackJSON = try JSONEncoder().encode(
+            LegacyMeta(
+                configuration: .default,
+                softDeletion: SoftDeletion(),
+                metadataStore: nil
+            )
+        )
+        try fallbackJSON.write(
+            to: URL(fileURLWithPath: url.path + ".meta.json"),
+            options: .atomic
+        )
+        try Data([0x00, 0x01, 0x02, 0x03]).write(
+            to: URL(fileURLWithPath: url.path + ".meta.db"),
+            options: .atomic
+        )
+
+        let loaded = try await ANNSIndex.load(from: url)
+        #expect(await loaded.count == 50)
+    }
+
+    @Test("Save removes stale legacy metadata sidecars")
+    func saveRemovesLegacyMetadataSidecars() async throws {
+        let index = ANNSIndex(configuration: .default)
+        var vectors: [[Float]] = []
+        var ids: [String] = []
+        for i in 0..<50 {
+            vectors.append((0..<8).map { _ in Float.random(in: -1...1) })
+            ids.append("cleanup-\(i)")
+        }
+        try await index.build(vectors: vectors, ids: ids)
+
+        let dir = NSTemporaryDirectory() + "test-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        let url = URL(fileURLWithPath: dir).appendingPathComponent("cleanup.anns")
+        let metaJSONURL = URL(fileURLWithPath: url.path + ".meta.json")
+        let metaDBURL = URL(fileURLWithPath: url.path + ".meta.db")
+
+        try Data("stale".utf8).write(to: metaJSONURL, options: .atomic)
+        try Data([0x00, 0x01, 0x02, 0x03]).write(to: metaDBURL, options: .atomic)
+        #expect(FileManager.default.fileExists(atPath: metaJSONURL.path))
+        #expect(FileManager.default.fileExists(atPath: metaDBURL.path))
+
+        try await index.save(to: url)
+
+        #expect(!FileManager.default.fileExists(atPath: metaJSONURL.path))
+        #expect(!FileManager.default.fileExists(atPath: metaDBURL.path))
+    }
+
     @Test("Batch search returns one result list per query")
     func batchSearchReturnsCorrectShape() async throws {
         let dim = 16
