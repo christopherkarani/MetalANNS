@@ -1223,6 +1223,12 @@ public actor ANNSIndex {
         return serializerIDMap
     }
 
+    // MARK: - Legacy JSON Sidecar (backward compatibility only)
+
+    /// Loads metadata from legacy sidecar formats.
+    /// Used only when no fresh `.db` file exists (pre-migration indexes).
+    /// Tries `.meta.db` (SQLiteStructuredStore) first, then `.meta.json`.
+    /// Do not call this directly — use `resolvePersistedState(for:)`.
     private nonisolated static func loadPersistedMetadataIfPresent(from fileURL: URL) throws -> PersistedMetadata? {
         do {
             if let sqliteMeta = try SQLiteStructuredStore.load(PersistedMetadata.self, from: metadataDBURL(for: fileURL)) {
