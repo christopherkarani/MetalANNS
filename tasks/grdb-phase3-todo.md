@@ -47,41 +47,41 @@ Key behaviors:
 - [x] Implement `saveAllVectorMetadata(_:)` / `loadAllVectorMetadata()`
 - [x] Implement `saveVectorDimension(_:)` / `loadVectorDimension()`
 - [x] Run `swift test --filter StreamingDatabaseTests 2>&1 | tail -10` — confirm PASS
-- [ ] Commit: `feat: add StreamingDatabase for SQLite-backed streaming state`
+- [x] Commit: `feat: add StreamingDatabase for SQLite-backed streaming state`
 
 ### Task 8 — Wire StreamingDatabase into StreamingIndex Save/Load
 
 #### 8a — Write failing tests
-- [ ] Write `saveCreatesStreamingDB` in `StreamingIndexPersistenceTests.swift`:
+- [x] Write `saveCreatesStreamingDB` in `StreamingIndexPersistenceTests.swift`:
   - Insert 20 vectors, flush, save → assert `streaming.db` exists, `streaming.meta.json` does NOT
-- [ ] Write `saveLoadRoundtripViaSQLite`:
+- [x] Write `saveLoadRoundtripViaSQLite`:
   - Insert 30 vectors, flush, save → load → verify count == 30
-- [ ] Run `swift test --filter "saveCreatesStreamingDB|saveLoadRoundtripViaSQLite" 2>&1 | tail -10` — confirm FAIL
+- [x] Run `swift test --filter "saveCreatesStreamingDB|saveLoadRoundtripViaSQLite" 2>&1 | tail -10` — confirm FAIL
 
 #### 8b — Implement save path
-- [ ] Rewrite `StreamingIndex.save(to:)` to:
+- [x] Rewrite `StreamingIndex.save(to:)` to:
   - Snapshot state, create temp dir, save `base.anns`, write `StreamingDatabase` with all data
   - Slice flat `allVectorData` → `[[Float]]` by `vectorDimension` for `insertVectors`
   - Convert `MetadataValue` → JSON strings for `saveAllVectorMetadata`
   - Replace directory atomically
   - No more `streaming.meta.json` or `streaming.meta.db` writes
-- [ ] Run `swift test --filter "saveCreatesStreamingDB" 2>&1 | tail -10` — confirm PASS
+- [x] Run `swift test --filter "saveCreatesStreamingDB" 2>&1 | tail -10` — confirm PASS
 
 #### 8c — Implement load path
-- [ ] Add `hasFreshStreamingDatabase(at:forBaseANNS:)` static helper
-- [ ] Rewrite `StreamingIndex.load(from:)` to:
+- [x] Add `hasFreshStreamingDatabase(at:forBaseANNS:)` static helper
+- [x] Rewrite `StreamingIndex.load(from:)` to:
   - Try `StreamingDatabase` first (if fresh `streaming.db` exists)
   - Reconstruct `PersistedMeta` from database fields (slice vectors, decode MetadataValue)
   - Fall back to `SQLiteStructuredStore.load` (`.meta.db`) → JSON (`.meta.json`)
-- [ ] Run `swift test --filter "saveLoadRoundtripViaSQLite" 2>&1 | tail -10` — confirm PASS
+- [x] Run `swift test --filter "saveLoadRoundtripViaSQLite" 2>&1 | tail -10` — confirm PASS
 
 #### 8d — Update existing tests + regression check
-- [ ] Update `saveAndLoadEmpty` test: change `.meta.db` → `streaming.db` assertion
-- [ ] Update `searchAfterLoad` test: change `.meta.json` cleanup to match new paths
-- [ ] Update `saveRequiresFlush` test: change `.meta.json` cleanup to match new paths
-- [ ] Run `swift test --filter StreamingIndexPersistenceTests 2>&1 | tail -15` — confirm all pass
+- [x] Update `saveAndLoadEmpty` test: change `.meta.db` → `streaming.db` assertion
+- [x] Update `searchAfterLoad` test: change `.meta.json` cleanup to match new paths
+- [x] Update `saveRequiresFlush` test: change `.meta.json` cleanup to match new paths
+- [x] Run `swift test --filter StreamingIndexPersistenceTests 2>&1 | tail -15` — confirm all pass
 - [ ] Run `swift test 2>&1 | grep -E "passed|failed|error:" | tail -5` — zero regressions
-- [ ] Commit: `feat: StreamingIndex save/load uses SQLite, JSON fallback for backward compat`
+- [x] Commit: `feat: StreamingIndex save/load uses SQLite, JSON fallback for backward compat`
 
 ---
 
@@ -102,13 +102,13 @@ swift test 2>&1 | grep -E "passed|failed|error:" | tail -5
 
 ## Review Checklist
 
-- [ ] `StreamingDatabase` is `Sendable` (uses `DatabasePool`)
-- [ ] Vectors stored as per-row BLOBs (not a single JSON blob)
-- [ ] `insertVectors` correctly converts `[Float]` → `Data` via `withUnsafeBytes`
-- [ ] `loadAllVectors` correctly decodes BLOB → `[Float]` with size validation
-- [ ] Flat `allVectorData` sliced correctly by `vectorDimension` before `insertVectors`
-- [ ] `MetadataValue` round-trips through JSON encoding (private enum stays private)
-- [ ] `PersistedMeta` reconstructed correctly from StreamingDatabase fields
-- [ ] `validateLoadedMeta` still called on both SQLite and JSON load paths
-- [ ] Save uses temp directory + `replaceDirectory` (atomic)
-- [ ] `SQLiteStructuredStore` NOT deleted (still needed for `.meta.db` fallback reads)
+- [x] `StreamingDatabase` is `Sendable` (uses `DatabasePool`)
+- [x] Vectors stored as per-row BLOBs (not a single JSON blob)
+- [x] `insertVectors` correctly converts `[Float]` → `Data` via `withUnsafeBytes`
+- [x] `loadAllVectors` correctly decodes BLOB → `[Float]` with size validation
+- [x] Flat `allVectorData` sliced correctly by `vectorDimension` before `insertVectors`
+- [x] `MetadataValue` round-trips through JSON encoding (private enum stays private)
+- [x] `PersistedMeta` reconstructed correctly from StreamingDatabase fields
+- [x] `validateLoadedMeta` still called on both SQLite and JSON load paths
+- [x] Save uses temp directory + `replaceDirectory` (atomic)
+- [x] `SQLiteStructuredStore` NOT deleted (still needed for `.meta.db` fallback reads)

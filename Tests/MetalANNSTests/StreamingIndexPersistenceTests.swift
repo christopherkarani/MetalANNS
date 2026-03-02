@@ -20,6 +20,7 @@ struct StreamingIndexPersistenceTests {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         try await index.save(to: dir)
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("streaming.db").path))
         let loaded = try await StreamingIndex.load(from: dir)
 
         #expect(await loaded.count == 5)
@@ -64,6 +65,55 @@ struct StreamingIndexPersistenceTests {
         try await index.save(to: dir)
         let loaded = try await StreamingIndex.load(from: dir)
         #expect(await loaded.count == 10)
+    }
+
+    @Test("Save creates streaming.db and removes JSON sidecar")
+    func saveCreatesStreamingDB() async throws {
+        let config = StreamingConfiguration(deltaCapacity: 100, mergeStrategy: .blocking)
+        let index = StreamingIndex(config: config)
+
+        for i in 0..<20 {
+            let vector = makeVector(row: i, dim: 8)
+            try await index.insert(vector, id: "vec-\(i)")
+        }
+        try await index.flush()
+
+        let dir = tempDirectoryURL()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try await index.save(to: dir)
+
+        let dbPath = dir.appendingPathComponent("streaming.db").path
+        #expect(
+            FileManager.default.fileExists(atPath: dbPath),
+            "Expected streaming.db to be created"
+        )
+
+        let jsonPath = dir.appendingPathComponent("streaming.meta.json").path
+        #expect(
+            !FileManager.default.fileExists(atPath: jsonPath),
+            "Should no longer create streaming.meta.json"
+        )
+    }
+
+    @Test("Save/load roundtrip via SQLite")
+    func saveLoadRoundtripViaSQLite() async throws {
+        let config = StreamingConfiguration(deltaCapacity: 100, mergeStrategy: .blocking)
+        let index = StreamingIndex(config: config)
+
+        for i in 0..<30 {
+            let vector = makeVector(row: i, dim: 8)
+            try await index.insert(vector, id: "vec-\(i)")
+        }
+        try await index.flush()
+
+        let dir = tempDirectoryURL()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try await index.save(to: dir)
+        let loaded = try await StreamingIndex.load(from: dir)
+        let count = await loaded.count
+        #expect(count == 30)
     }
 
     private func tempDirectoryURL() -> URL {

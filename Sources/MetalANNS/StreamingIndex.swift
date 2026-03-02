@@ -17,10 +17,63 @@ public actor StreamingIndex {
     private struct PersistedMeta: Sendable, Codable {
         let config: StreamingConfiguration
         let vectorDimension: Int?
-        let allVectorsList: [[Float]]
+        let allVectorData: [Float]
         let allIDsList: [String]
         let deletedIDs: [String]
         let metadataByID: [String: [String: MetadataValue]]
+
+        private enum CodingKeys: String, CodingKey {
+            case config
+            case vectorDimension
+            case allVectorData
+            case allVectorsList
+            case allIDsList
+            case deletedIDs
+            case metadataByID
+        }
+
+        init(
+            config: StreamingConfiguration,
+            vectorDimension: Int?,
+            allVectorData: [Float],
+            allIDsList: [String],
+            deletedIDs: [String],
+            metadataByID: [String: [String: MetadataValue]]
+        ) {
+            self.config = config
+            self.vectorDimension = vectorDimension
+            self.allVectorData = allVectorData
+            self.allIDsList = allIDsList
+            self.deletedIDs = deletedIDs
+            self.metadataByID = metadataByID
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            config = try container.decode(StreamingConfiguration.self, forKey: .config)
+            vectorDimension = try container.decodeIfPresent(Int.self, forKey: .vectorDimension)
+            allIDsList = try container.decode([String].self, forKey: .allIDsList)
+            deletedIDs = try container.decode([String].self, forKey: .deletedIDs)
+            metadataByID = try container.decode([String: [String: MetadataValue]].self, forKey: .metadataByID)
+
+            if let flat = try container.decodeIfPresent([Float].self, forKey: .allVectorData) {
+                allVectorData = flat
+            } else if let legacy = try container.decodeIfPresent([[Float]].self, forKey: .allVectorsList) {
+                allVectorData = legacy.flatMap { $0 }
+            } else {
+                allVectorData = []
+            }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(config, forKey: .config)
+            try container.encodeIfPresent(vectorDimension, forKey: .vectorDimension)
+            try container.encode(allVectorData, forKey: .allVectorData)
+            try container.encode(allIDsList, forKey: .allIDsList)
+            try container.encode(deletedIDs, forKey: .deletedIDs)
+            try container.encode(metadataByID, forKey: .metadataByID)
+        }
     }
 
     private var base: ANNSIndex?
@@ -32,7 +85,7 @@ public actor StreamingIndex {
     private var pendingVectors: [[Float]] = []
     private var pendingIDs: [String] = []
 
-    private var allVectorsList: [[Float]] = []
+    private var allVectorData: [Float] = []
     private var allIDsList: [String] = []
     private var allIDs: Set<String> = []
     private var deletedIDs: Set<String> = []
@@ -79,7 +132,7 @@ public actor StreamingIndex {
 
         allIDs.insert(id)
         allIDsList.append(id)
-        allVectorsList.append(vector)
+        allVectorData.append(contentsOf: vector)
         pendingIDs.append(id)
         pendingVectors.append(vector)
 
@@ -114,7 +167,9 @@ public actor StreamingIndex {
             allIDs.insert(id)
             allIDsList.append(id)
         }
-        allVectorsList.append(contentsOf: vectors)
+        for vector in vectors {
+            allVectorData.append(contentsOf: vector)
+        }
         pendingIDs.append(contentsOf: ids)
         pendingVectors.append(contentsOf: vectors)
 
@@ -342,14 +397,21 @@ public actor StreamingIndex {
             throw ANNSError.constructionFailed("Nothing to save — index is empty")
         }
 
-        // Capture a consistent metadata snapshot before cross-actor await points.
+        // Snapshot actor state before any cross-actor await points.
+        let configSnapshot = config
+        let vectorDimensionSnapshot = vectorDimension
+        let allVectorDataSnapshot = allVectorData
+        let allIDsListSnapshot = allIDsList
+        let deletedIDsSnapshot = deletedIDs
+        let metadataSnapshot = metadataByID
+
         let meta = PersistedMeta(
-            config: config,
-            vectorDimension: vectorDimension,
-            allVectorsList: allVectorsList,
-            allIDsList: allIDsList,
-            deletedIDs: Array(deletedIDs),
-            metadataByID: metadataByID
+            config: configSnapshot,
+            vectorDimension: vectorDimensionSnapshot,
+            allVectorData: allVectorDataSnapshot,
+            allIDsList: allIDsListSnapshot,
+            deletedIDs: Array(deletedIDsSnapshot),
+            metadataByID: metadataSnapshot
         )
         try Self.validateLoadedMeta(meta)
 
@@ -357,19 +419,47 @@ public actor StreamingIndex {
         let parentURL = url.deletingLastPathComponent()
         let tempURL = parentURL.appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
         let tempBaseURL = tempURL.appendingPathComponent("base.anns")
-        let tempMetaURL = tempURL.appendingPathComponent("streaming.meta.json")
 
         try fileManager.createDirectory(at: tempURL, withIntermediateDirectories: true)
         do {
             try await base.save(to: tempBaseURL)
-        } catch {
-            try? fileManager.removeItem(at: tempURL)
-            throw error
-        }
 
-        let data = try JSONEncoder().encode(meta)
-        do {
-            try data.write(to: tempMetaURL, options: .atomic)
+            let dbPath = tempURL.appendingPathComponent("streaming.db").path
+            let db = try StreamingDatabase(path: dbPath)
+
+            var slicedVectors: [[Float]] = []
+            if let dim = vectorDimensionSnapshot, dim > 0 {
+                slicedVectors.reserveCapacity(allIDsListSnapshot.count)
+                for i in 0..<allIDsListSnapshot.count {
+                    let start = i * dim
+                    let end = start + dim
+                    slicedVectors.append(Array(allVectorDataSnapshot[start..<end]))
+                }
+            }
+            try db.insertVectors(slicedVectors, ids: allIDsListSnapshot)
+            try db.saveConfig(configSnapshot)
+            try db.markDeleted(ids: deletedIDsSnapshot)
+
+            if let dim = vectorDimensionSnapshot {
+                try db.saveVectorDimension(dim)
+            }
+
+            let encoder = JSONEncoder()
+            var stringMetadata: [String: [String: String]] = [:]
+            for (id, entries) in metadataSnapshot {
+                var converted: [String: String] = [:]
+                converted.reserveCapacity(entries.count)
+                for (key, value) in entries {
+                    let data = try encoder.encode(value)
+                    guard let json = String(data: data, encoding: .utf8) else {
+                        throw ANNSError.constructionFailed("Failed to encode metadata value")
+                    }
+                    converted[key] = json
+                }
+                stringMetadata[id] = converted
+            }
+            try db.saveAllVectorMetadata(stringMetadata)
+
             try Self.replaceDirectory(at: url, with: tempURL)
         } catch {
             try? fileManager.removeItem(at: tempURL)
@@ -378,15 +468,73 @@ public actor StreamingIndex {
     }
 
     public static func load(from url: URL) async throws -> StreamingIndex {
-        let metaURL = url.appendingPathComponent("streaming.meta.json")
-        let data = try Data(contentsOf: metaURL)
-        let meta = try JSONDecoder().decode(PersistedMeta.self, from: data)
+        let dbURL = url.appendingPathComponent("streaming.db")
+        let baseANNSPath = url.appendingPathComponent("base.anns").path
+        let hasFreshDB = hasFreshStreamingDatabase(at: dbURL.path, forBaseANNS: baseANNSPath)
+
+        let meta: PersistedMeta
+        if hasFreshDB {
+            do {
+                let db = try StreamingDatabase(path: dbURL.path)
+                guard let config = try db.loadConfig() else {
+                    throw ANNSError.corruptFile("Missing streaming config in database")
+                }
+
+                let (vectors, ids) = try db.loadAllVectors()
+                let deletedIDs = try db.loadDeletedIDs()
+                let allStringMetadata = try db.loadAllVectorMetadata()
+                let dimension = try db.loadVectorDimension()
+
+                let decoder = JSONDecoder()
+                var metadataByID: [String: [String: MetadataValue]] = [:]
+                for (id, entries) in allStringMetadata {
+                    var converted: [String: MetadataValue] = [:]
+                    converted.reserveCapacity(entries.count)
+                    for (key, json) in entries {
+                        converted[key] = try decoder.decode(MetadataValue.self, from: Data(json.utf8))
+                    }
+                    metadataByID[id] = converted
+                }
+
+                let flatVectorData = vectors.flatMap { $0 }
+                meta = PersistedMeta(
+                    config: config,
+                    vectorDimension: dimension,
+                    allVectorData: flatVectorData,
+                    allIDsList: ids,
+                    deletedIDs: Array(deletedIDs),
+                    metadataByID: metadataByID
+                )
+            } catch {
+                meta = try loadLegacyMeta(from: url)
+            }
+        } else {
+            meta = try loadLegacyMeta(from: url)
+        }
         try validateLoadedMeta(meta)
 
         let loadedBase = try await ANNSIndex.load(from: url.appendingPathComponent("base.anns"))
         let streaming = StreamingIndex(config: meta.config)
         await streaming.applyLoadedState(base: loadedBase, meta: meta)
         return streaming
+    }
+
+    private static func loadLegacyMeta(from url: URL) throws -> PersistedMeta {
+        let sqliteMetaURL = url.appendingPathComponent("streaming.meta.db")
+        do {
+            if let sqliteMeta = try SQLiteStructuredStore.load(PersistedMeta.self, from: sqliteMetaURL) {
+                return sqliteMeta
+            }
+        } catch {
+            // Continue to JSON fallback for backwards compatibility.
+        }
+
+        let jsonURL = url.appendingPathComponent("streaming.meta.json")
+        guard FileManager.default.fileExists(atPath: jsonURL.path) else {
+            throw ANNSError.corruptFile("Missing both streaming.db and streaming.meta.json")
+        }
+        let data = try Data(contentsOf: jsonURL)
+        return try JSONDecoder().decode(PersistedMeta.self, from: data)
     }
 
     private func applyLoadedState(base: ANNSIndex, meta: PersistedMeta) {
@@ -397,12 +545,12 @@ public actor StreamingIndex {
         self.pendingVectors = []
         self.pendingIDs = []
 
-        self.allVectorsList = meta.allVectorsList
+        self.allVectorData = meta.allVectorData
         self.allIDsList = meta.allIDsList
         self.allIDs = Set(meta.allIDsList)
         self.deletedIDs = Set(meta.deletedIDs)
         self.metadataByID = meta.metadataByID
-        self.vectorDimension = meta.vectorDimension ?? meta.allVectorsList.first?.count
+        self.vectorDimension = meta.vectorDimension
 
         self.idInBase = Set(meta.allIDsList.filter { !self.deletedIDs.contains($0) })
         self.idInDelta = []
@@ -555,7 +703,7 @@ public actor StreamingIndex {
                 continue
             }
             ids.append(id)
-            vectors.append(allVectorsList[index])
+            vectors.append(vector(atLogicalIndex: index))
         }
         return (vectors, ids)
     }
@@ -578,7 +726,7 @@ public actor StreamingIndex {
                 continue
             }
             ids.append(id)
-            vectors.append(allVectorsList[index])
+            vectors.append(vector(atLogicalIndex: index))
         }
         return (vectors, ids)
     }
@@ -806,10 +954,6 @@ public actor StreamingIndex {
     }
 
     private static func validateLoadedMeta(_ meta: PersistedMeta) throws {
-        guard meta.allVectorsList.count == meta.allIDsList.count else {
-            throw ANNSError.corruptFile("Streaming metadata vector and ID counts do not match")
-        }
-
         let allIDSet = Set(meta.allIDsList)
         guard allIDSet.count == meta.allIDsList.count else {
             throw ANNSError.corruptFile("Streaming metadata contains duplicate IDs")
@@ -822,17 +966,56 @@ public actor StreamingIndex {
             throw ANNSError.corruptFile("Streaming metadata contains row for unknown ID '\(id)'")
         }
 
-        let resolvedDimension = meta.vectorDimension ?? meta.allVectorsList.first?.count
+        let resolvedDimension = meta.vectorDimension
         if let resolvedDimension {
             guard resolvedDimension > 0 else {
                 throw ANNSError.corruptFile("Streaming metadata has invalid vector dimension")
             }
-            for vector in meta.allVectorsList where vector.count != resolvedDimension {
-                throw ANNSError.corruptFile("Streaming metadata vectors have inconsistent dimensions")
+            let expectedFloatCount = try checkedMultiply(meta.allIDsList.count, resolvedDimension)
+            guard meta.allVectorData.count == expectedFloatCount else {
+                throw ANNSError.corruptFile("Streaming metadata vector payload is inconsistent with dimension and IDs")
             }
-        } else if !meta.allVectorsList.isEmpty {
+        } else if !meta.allVectorData.isEmpty || !meta.allIDsList.isEmpty {
             throw ANNSError.corruptFile("Streaming metadata is missing vector dimension")
         }
+    }
+
+    private func vector(atLogicalIndex index: Int) -> [Float] {
+        guard let dim = vectorDimension else {
+            return []
+        }
+        let start = index * dim
+        let end = start + dim
+        if start < 0 || end > allVectorData.count {
+            return []
+        }
+        return Array(allVectorData[start..<end])
+    }
+
+    private static func checkedMultiply(_ lhs: Int, _ rhs: Int) throws -> Int {
+        let (result, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        if overflow {
+            throw ANNSError.corruptFile("Streaming metadata size overflow")
+        }
+        return result
+    }
+
+    private nonisolated static func hasFreshStreamingDatabase(
+        at dbPath: String,
+        forBaseANNS baseANNSPath: String
+    ) -> Bool {
+        let fm = FileManager.default
+        guard
+            fm.fileExists(atPath: dbPath),
+            fm.fileExists(atPath: baseANNSPath),
+            let dbAttrs = try? fm.attributesOfItem(atPath: dbPath),
+            let baseAttrs = try? fm.attributesOfItem(atPath: baseANNSPath),
+            let dbDate = dbAttrs[.modificationDate] as? Date,
+            let baseDate = baseAttrs[.modificationDate] as? Date
+        else {
+            return false
+        }
+        return dbDate >= baseDate
     }
 
     private static func replaceDirectory(at destinationURL: URL, with sourceURL: URL) throws {
