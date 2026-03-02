@@ -60,6 +60,128 @@ struct SearchBufferPoolTests {
         pool.release(b2)
     }
 
+    @Test func releaseEvictsToEntryCap() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            print("Skipping: no Metal device")
+            return
+        }
+        let pool = SearchBufferPool(
+            device: device,
+            maxRetainedEntries: 1,
+            maxRetainedBytes: .max
+        )
+
+        let small = try pool.acquire(queryDim: 64, maxK: 10)
+        pool.release(small)
+        #expect(pool.availableCountForTesting == 1)
+
+        let large = try pool.acquire(queryDim: 256, maxK: 10)
+        let expectedRetainedBytes = large.queryBuffer.length
+            + large.outputDistanceBuffer.length
+            + large.outputIDBuffer.length
+        pool.release(large)
+
+        #expect(pool.availableCountForTesting == 1)
+        #expect(pool.retainedBytesForTesting == expectedRetainedBytes)
+    }
+
+    @Test func releaseEvictsToByteCap() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            print("Skipping: no Metal device")
+            return
+        }
+        let pool = SearchBufferPool(
+            device: device,
+            maxRetainedEntries: 8,
+            maxRetainedBytes: 1_000
+        )
+
+        let first = try pool.acquire(queryDim: 100, maxK: 10)
+        pool.release(first)
+        #expect(pool.availableCountForTesting == 1)
+
+        let second = try pool.acquire(queryDim: 200, maxK: 10)
+        let secondBytes = second.queryBuffer.length
+            + second.outputDistanceBuffer.length
+            + second.outputIDBuffer.length
+        pool.release(second)
+
+        #expect(pool.availableCountForTesting == 1)
+        #expect(pool.retainedBytesForTesting == secondBytes)
+        #expect(pool.retainedBytesForTesting <= 1_000)
+    }
+
+    @Test func releaseDropsOversizedBuffer() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            print("Skipping: no Metal device")
+            return
+        }
+        let pool = SearchBufferPool(
+            device: device,
+            maxRetainedEntries: 8,
+            maxRetainedBytes: 1_024
+        )
+
+        let oversized = try pool.acquire(queryDim: 1_024, maxK: 10)
+        pool.release(oversized)
+
+        #expect(pool.availableCountForTesting == 0)
+        #expect(pool.retainedBytesForTesting == 0)
+    }
+
+    @Test func acquireAndReleaseVisitedReturnsSameBuffer() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            print("Skipping: no Metal device")
+            return
+        }
+        let pool = SearchBufferPool(device: device)
+
+        let v1 = try pool.acquireVisited(nodeCount: 1000)
+        let ptr1 = v1.buffer.gpuAddress
+        pool.releaseVisited(v1.buffer, capacity: 1000)
+
+        let v2 = try pool.acquireVisited(nodeCount: 1000)
+        #expect(v2.buffer.gpuAddress == ptr1, "Pooled visited buffer should be reused")
+        pool.releaseVisited(v2.buffer, capacity: 1000)
+    }
+
+    @Test func visitedGenerationsAreMonotonicallyIncreasing() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            print("Skipping: no Metal device")
+            return
+        }
+        let pool = SearchBufferPool(device: device)
+
+        let v1 = try pool.acquireVisited(nodeCount: 100)
+        let gen1 = v1.generation
+        pool.releaseVisited(v1.buffer, capacity: 100)
+
+        let v2 = try pool.acquireVisited(nodeCount: 100)
+        let gen2 = v2.generation
+        pool.releaseVisited(v2.buffer, capacity: 100)
+
+        #expect(gen2 > gen1, "Each acquire should return a strictly higher generation")
+        #expect(gen1 != 0, "Generation must never be 0 (reserved as unvisited sentinel)")
+        #expect(gen2 != 0, "Generation must never be 0 (reserved as unvisited sentinel)")
+    }
+
+    @Test func concurrentVisitedAcquireReturnsDistinctBuffers() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            print("Skipping: no Metal device")
+            return
+        }
+        let pool = SearchBufferPool(device: device)
+
+        let v1 = try pool.acquireVisited(nodeCount: 100)
+        let v2 = try pool.acquireVisited(nodeCount: 100)
+        #expect(
+            v1.buffer.gpuAddress != v2.buffer.gpuAddress,
+            "Concurrent acquires must return distinct buffers"
+        )
+        pool.releaseVisited(v1.buffer, capacity: 100)
+        pool.releaseVisited(v2.buffer, capacity: 100)
+    }
+
     @Test func fullGPUSearchCorrectAfterPoolRefactor() async throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             print("Skipping: no Metal device")
