@@ -9,6 +9,7 @@ public actor ANNSIndex {
         let configuration: IndexConfiguration
         let softDeletion: SoftDeletion
         let metadataStore: MetadataStore?
+        let idMap: IDMap?
     }
 
     private var configuration: IndexConfiguration
@@ -833,22 +834,40 @@ public actor ANNSIndex {
             throw ANNSError.indexEmpty
         }
 
-        try IndexSerializer.save(
-            vectors: vectors,
-            graph: graph,
-            idMap: idMap,
-            entryPoint: entryPoint,
-            metric: configuration.metric,
-            to: url
-        )
+        let fileManager = FileManager.default
+        let parentURL = url.deletingLastPathComponent()
+        let tempDirURL = parentURL.appendingPathComponent(".save-tmp-\(UUID().uuidString)")
+        let tempANNS = tempDirURL.appendingPathComponent(url.lastPathComponent)
+        let dbURL = URL(fileURLWithPath: Self.databasePath(for: url))
+        let tempDB = tempDirURL.appendingPathComponent(dbURL.lastPathComponent)
 
-        let metadata = PersistedMetadata(
-            configuration: configuration,
-            softDeletion: softDeletion,
-            metadataStore: metadataStore
-        )
-        let metadataData = try JSONEncoder().encode(metadata)
-        try metadataData.write(to: Self.metadataURL(for: url), options: .atomic)
+        do {
+            try fileManager.createDirectory(at: tempDirURL, withIntermediateDirectories: true)
+
+            try IndexSerializer.save(
+                vectors: vectors,
+                graph: graph,
+                idMap: idMap,
+                entryPoint: entryPoint,
+                metric: configuration.metric,
+                to: tempANNS
+            )
+
+            var db: IndexDatabase? = try IndexDatabase(path: tempDB.path)
+            try db?.saveIDMap(idMap)
+            try db?.saveConfiguration(configuration)
+            try db?.saveSoftDeletion(softDeletion)
+            try db?.saveMetadataStore(metadataStore)
+            try db?.prepareForFileMove()
+            db = nil
+
+            try Self.replaceFile(at: url, with: tempANNS)
+            try Self.replaceSQLiteFiles(at: dbURL, with: tempDB)
+            try? fileManager.removeItem(at: tempDirURL)
+        } catch {
+            try? fileManager.removeItem(at: tempDirURL)
+            throw error
+        }
     }
 
     public func saveMmapCompatible(to url: URL) async throws {
@@ -856,32 +875,54 @@ public actor ANNSIndex {
             throw ANNSError.indexEmpty
         }
 
-        try IndexSerializer.saveMmapCompatible(
-            vectors: vectors,
-            graph: graph,
-            idMap: idMap,
-            entryPoint: entryPoint,
-            metric: configuration.metric,
-            to: url
-        )
+        let fileManager = FileManager.default
+        let parentURL = url.deletingLastPathComponent()
+        let tempDirURL = parentURL.appendingPathComponent(".save-tmp-\(UUID().uuidString)")
+        let tempANNS = tempDirURL.appendingPathComponent(url.lastPathComponent)
+        let dbURL = URL(fileURLWithPath: Self.databasePath(for: url))
+        let tempDB = tempDirURL.appendingPathComponent(dbURL.lastPathComponent)
 
-        let metadata = PersistedMetadata(
-            configuration: configuration,
-            softDeletion: softDeletion,
-            metadataStore: metadataStore
-        )
-        let metadataData = try JSONEncoder().encode(metadata)
-        try metadataData.write(to: Self.metadataURL(for: url), options: .atomic)
+        do {
+            try fileManager.createDirectory(at: tempDirURL, withIntermediateDirectories: true)
+
+            try IndexSerializer.saveMmapCompatible(
+                vectors: vectors,
+                graph: graph,
+                idMap: idMap,
+                entryPoint: entryPoint,
+                metric: configuration.metric,
+                to: tempANNS
+            )
+
+            var db: IndexDatabase? = try IndexDatabase(path: tempDB.path)
+            try db?.saveIDMap(idMap)
+            try db?.saveConfiguration(configuration)
+            try db?.saveSoftDeletion(softDeletion)
+            try db?.saveMetadataStore(metadataStore)
+            try db?.prepareForFileMove()
+            db = nil
+
+            try Self.replaceFile(at: url, with: tempANNS)
+            try Self.replaceSQLiteFiles(at: dbURL, with: tempDB)
+            try? fileManager.removeItem(at: tempDirURL)
+        } catch {
+            try? fileManager.removeItem(at: tempDirURL)
+            throw error
+        }
     }
 
     public static func load(from url: URL) async throws -> ANNSIndex {
-        let persistedMetadata = try loadPersistedMetadataIfPresent(from: url)
-        let initialConfiguration = persistedMetadata?.configuration ?? .default
+        let persistedState = try resolvePersistedState(for: url)
+        let initialConfiguration = persistedState.configuration ?? .default
         let index = ANNSIndex(configuration: initialConfiguration)
 
         let loaded = try IndexSerializer.load(from: url, device: await index.currentDevice())
+        let resolvedIDMap = resolveLoadedIDMap(
+            persistedIDMap: persistedState.idMap,
+            serializerIDMap: loaded.idMap
+        )
 
-        var resolvedConfiguration = persistedMetadata?.configuration ?? .default
+        var resolvedConfiguration = persistedState.configuration ?? .default
         resolvedConfiguration.metric = loaded.metric
         resolvedConfiguration.useFloat16 = loaded.vectors.isFloat16
         resolvedConfiguration.useBinary = loaded.vectors is BinaryVectorBuffer
@@ -890,10 +931,10 @@ public actor ANNSIndex {
             configuration: resolvedConfiguration,
             vectors: loaded.vectors,
             graph: loaded.graph,
-            idMap: loaded.idMap,
+            idMap: resolvedIDMap,
             entryPoint: loaded.entryPoint,
-            softDeletion: persistedMetadata?.softDeletion ?? SoftDeletion(),
-            metadataStore: persistedMetadata?.metadataStore ?? MetadataStore()
+            softDeletion: persistedState.softDeletion,
+            metadataStore: persistedState.metadataStore
         )
         try await index.rebuildHNSWFromCurrentState()
 
@@ -901,12 +942,16 @@ public actor ANNSIndex {
     }
 
     public static func loadMmap(from url: URL) async throws -> ANNSIndex {
-        let persistedMetadata = try loadPersistedMetadataIfPresent(from: url)
-        let initialConfiguration = persistedMetadata?.configuration ?? .default
+        let persistedState = try resolvePersistedState(for: url)
+        let initialConfiguration = persistedState.configuration ?? .default
         let index = ANNSIndex(configuration: initialConfiguration)
         let loaded = try MmapIndexLoader.load(from: url, device: await index.currentDevice())
+        let resolvedIDMap = resolveLoadedIDMap(
+            persistedIDMap: persistedState.idMap,
+            serializerIDMap: loaded.idMap
+        )
 
-        var resolvedConfiguration = persistedMetadata?.configuration ?? .default
+        var resolvedConfiguration = persistedState.configuration ?? .default
         resolvedConfiguration.metric = loaded.metric
         resolvedConfiguration.useFloat16 = loaded.vectors.isFloat16
         resolvedConfiguration.useBinary = loaded.isBinary
@@ -915,10 +960,10 @@ public actor ANNSIndex {
             configuration: resolvedConfiguration,
             vectors: loaded.vectors,
             graph: loaded.graph,
-            idMap: loaded.idMap,
+            idMap: resolvedIDMap,
             entryPoint: loaded.entryPoint,
-            softDeletion: persistedMetadata?.softDeletion ?? SoftDeletion(),
-            metadataStore: persistedMetadata?.metadataStore ?? MetadataStore(),
+            softDeletion: persistedState.softDeletion,
+            metadataStore: persistedState.metadataStore,
             isReadOnlyLoadedIndex: true,
             mmapLifetime: loaded.mmapLifetime
         )
@@ -928,13 +973,17 @@ public actor ANNSIndex {
     }
 
     public static func loadDiskBacked(from url: URL) async throws -> ANNSIndex {
-        let persistedMetadata = try loadPersistedMetadataIfPresent(from: url)
-        let initialConfiguration = persistedMetadata?.configuration ?? .default
+        let persistedState = try resolvePersistedState(for: url)
+        let initialConfiguration = persistedState.configuration ?? .default
         let index = ANNSIndex(configuration: initialConfiguration)
 
         let diskBacked = try DiskBackedIndexLoader.load(from: url, device: await index.currentDevice())
+        let resolvedIDMap = resolveLoadedIDMap(
+            persistedIDMap: persistedState.idMap,
+            serializerIDMap: diskBacked.idMap
+        )
 
-        var resolvedConfiguration = persistedMetadata?.configuration ?? .default
+        var resolvedConfiguration = persistedState.configuration ?? .default
         resolvedConfiguration.metric = diskBacked.metric
         resolvedConfiguration.useFloat16 = diskBacked.vectors.isFloat16
         resolvedConfiguration.useBinary = diskBacked.isBinary
@@ -943,10 +992,10 @@ public actor ANNSIndex {
             configuration: resolvedConfiguration,
             vectors: diskBacked.vectors,
             graph: diskBacked.graph,
-            idMap: diskBacked.idMap,
+            idMap: resolvedIDMap,
             entryPoint: diskBacked.entryPoint,
-            softDeletion: persistedMetadata?.softDeletion ?? SoftDeletion(),
-            metadataStore: persistedMetadata?.metadataStore ?? MetadataStore(),
+            softDeletion: persistedState.softDeletion,
+            metadataStore: persistedState.metadataStore,
             isReadOnlyLoadedIndex: true,
             mmapLifetime: diskBacked.mmapLifetime
         )
@@ -1044,6 +1093,52 @@ public actor ANNSIndex {
         URL(fileURLWithPath: fileURL.path + ".meta.json")
     }
 
+    private nonisolated static func metadataDBURL(for fileURL: URL) -> URL {
+        URL(fileURLWithPath: fileURL.path + ".meta.db")
+    }
+
+    private nonisolated static func databasePath(for fileURL: URL) -> String {
+        fileURL.deletingPathExtension().appendingPathExtension("db").path
+    }
+
+    private nonisolated static func replaceFile(at destination: URL, with source: URL) throws {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: destination.path) {
+            _ = try fm.replaceItemAt(destination, withItemAt: source)
+        } else {
+            try fm.moveItem(at: source, to: destination)
+        }
+    }
+
+    private nonisolated static func replaceSQLiteFiles(at destinationDB: URL, with sourceDB: URL) throws {
+        let fm = FileManager.default
+
+        func replace(_ source: URL, _ destination: URL) throws {
+            guard fm.fileExists(atPath: source.path) else {
+                return
+            }
+            if fm.fileExists(atPath: destination.path) {
+                _ = try fm.replaceItemAt(destination, withItemAt: source)
+            } else {
+                try fm.moveItem(at: source, to: destination)
+            }
+        }
+
+        func replaceSidecar(suffix: String) throws {
+            let source = URL(fileURLWithPath: sourceDB.path + suffix)
+            let destination = URL(fileURLWithPath: destinationDB.path + suffix)
+            if fm.fileExists(atPath: source.path) {
+                try replace(source, destination)
+            } else if fm.fileExists(atPath: destination.path) {
+                try fm.removeItem(at: destination)
+            }
+        }
+
+        try replace(sourceDB, destinationDB)
+        try replaceSidecar(suffix: "-wal")
+        try replaceSidecar(suffix: "-shm")
+    }
+
     private nonisolated static func durationNanoseconds(_ duration: Duration) -> UInt64 {
         let components = duration.components
         let seconds = components.seconds > 0 ? UInt64(components.seconds) : 0
@@ -1051,7 +1146,72 @@ public actor ANNSIndex {
         return seconds &* 1_000_000_000 &+ attoseconds / 1_000_000_000
     }
 
+    private nonisolated static func hasFreshDatabase(at dbPath: String, forANNS annsPath: String) -> Bool {
+        let fm = FileManager.default
+        guard
+            fm.fileExists(atPath: dbPath),
+            fm.fileExists(atPath: annsPath),
+            let dbAttrs = try? fm.attributesOfItem(atPath: dbPath),
+            let annsAttrs = try? fm.attributesOfItem(atPath: annsPath),
+            let dbDate = dbAttrs[.modificationDate] as? Date,
+            let annsDate = annsAttrs[.modificationDate] as? Date
+        else {
+            return false
+        }
+        return dbDate >= annsDate
+    }
+
+    private nonisolated static func resolvePersistedState(for fileURL: URL) throws -> (
+        configuration: IndexConfiguration?,
+        softDeletion: SoftDeletion,
+        metadataStore: MetadataStore,
+        idMap: IDMap?
+    ) {
+        let dbPath = databasePath(for: fileURL)
+        if hasFreshDatabase(at: dbPath, forANNS: fileURL.path) {
+            do {
+                let db = try IndexDatabase(path: dbPath)
+                return (
+                    configuration: try db.loadConfiguration(),
+                    softDeletion: try db.loadSoftDeletion(),
+                    metadataStore: try db.loadMetadataStore(),
+                    idMap: try db.loadIDMap()
+                )
+            } catch {
+                let legacy = try loadPersistedMetadataIfPresent(from: fileURL)
+                return (
+                    configuration: legacy?.configuration,
+                    softDeletion: legacy?.softDeletion ?? SoftDeletion(),
+                    metadataStore: legacy?.metadataStore ?? MetadataStore(),
+                    idMap: legacy?.idMap
+                )
+            }
+        }
+
+        let legacy = try loadPersistedMetadataIfPresent(from: fileURL)
+        return (
+            configuration: legacy?.configuration,
+            softDeletion: legacy?.softDeletion ?? SoftDeletion(),
+            metadataStore: legacy?.metadataStore ?? MetadataStore(),
+            idMap: legacy?.idMap
+        )
+    }
+
+    private nonisolated static func resolveLoadedIDMap(
+        persistedIDMap: IDMap?,
+        serializerIDMap: IDMap
+    ) -> IDMap {
+        if let persistedIDMap, persistedIDMap.count == serializerIDMap.count {
+            return persistedIDMap
+        }
+        return serializerIDMap
+    }
+
     private nonisolated static func loadPersistedMetadataIfPresent(from fileURL: URL) throws -> PersistedMetadata? {
+        if let sqliteMeta = try SQLiteStructuredStore.load(PersistedMetadata.self, from: metadataDBURL(for: fileURL)) {
+            return sqliteMeta
+        }
+
         let metadataURL = metadataURL(for: fileURL)
         guard FileManager.default.fileExists(atPath: metadataURL.path) else {
             return nil

@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import MetalANNS
+import MetalANNSCore
 
 @Suite("ANNSIndex Public API Tests")
 struct ANNSIndexTests {
@@ -80,13 +81,17 @@ struct ANNSIndexTests {
             .appendingPathComponent("metalanns-public-api-\(UUID().uuidString)")
             .appendingPathExtension("mann")
         let tempMetaURL = URL(fileURLWithPath: tempURL.path + ".meta.json")
+        let tempDBURL = URL(fileURLWithPath:
+            tempURL.deletingPathExtension().appendingPathExtension("db").path)
         defer {
             try? FileManager.default.removeItem(at: tempURL)
             try? FileManager.default.removeItem(at: tempMetaURL)
+            try? FileManager.default.removeItem(at: tempDBURL)
         }
 
         let before = try await index.search(query: baseVectors[12], k: 10)
         try await index.save(to: tempURL)
+        #expect(FileManager.default.fileExists(atPath: tempDBURL.path))
 
         let loaded = try await ANNSIndex.load(from: tempURL)
         let after = try await loaded.search(query: baseVectors[12], k: 10)
@@ -96,6 +101,143 @@ struct ANNSIndexTests {
         let originalCount = await index.count
         let loadedCount = await loaded.count
         #expect(originalCount == loadedCount)
+    }
+
+    @Test("Save creates SQLite sidecar")
+    func saveCreatesDBFile() async throws {
+        let index = ANNSIndex(configuration: .default)
+        var vectors: [[Float]] = []
+        var ids: [String] = []
+        for i in 0..<50 {
+            vectors.append((0..<8).map { _ in Float.random(in: -1...1) })
+            ids.append("node-\(i)")
+        }
+        try await index.build(vectors: vectors, ids: ids)
+
+        let dir = NSTemporaryDirectory() + "test-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        let url = URL(fileURLWithPath: dir).appendingPathComponent("test.anns")
+        try await index.save(to: url)
+
+        #expect(FileManager.default.fileExists(atPath: url.path))
+
+        let dbPath = URL(fileURLWithPath: url.deletingPathExtension().path)
+            .appendingPathExtension("db").path
+        #expect(FileManager.default.fileExists(atPath: dbPath))
+
+        #expect(!FileManager.default.fileExists(atPath: url.path + ".meta.json"))
+    }
+
+    @Test("Load roundtrip prefers SQLite when fresh")
+    func loadFromSQLiteRoundtrip() async throws {
+        let index = ANNSIndex(configuration: .default)
+        var vectors: [[Float]] = []
+        var ids: [String] = []
+        for i in 0..<50 {
+            vectors.append((0..<8).map { _ in Float.random(in: -1...1) })
+            ids.append("node-\(i)")
+        }
+        try await index.build(vectors: vectors, ids: ids)
+
+        let dir = NSTemporaryDirectory() + "test-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        let url = URL(fileURLWithPath: dir).appendingPathComponent("test.anns")
+        try await index.save(to: url)
+
+        let metaJSON = URL(fileURLWithPath: url.path + ".meta.json")
+        try? FileManager.default.removeItem(at: metaJSON)
+
+        let loaded = try await ANNSIndex.load(from: url)
+        #expect(await loaded.count == 50)
+
+        let query = vectors[0]
+        let results = try await loaded.search(query: query, k: 5)
+        #expect(results.first?.id == "node-0")
+    }
+
+    @Test("Load falls back to JSON when DB missing")
+    func loadFallsBackToJSONSidecar() async throws {
+        let index = ANNSIndex(configuration: .default)
+        var vectors: [[Float]] = []
+        var ids: [String] = []
+        for i in 0..<50 {
+            vectors.append((0..<8).map { _ in Float.random(in: -1...1) })
+            ids.append("legacy-\(i)")
+        }
+        try await index.build(vectors: vectors, ids: ids)
+
+        let dir = NSTemporaryDirectory() + "test-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        let url = URL(fileURLWithPath: dir).appendingPathComponent("legacy.anns")
+        try await index.save(to: url)
+
+        let dbPath = url.deletingPathExtension().appendingPathExtension("db").path
+        try? FileManager.default.removeItem(atPath: dbPath)
+
+        struct LegacyPersistedMetadata: Encodable {
+            let configuration: IndexConfiguration
+            let softDeletion: SoftDeletion
+            let metadataStore: MetadataStore?
+        }
+        let legacyMeta = LegacyPersistedMetadata(
+            configuration: .default,
+            softDeletion: SoftDeletion(),
+            metadataStore: nil
+        )
+        let metaJSON = try JSONEncoder().encode(legacyMeta)
+        let metaURL = URL(fileURLWithPath: url.path + ".meta.json")
+        try metaJSON.write(to: metaURL, options: Data.WritingOptions.atomic)
+
+        let loaded = try await ANNSIndex.load(from: url)
+        #expect(await loaded.count == 50)
+    }
+
+    @Test("Load falls back when DB is stale or unreadable")
+    func loadFallsBackWhenDBInvalid() async throws {
+        let index = ANNSIndex(configuration: .default)
+        var vectors: [[Float]] = []
+        var ids: [String] = []
+        for i in 0..<50 {
+            vectors.append((0..<8).map { _ in Float.random(in: -1...1) })
+            ids.append("corrupt-\(i)")
+        }
+        try await index.build(vectors: vectors, ids: ids)
+
+        let dir = NSTemporaryDirectory() + "test-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        let url = URL(fileURLWithPath: dir).appendingPathComponent("corrupt.anns")
+        try await index.save(to: url)
+
+        let dbURL = URL(fileURLWithPath: url.deletingPathExtension().appendingPathExtension("db").path)
+        try Data([0x00, 0x01, 0x02, 0x03]).write(to: dbURL, options: .atomic)
+
+        struct LegacyMeta: Encodable {
+            let configuration: IndexConfiguration
+            let softDeletion: SoftDeletion
+            let metadataStore: MetadataStore?
+        }
+        let fallbackJSON = try JSONEncoder().encode(
+            LegacyMeta(
+                configuration: .default,
+                softDeletion: SoftDeletion(),
+                metadataStore: nil
+            )
+        )
+        try fallbackJSON.write(
+            to: URL(fileURLWithPath: url.path + ".meta.json"),
+            options: Data.WritingOptions.atomic
+        )
+
+        let loaded = try await ANNSIndex.load(from: url)
+        #expect(await loaded.count == 50)
     }
 
     @Test("Batch search returns one result list per query")
