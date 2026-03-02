@@ -173,4 +173,78 @@ struct FullGPUSearchTests {
         #expect(fullRecall > hybridRecall - 0.05)
         #expect(fullRecall > 0.80)
     }
+
+    @Test("GPU search works above 4096-node old limit")
+    func searchAbove4096NodesReturnsResults() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { return }
+
+        let nodeCount = 5000
+        let dim = 32
+        let degree = 16
+        let context = try MetalContext()
+        let vectors = randomVectors(count: nodeCount, dim: dim)
+        let (vectorBuffer, graphBuffer, entryPoint) = try await buildBuffers(
+            context: context,
+            vectors: vectors,
+            degree: degree,
+            metric: .cosine
+        )
+
+        let results = try await FullGPUSearch.search(
+            context: context,
+            query: vectors[0],
+            vectors: vectorBuffer,
+            graph: graphBuffer,
+            entryPoint: Int(entryPoint),
+            k: 10,
+            ef: 64,
+            metric: .cosine
+        )
+
+        #expect(results.count == 10, "GPU search at 5000 nodes should return 10 results")
+        #expect(results[0].score < 0.05, "Top result should be near-exact match at large scale")
+    }
+
+    @Test("GPU search recall matches CPU at small scale")
+    func gpuSearchMatchesCPUAtSmallScale() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { return }
+
+        let nodeCount = 200
+        let dim = 32
+        let degree = 16
+        let k = 10
+        let ef = 64
+        let context = try MetalContext()
+        let vectors = randomVectors(count: nodeCount, dim: dim)
+        let (vectorBuffer, graphBuffer, entryPoint) = try await buildBuffers(
+            context: context,
+            vectors: vectors,
+            degree: degree,
+            metric: .cosine
+        )
+
+        let query = vectors[5]
+        let gpuResults = try await FullGPUSearch.search(
+            context: context,
+            query: query,
+            vectors: vectorBuffer,
+            graph: graphBuffer,
+            entryPoint: Int(entryPoint),
+            k: k,
+            ef: ef,
+            metric: .cosine
+        )
+
+        let exactTopK = Set(
+            vectors.enumerated()
+                .map { (idx, vector) in (UInt32(idx), SIMDDistance.cosine(query, vector)) }
+                .sorted { $0.1 < $1.1 }
+                .prefix(k)
+                .map(\.0)
+        )
+        let gpuIDs = Set(gpuResults.map(\.internalID))
+        let recall = Float(exactTopK.intersection(gpuIDs).count) / Float(k)
+
+        #expect(recall >= 0.70, "GPU-vs-brute-force recall \(recall) is below threshold 0.70")
+    }
 }
