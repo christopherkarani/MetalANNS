@@ -48,10 +48,11 @@ public enum FullGPUSearch {
 
         let floatSize = MemoryLayout<Float>.stride
         let uintSize = MemoryLayout<UInt32>.stride
-        let visitedLength = max(nodeCount * uintSize, uintSize)
 
         let buffers = try context.searchBufferPool.acquire(queryDim: query.count, maxK: kLimit)
         defer { context.searchBufferPool.release(buffers) }
+        let visited = try context.searchBufferPool.acquireVisited(nodeCount: nodeCount)
+        defer { context.searchBufferPool.releaseVisited(visited.buffer, capacity: nodeCount) }
 
         let queryBuffer = buffers.queryBuffer
         query.withUnsafeBytes { bytes in
@@ -62,18 +63,7 @@ public enum FullGPUSearch {
         let outputDistanceBuffer = buffers.outputDistanceBuffer
         let outputIDBuffer = buffers.outputIDBuffer
 
-        guard
-            let visitedGenerationBuffer = context.device.makeBuffer(
-                length: visitedLength,
-                options: .storageModeShared
-            )
-        else {
-            throw ANNSError.searchFailed("Failed to allocate full GPU search buffers")
-        }
-        visitedGenerationBuffer.contents().bindMemory(to: UInt32.self, capacity: max(nodeCount, 1)).initialize(
-            repeating: 0,
-            count: max(nodeCount, 1)
-        )
+        let visitedGenerationBuffer = visited.buffer
 
         var nodeCountValue = UInt32(nodeCount)
         var degreeValue = UInt32(graph.degree)
@@ -81,7 +71,7 @@ public enum FullGPUSearch {
         var kValue = UInt32(kLimit)
         var efValue = UInt32(efLimit)
         var entryPointValue = UInt32(entryPoint)
-        var visitGenerationValue: UInt32 = 1
+        var visitGenerationValue = visited.generation
         guard metric != .hamming else {
             throw ANNSError.searchFailed("FullGPUSearch does not support metric .hamming")
         }
