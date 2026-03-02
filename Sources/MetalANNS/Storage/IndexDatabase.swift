@@ -73,17 +73,31 @@ public extension IndexDatabase {
     func loadIDMap() throws -> IDMap {
         try pool.read { db in
             let rows = try Row.fetchAll(db, sql: "SELECT externalID, internalID FROM idmap ORDER BY internalID")
-            let entries: [(String, UInt32)] = rows.map {
-                let externalID: String = $0["externalID"]
-                let internalID: Int64 = $0["internalID"]
-                return (externalID, UInt32(internalID))
+            var entries: [(String, UInt32)] = []
+            entries.reserveCapacity(rows.count)
+            for row in rows {
+                let externalID: String = row["externalID"]
+                let internalID: Int64 = row["internalID"]
+                guard let internalIDUInt32 = UInt32(exactly: internalID) else {
+                    throw ANNSError.corruptFile("Invalid idmap internalID value: \(internalID)")
+                }
+                entries.append((externalID, internalIDUInt32))
             }
 
-            let nextID = try String.fetchOne(
+            let nextIDString = try String.fetchOne(
                 db,
                 sql: "SELECT value FROM config WHERE key = ?",
                 arguments: ["idmap.nextID"]
-            ).flatMap(UInt32.init) ?? UInt32(entries.count)
+            )
+            let nextID: UInt32
+            if let nextIDString {
+                guard let parsedNextID = UInt32(nextIDString) else {
+                    throw ANNSError.corruptFile("Invalid idmap.nextID value: \(nextIDString)")
+                }
+                nextID = parsedNextID
+            } else {
+                nextID = UInt32(entries.count)
+            }
 
             return IDMap.makeForPersistence(rows: entries, nextID: nextID)
         }
@@ -141,7 +155,12 @@ public extension IndexDatabase {
         try pool.read { db in
             let values = try Int64.fetchAll(db, sql: "SELECT internalID FROM soft_deletion")
             var softDeletion = SoftDeletion()
-            values.forEach { softDeletion.markDeleted(UInt32($0)) }
+            for value in values {
+                guard let internalID = UInt32(exactly: value) else {
+                    throw ANNSError.corruptFile("Invalid soft_deletion internalID value: \(value)")
+                }
+                softDeletion.markDeleted(internalID)
+            }
             return softDeletion
         }
     }
