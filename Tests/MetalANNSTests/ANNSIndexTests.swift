@@ -198,6 +198,53 @@ struct ANNSIndexTests {
         #expect(await loaded.count == 50)
     }
 
+    @Test("Backward compatibility: old JSON sidecar loads and re-saves as SQLite")
+    func backwardCompatLoadThenSaveUpgrades() async throws {
+        let vectors: [[Float]] = (0..<40).map { i in
+            (0..<8).map { j in Float(i * 8 + j) * 0.01 }
+        }
+        let ids = (0..<40).map { "compat-\($0)" }
+        let index = ANNSIndex(configuration: .default)
+        try await index.build(vectors: vectors, ids: ids)
+
+        let dir = NSTemporaryDirectory() + "compat-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        let url = URL(fileURLWithPath: dir).appendingPathComponent("test.anns")
+        let dbURL = URL(fileURLWithPath: url.deletingPathExtension().appendingPathExtension("db").path)
+
+        try await index.save(to: url)
+        #expect(FileManager.default.fileExists(atPath: dbURL.path), "Expected .db after save")
+
+        try FileManager.default.removeItem(at: dbURL)
+
+        struct LegacyMeta: Encodable {
+            let configuration: IndexConfiguration
+            let softDeletion: SoftDeletion
+            let metadataStore: MetadataStore?
+        }
+
+        let metaData = try JSONEncoder().encode(
+            LegacyMeta(configuration: .default, softDeletion: SoftDeletion(), metadataStore: nil)
+        )
+        let metaURL = URL(fileURLWithPath: url.path + ".meta.json")
+        try metaData.write(to: metaURL, options: .atomic)
+
+        let loaded = try await ANNSIndex.load(from: url)
+        #expect(await loaded.count == 40, "Load from JSON sidecar should restore 40 vectors")
+
+        try await loaded.save(to: url)
+        #expect(FileManager.default.fileExists(atPath: dbURL.path), "Re-save should create .db")
+
+        let reloaded = try await ANNSIndex.load(from: url)
+        #expect(await reloaded.count == 40, "Load from SQLite should restore 40 vectors")
+
+        let results = try await reloaded.search(query: vectors[1], k: 5)
+        #expect(!results.isEmpty, "Search should return results")
+        #expect(results.allSatisfy { $0.id.hasPrefix("compat-") }, "Search should return compat IDs")
+    }
+
     @Test("Load falls back when DB is stale or unreadable")
     func loadFallsBackWhenDBInvalid() async throws {
         let index = ANNSIndex(configuration: .default)
