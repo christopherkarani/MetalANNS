@@ -660,7 +660,7 @@ public actor ANNSIndex {
                 let extractedVectors = extractVectors(from: vectors)
                 let extractedGraph = extractGraph(from: graph)
 
-                if !isReadOnlyLoadedIndex, let hnsw, searchMetric == configuration.metric {
+                if let hnsw, searchMetric == configuration.metric {
                     rawResults = try await HNSWSearchCPU.search(
                         query: normalizedQuery,
                         vectors: extractedVectors,
@@ -690,7 +690,7 @@ public actor ANNSIndex {
             let extractedVectors = extractVectors(from: vectors)
             let extractedGraph = extractGraph(from: graph)
 
-            if !isReadOnlyLoadedIndex, let hnsw, searchMetric == configuration.metric {
+            if let hnsw, searchMetric == configuration.metric {
                 rawResults = try await HNSWSearchCPU.search(
                     query: normalizedQuery,
                     vectors: extractedVectors,
@@ -798,7 +798,7 @@ public actor ANNSIndex {
                 let extractedVectors = extractVectors(from: vectors)
                 let extractedGraph = extractGraph(from: graph)
 
-                if !isReadOnlyLoadedIndex, let hnsw, searchMetric == configuration.metric {
+                if let hnsw, searchMetric == configuration.metric {
                     rawResults = try await HNSWSearchCPU.search(
                         query: normalizedQuery,
                         vectors: extractedVectors,
@@ -828,7 +828,7 @@ public actor ANNSIndex {
             let extractedVectors = extractVectors(from: vectors)
             let extractedGraph = extractGraph(from: graph)
 
-            if !isReadOnlyLoadedIndex, let hnsw, searchMetric == configuration.metric {
+            if let hnsw, searchMetric == configuration.metric {
                 rawResults = try await HNSWSearchCPU.search(
                     query: normalizedQuery,
                     vectors: extractedVectors,
@@ -1173,7 +1173,7 @@ public actor ANNSIndex {
     }
 
     private func supportsGPUSearch(for vectors: any VectorStorage) -> Bool {
-        !(vectors is DiskBackedVectorBuffer) && !(vectors is BinaryVectorBuffer)
+        !(vectors is BinaryVectorBuffer)
     }
 
     private func applyLoadedState(
