@@ -3,21 +3,6 @@ import Metal
 import Testing
 @testable import MetalANNSCore
 
-private struct SeededGenerator: RandomNumberGenerator {
-    var state: UInt64
-
-    init(state: UInt64) {
-        self.state = state == 0 ? 1 : state
-    }
-
-    mutating func next() -> UInt64 {
-        state ^= state << 13
-        state ^= state >> 7
-        state ^= state << 17
-        return state
-    }
-}
-
 @Suite("GPU-CPU Search Parity")
 struct GPUCPUParityTests {
     private func makeGPUContextOrSkip() -> MetalContext? {

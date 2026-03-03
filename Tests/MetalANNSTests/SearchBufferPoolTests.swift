@@ -2,17 +2,6 @@ import Metal
 import Testing
 @testable import MetalANNSCore
 
-private struct SeededGenerator: RandomNumberGenerator {
-    var state: UInt64
-
-    mutating func next() -> UInt64 {
-        state ^= state << 13
-        state ^= state >> 7
-        state ^= state << 17
-        return state
-    }
-}
-
 @Suite("SearchBufferPool Tests")
 struct SearchBufferPoolTests {
     @Test func acquireAndReleaseReturnsSameBuffer() throws {

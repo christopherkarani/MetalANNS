@@ -169,14 +169,3 @@ private func sampleClusteredVectors(count: Int, centers: [[Float]], seed: UInt64
         }
     }
 }
-
-private struct SeededGenerator: RandomNumberGenerator {
-    var state: UInt64
-
-    mutating func next() -> UInt64 {
-        state ^= state << 13
-        state ^= state >> 7
-        state ^= state << 17
-        return state
-    }
-}

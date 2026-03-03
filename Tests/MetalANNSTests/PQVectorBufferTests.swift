@@ -105,14 +105,3 @@ private func makeStructuredVectors(count: Int, dimension: Int, seed: UInt64) -> 
         return vector
     }
 }
-
-private struct SeededGenerator: RandomNumberGenerator {
-    var state: UInt64
-
-    mutating func next() -> UInt64 {
-        state ^= state << 13
-        state ^= state >> 7
-        state ^= state << 17
-        return state
-    }
-}

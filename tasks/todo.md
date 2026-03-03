@@ -2145,7 +2145,7 @@ All six phases implemented:
 
 - [x] Pre-step — Backfill `GPUCPUParityTests.swift` and validate parity gate.
 - [x] 6.1 — Fix `StreamingIndex.rangeSearch(maxDistance: 0)` exact-match behavior with TDD.
-- [ ] 6.2 — Consolidate duplicated test `SeededGenerator` into shared `TestUtilities.swift`.
+- [x] 6.2 — Consolidate duplicated test `SeededGenerator` into shared `TestUtilities.swift`.
 - [ ] 6.3 — Add local_join early-exit CAS guards in float32/float16 kernels.
 - [ ] 6.4 — Add PQ threadgroup memory guard in `GPUADCSearch` with boundary test.
 - [ ] Final verification — Run full `swift test` and record outcomes.
@@ -2156,3 +2156,7 @@ All six phases implemented:
 - `swift test --filter GPUCPUParityTests` passes in this environment via standard GPU-context skip behavior when the Metal default library is unavailable.
 - Added `rangeSearchZeroDistanceReturnsExactMatch` to `StreamingIndexSearchTests`; RED confirmed before fix.
 - Fixed `StreamingIndex.rangeSearch` guard from `maxDistance > 0` to `maxDistance >= 0`; `swift test --filter StreamingIndexSearchTests` passes (5/5).
+- Added `Tests/MetalANNSTests/TestUtilities.swift` with shared module-visible `SeededGenerator`.
+- Removed file-local `private struct SeededGenerator` blocks from 9 test files (including `GPUCPUParityTests`).
+- Verified singleton definition via `rg -n \"struct SeededGenerator\" Tests/MetalANNSTests` (only `TestUtilities.swift` remains).
+- `swift test` currently reports 243/262 pass; remaining failures are mostly known Metal default-library environment failures plus two flaky non-GPU tests (`ShardedIndexParallelSearchTests.parallelSearchMatchesSequential`, `StreamingIndexMergeTests.mergeClearsIsMerging`).
