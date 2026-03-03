@@ -61,7 +61,7 @@ public struct IVFPQBenchmark: Sendable {
             warmupRuns: warmups
         )
         let annsRow = BenchmarkReport.Row(
-            label: "ANNSIndex",
+            label: "_GraphIndex",
             recallAt10: anns.recallAt10,
             qps: anns.qps,
             buildTimeMs: anns.buildTimeMs,
@@ -76,7 +76,7 @@ public struct IVFPQBenchmark: Sendable {
         )
 
         let capacity = max(dataset.trainVectors.count * 2, dataset.trainVectors.count + 1)
-        let ivfpqIndex = try IVFPQIndex(
+        let ivfpqIndex = try _IVFPQIndex(
             capacity: capacity,
             dimension: dataset.dimension,
             config: ivfpqConfig
@@ -138,7 +138,7 @@ public struct IVFPQBenchmark: Sendable {
         let totalQueryCount = queries.count * repeats
         let sortedLatencies = allLatencies.sorted()
         let ivfpqRow = BenchmarkReport.Row(
-            label: "IVFPQIndex",
+            label: "_IVFPQIndex",
             recallAt10: totalQueryCount > 0 ? recallAt10Total / Double(totalQueryCount) : 0,
             qps: totalQueryCount > 0 && totalSearchTimeSeconds > 0 ? Double(totalQueryCount) / totalSearchTimeSeconds : 0,
             buildTimeMs: buildTimeMs,
@@ -180,7 +180,7 @@ public struct IVFPQBenchmark: Sendable {
     }
 
     private static func benchmarkIVFPQBatch(
-        index: IVFPQIndex,
+        index: _IVFPQIndex,
         queryK: Int,
         top1Count: Int,
         top10Count: Int,

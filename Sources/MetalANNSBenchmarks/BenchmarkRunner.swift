@@ -180,7 +180,7 @@ struct BenchmarkRunner {
         let top10Count = min(10, maxNeighborCount)
         let top100Count = min(100, maxNeighborCount)
 
-        let index = ANNSIndex(
+        let index = _GraphIndex(
             configuration: IndexConfiguration(
                 degree: config.degree,
                 metric: config.metric,
@@ -219,7 +219,7 @@ struct BenchmarkRunner {
         var recallAt100Total: Double = 0
         var totalSearchTimeSeconds = 0.0
 
-        for runIndex in 0..<repeats {
+        for _ in 0..<repeats {
             let batchStats = try await benchmarkBatch(
                 index: index,
                 queryK: queryK,
@@ -260,7 +260,7 @@ struct BenchmarkRunner {
     }
 
     private static func benchmarkBatch(
-        index: ANNSIndex,
+        index: _GraphIndex,
         queryK: Int,
         top1Count: Int,
         top10Count: Int,
@@ -439,8 +439,8 @@ extension BenchmarkRunner.Results {
 
 private extension Array where Element == [UInt32] {
     func maxNeighborCount() -> Int {
-        reduce(into: 0) { maxValue, row in
-            maxValue = max(maxValue, row.count)
+        reduce(into: 0) { count, row in
+            count = Swift.max(count, row.count)
         }
     }
 }

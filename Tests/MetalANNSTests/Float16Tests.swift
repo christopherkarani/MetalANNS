@@ -52,11 +52,11 @@ struct Float16Tests {
         let ids = (0..<n).map { "v_\($0)" }
 
         let f32Config = IndexConfiguration(degree: 8, metric: .cosine, useFloat16: false)
-        let f32Index = ANNSIndex(configuration: f32Config)
+        let f32Index = Advanced.GraphIndex(configuration: f32Config)
         try await f32Index.build(vectors: vectors, ids: ids)
 
         let f16Config = IndexConfiguration(degree: 8, metric: .cosine, useFloat16: true)
-        let f16Index = ANNSIndex(configuration: f16Config)
+        let f16Index = Advanced.GraphIndex(configuration: f16Config)
         try await f16Index.build(vectors: vectors, ids: ids)
 
         let queries = (0..<5).map { _ in

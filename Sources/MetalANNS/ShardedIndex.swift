@@ -1,13 +1,13 @@
 import Foundation
 import MetalANNSCore
 
-public actor ShardedIndex {
+public actor _ShardedIndex {
     private let numShards: Int
     private let nprobe: Int
     private let configuration: IndexConfiguration
 
     private var centroids: [[Float]] = []
-    private var shards: [ANNSIndex] = []
+    private var shards: [_GraphIndex] = []
     private var isBuilt = false
 
     public init(
@@ -97,10 +97,10 @@ public actor ShardedIndex {
             }
         }
 
-        var indexedShards: [(index: Int, shard: ANNSIndex)] = []
+        var indexedShards: [(index: Int, shard: _GraphIndex)] = []
         indexedShards.reserveCapacity(effectiveShards)
 
-        try await withThrowingTaskGroup(of: (Int, ANNSIndex).self) { group in
+        try await withThrowingTaskGroup(of: (Int, _GraphIndex).self) { group in
             for shardIndex in 0..<effectiveShards {
                 guard !shardVectors[shardIndex].isEmpty else {
                     continue
@@ -112,7 +112,7 @@ public actor ShardedIndex {
                 shardConfiguration.degree = min(configuration.degree, max(1, shardData.count - 1))
 
                 group.addTask {
-                    let shard = ANNSIndex(configuration: shardConfiguration)
+                    let shard = _GraphIndex(configuration: shardConfiguration)
                     try await shard.build(vectors: shardData, ids: shardDataIDs)
                     return (shardIndex, shard)
                 }
@@ -135,7 +135,7 @@ public actor ShardedIndex {
     public func search(
         query: [Float],
         k: Int,
-        filter: SearchFilter? = nil,
+        filter: _LegacySearchFilter? = nil,
         metric: Metric? = nil
     ) async throws -> [SearchResult] {
         guard isBuilt, !shards.isEmpty, !centroids.isEmpty else {
@@ -189,7 +189,7 @@ public actor ShardedIndex {
     public func batchSearch(
         queries: [[Float]],
         k: Int,
-        filter: SearchFilter? = nil,
+        filter: _LegacySearchFilter? = nil,
         metric: Metric? = nil
     ) async throws -> [[SearchResult]] {
         guard isBuilt, !shards.isEmpty, !centroids.isEmpty else {
@@ -247,7 +247,7 @@ public actor ShardedIndex {
     private func searchForBatch(
         query: [Float],
         k: Int,
-        filter: SearchFilter?,
+        filter: _LegacySearchFilter?,
         metric: Metric?
     ) async throws -> [SearchResult] {
         guard k > 0 else {

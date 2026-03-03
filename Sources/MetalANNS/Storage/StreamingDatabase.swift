@@ -2,10 +2,10 @@ import Foundation
 import GRDB
 import MetalANNSCore
 
-/// SQLite-backed persistence for StreamingIndex state.
+/// SQLite-backed persistence for _StreamingIndex state.
 ///
 /// This stores vectors as per-row BLOBs and keeps streaming metadata keyed by
-/// external string IDs used by StreamingIndex.
+/// external string IDs used by _StreamingIndex.
 public final class StreamingDatabase: Sendable {
     let pool: DatabasePool
 

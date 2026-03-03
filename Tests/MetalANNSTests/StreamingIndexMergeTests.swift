@@ -2,12 +2,12 @@ import Foundation
 import Testing
 @testable import MetalANNS
 
-@Suite("StreamingIndex Merge Tests")
+@Suite("Advanced.StreamingIndex Merge Tests")
 struct StreamingIndexMergeTests {
     @Test("Merge preserves all vectors")
     func mergePreservesAllVectors() async throws {
         let deltaCapacity = 10
-        let index = StreamingIndex(config: StreamingConfiguration(
+        let index = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: deltaCapacity,
             mergeStrategy: .blocking
         ))
@@ -28,7 +28,7 @@ struct StreamingIndexMergeTests {
 
     @Test("Background merge triggered")
     func backgroundMergeTriggered() async throws {
-        let index = StreamingIndex(config: StreamingConfiguration(
+        let index = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 8,
             mergeStrategy: .background
         ))
@@ -45,7 +45,7 @@ struct StreamingIndexMergeTests {
 
     @Test("Merge clears isMerging")
     func mergeClearsIsMerging() async throws {
-        let index = StreamingIndex(config: StreamingConfiguration(
+        let index = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 500,
             mergeStrategy: .blocking
         ))

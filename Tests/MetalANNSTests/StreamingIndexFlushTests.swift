@@ -2,11 +2,11 @@ import Foundation
 import Testing
 @testable import MetalANNS
 
-@Suite("StreamingIndex Flush Tests")
+@Suite("Advanced.StreamingIndex Flush Tests")
 struct StreamingIndexFlushTests {
     @Test("Flush merges all pending")
     func flushMergesAllPending() async throws {
-        let index = StreamingIndex(config: StreamingConfiguration(
+        let index = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 30,
             mergeStrategy: .blocking
         ))
@@ -23,7 +23,7 @@ struct StreamingIndexFlushTests {
 
     @Test("Flush idempotent")
     func flushIdempotent() async throws {
-        let index = StreamingIndex(config: StreamingConfiguration(
+        let index = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 30,
             mergeStrategy: .blocking
         ))
@@ -41,7 +41,7 @@ struct StreamingIndexFlushTests {
 
     @Test("Concurrent insert and search")
     func concurrentInsertAndSearch() async throws {
-        let index = StreamingIndex(config: StreamingConfiguration(
+        let index = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 15,
             mergeStrategy: .background
         ))

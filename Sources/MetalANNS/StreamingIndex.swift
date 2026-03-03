@@ -7,7 +7,7 @@ import MetalANNSCore
 /// `StreamingConfiguration.deltaCapacity` it is merged into the frozen
 /// `base` index asynchronously (or synchronously for `.blocking` strategy).
 /// Search always probes both shards and also covers pre-build pending inserts.
-public actor StreamingIndex {
+public actor _StreamingIndex {
     private enum MetadataValue: Sendable, Codable {
         case string(String)
         case float(Float)
@@ -76,8 +76,8 @@ public actor StreamingIndex {
         }
     }
 
-    private var base: ANNSIndex?
-    private var delta: ANNSIndex?
+    private var base: _GraphIndex?
+    private var delta: _GraphIndex?
     private var mergeTask: Task<Void, Error>?
     private var lastBackgroundMergeError: ANNSError?
     private var _isMerging = false
@@ -180,7 +180,7 @@ public actor StreamingIndex {
     public func search(
         query: [Float],
         k: Int,
-        filter: SearchFilter? = nil,
+        filter: _LegacySearchFilter? = nil,
         metric: Metric? = nil
     ) async throws -> [SearchResult] {
         try checkBackgroundMergeError()
@@ -213,7 +213,7 @@ public actor StreamingIndex {
     public func batchSearch(
         queries: [[Float]],
         k: Int,
-        filter: SearchFilter? = nil,
+        filter: _LegacySearchFilter? = nil,
         metric: Metric? = nil
     ) async throws -> [[SearchResult]] {
         guard !queries.isEmpty else {
@@ -240,7 +240,7 @@ public actor StreamingIndex {
         query: [Float],
         maxDistance: Float,
         limit: Int = 1000,
-        filter: SearchFilter? = nil,
+        filter: _LegacySearchFilter? = nil,
         metric: Metric? = nil
     ) async throws -> [SearchResult] {
         try checkBackgroundMergeError()
@@ -469,7 +469,7 @@ public actor StreamingIndex {
         }
     }
 
-    public static func load(from url: URL) async throws -> StreamingIndex {
+    public static func load(from url: URL) async throws -> _StreamingIndex {
         let dbURL = url.appendingPathComponent("streaming.db")
         let baseANNSPath = url.appendingPathComponent("base.anns").path
         let hasFreshDB = hasFreshStreamingDatabase(at: dbURL.path, forBaseANNS: baseANNSPath)
@@ -515,8 +515,8 @@ public actor StreamingIndex {
         }
         try validateLoadedMeta(meta)
 
-        let loadedBase = try await ANNSIndex.load(from: url.appendingPathComponent("base.anns"))
-        let streaming = StreamingIndex(config: meta.config)
+        let loadedBase = try await _GraphIndex.load(from: url.appendingPathComponent("base.anns"))
+        let streaming = _StreamingIndex(config: meta.config)
         try await streaming.applyLoadedState(base: loadedBase, meta: meta)
         return streaming
     }
@@ -539,7 +539,7 @@ public actor StreamingIndex {
         return try JSONDecoder().decode(PersistedMeta.self, from: data)
     }
 
-    private func applyLoadedState(base: ANNSIndex, meta: PersistedMeta) async throws {
+    private func applyLoadedState(base: _GraphIndex, meta: PersistedMeta) async throws {
         let baseActiveIDs = Set(try await base.streamingActiveExternalIDs())
         let deleted = Set(meta.deletedIDs)
         let pending = Self.pendingRecordsFromMeta(
@@ -774,8 +774,8 @@ public actor StreamingIndex {
         return (vectors, ids)
     }
 
-    private func buildIndex(vectors: [[Float]], ids: [String]) async throws -> ANNSIndex {
-        let index = ANNSIndex(configuration: adjustedConfiguration(for: vectors.count))
+    private func buildIndex(vectors: [[Float]], ids: [String]) async throws -> _GraphIndex {
+        let index = _GraphIndex(configuration: adjustedConfiguration(for: vectors.count))
         try await index.build(vectors: vectors, ids: ids)
         if let metrics {
             await index.setMetrics(metrics)
@@ -784,7 +784,7 @@ public actor StreamingIndex {
         return index
     }
 
-    private func applyStoredMetadata(to index: ANNSIndex, ids: [String]) async throws {
+    private func applyStoredMetadata(to index: _GraphIndex, ids: [String]) async throws {
         for id in ids {
             guard let row = metadataByID[id] else {
                 continue
@@ -898,7 +898,7 @@ public actor StreamingIndex {
 
     private func pendingSearchResults(
         query: [Float],
-        filter: SearchFilter?,
+        filter: _LegacySearchFilter?,
         metric: Metric
     ) -> [SearchResult] {
         var results: [SearchResult] = []
@@ -938,7 +938,7 @@ public actor StreamingIndex {
         }
     }
 
-    private func matchesFilter(for id: String, filter: SearchFilter?) -> Bool {
+    private func matchesFilter(for id: String, filter: _LegacySearchFilter?) -> Bool {
         guard let filter else {
             return true
         }
@@ -946,7 +946,7 @@ public actor StreamingIndex {
         return evaluate(filter: filter, row: row)
     }
 
-    private func evaluate(filter: SearchFilter, row: [String: MetadataValue]) -> Bool {
+    private func evaluate(filter: _LegacySearchFilter, row: [String: MetadataValue]) -> Bool {
         switch filter {
         case .equals(column: let column, value: let value):
             if case .string(let current)? = row[column] {

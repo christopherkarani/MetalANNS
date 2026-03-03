@@ -100,17 +100,17 @@ func loadOrSyntheticDataset(
 }
 
 func printResults(_ results: BenchmarkRunner.Results) {
-    print("Build time:          \(String(format: \"%.1f\", results.buildTimeMs)) ms")
+    print("Build time:          \(String(format: "%.1f", results.buildTimeMs)) ms")
     print("Query count:         \(results.queryCount)")
-    print("Query mean:          \(String(format: \"%.3f\", results.queryLatencyMeanMs)) ms")
-    print("Query p50:           \(String(format: \"%.2f\", results.queryLatencyP50Ms)) ms")
-    print("Query p95:           \(String(format: \"%.2f\", results.queryLatencyP95Ms)) ms")
-    print("Query p99:           \(String(format: \"%.2f\", results.queryLatencyP99Ms)) ms")
-    print("Query stddev:        \(String(format: \"%.3f\", results.queryLatencyStdDevMs)) ms")
-    print("Query QPS:           \(String(format: \"%.2f\", results.qps))")
-    print("Recall@1:            \(String(format: \"%.3f\", results.recallAt1))")
-    print("Recall@10:           \(String(format: \"%.3f\", results.recallAt10))")
-    print("Recall@100:          \(String(format: \"%.3f\", results.recallAt100))")
+    print("Query mean:          \(String(format: "%.3f", results.queryLatencyMeanMs)) ms")
+    print("Query p50:           \(String(format: "%.2f", results.queryLatencyP50Ms)) ms")
+    print("Query p95:           \(String(format: "%.2f", results.queryLatencyP95Ms)) ms")
+    print("Query p99:           \(String(format: "%.2f", results.queryLatencyP99Ms)) ms")
+    print("Query stddev:        \(String(format: "%.3f", results.queryLatencyStdDevMs)) ms")
+    print("Query QPS:           \(String(format: "%.2f", results.qps))")
+    print("Recall@1:            \(String(format: "%.3f", results.recallAt1))")
+    print("Recall@10:           \(String(format: "%.3f", results.recallAt10))")
+    print("Recall@100:          \(String(format: "%.3f", results.recallAt100))")
 }
 
 func makeConfigsForSweep(
@@ -411,11 +411,11 @@ do {
             )
         )
 
-        if let csvOutPath {
+        if let csvOutPath = options.csvOutPath {
             try report.saveCSV(to: csvOutPath)
             print("Saved CSV: \(csvOutPath)")
         }
-        if let jsonOutPath {
+        if let jsonOutPath = options.jsonOutPath {
             try report.saveJSON(to: jsonOutPath)
             print("Saved JSON: \(jsonOutPath)")
         }
@@ -483,17 +483,17 @@ do {
             )
         )
 
-        if let csvOutPath {
+        if let csvOutPath = options.csvOutPath {
             try metadataReport.saveCSV(to: csvOutPath)
             print("Saved CSV: \(csvOutPath)")
         }
-        if let jsonOutPath {
+        if let jsonOutPath = options.jsonOutPath {
             try metadataReport.saveJSON(to: jsonOutPath)
             print("Saved JSON: \(jsonOutPath)")
         }
 
     case .ivfpq:
-        let datasetSource = loadOrSyntheticDataset(
+        let datasetSource = try loadOrSyntheticDataset(
             path: options.datasetPath,
             baseConfig: BenchmarkRunner.Config(
                 vectorCount: 1000,
@@ -556,11 +556,11 @@ do {
 
         print(IVFPQBenchmark.renderComparison(comparison))
 
-        if let csvOutPath {
+        if let csvOutPath = options.csvOutPath {
             try report.saveCSV(to: csvOutPath)
             print("Saved CSV: \(csvOutPath)")
         }
-        if let jsonOutPath {
+        if let jsonOutPath = options.jsonOutPath {
             try report.saveJSON(to: jsonOutPath)
             print("Saved JSON: \(jsonOutPath)")
         }

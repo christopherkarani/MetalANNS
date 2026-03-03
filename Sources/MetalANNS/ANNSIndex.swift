@@ -2,7 +2,7 @@ import Foundation
 import Metal
 import MetalANNSCore
 
-public actor ANNSIndex {
+public actor _GraphIndex {
     private static let fullGPUMaxEF = 256
 
     private struct PersistedMetadata: Codable, Sendable {
@@ -602,7 +602,7 @@ public actor ANNSIndex {
     public func search(
         query: [Float],
         k: Int,
-        filter: SearchFilter? = nil,
+        filter: _LegacySearchFilter? = nil,
         metric: Metric? = nil
     ) async throws -> [SearchResult] {
         guard isBuilt, let vectors, let graph else {
@@ -743,7 +743,7 @@ public actor ANNSIndex {
         query: [Float],
         maxDistance: Float,
         limit: Int = 1000,
-        filter: SearchFilter? = nil,
+        filter: _LegacySearchFilter? = nil,
         metric: Metric? = nil
     ) async throws -> [SearchResult] {
         guard isBuilt, let vectors, let graph else {
@@ -881,7 +881,7 @@ public actor ANNSIndex {
     public func batchSearch(
         queries: [[Float]],
         k: Int,
-        filter: SearchFilter? = nil,
+        filter: _LegacySearchFilter? = nil,
         metric: Metric? = nil
     ) async throws -> [[SearchResult]] {
         guard isBuilt else {
@@ -1019,10 +1019,10 @@ public actor ANNSIndex {
         }
     }
 
-    public static func load(from url: URL) async throws -> ANNSIndex {
+    public static func load(from url: URL) async throws -> _GraphIndex {
         let persistedState = try resolvePersistedState(for: url)
         let initialConfiguration = persistedState.configuration ?? .default
-        let index = ANNSIndex(configuration: initialConfiguration)
+        let index = _GraphIndex(configuration: initialConfiguration)
 
         let loaded = try IndexSerializer.load(from: url, device: await index.currentDevice())
         let resolvedIDMap = resolveLoadedIDMap(
@@ -1049,10 +1049,10 @@ public actor ANNSIndex {
         return index
     }
 
-    public static func loadMmap(from url: URL) async throws -> ANNSIndex {
+    public static func loadMmap(from url: URL) async throws -> _GraphIndex {
         let persistedState = try resolvePersistedState(for: url)
         let initialConfiguration = persistedState.configuration ?? .default
-        let index = ANNSIndex(configuration: initialConfiguration)
+        let index = _GraphIndex(configuration: initialConfiguration)
         let loaded = try MmapIndexLoader.load(from: url, device: await index.currentDevice())
         let resolvedIDMap = resolveLoadedIDMap(
             persistedIDMap: persistedState.idMap,
@@ -1080,10 +1080,10 @@ public actor ANNSIndex {
         return index
     }
 
-    public static func loadDiskBacked(from url: URL) async throws -> ANNSIndex {
+    public static func loadDiskBacked(from url: URL) async throws -> _GraphIndex {
         let persistedState = try resolvePersistedState(for: url)
         let initialConfiguration = persistedState.configuration ?? .default
-        let index = ANNSIndex(configuration: initialConfiguration)
+        let index = _GraphIndex(configuration: initialConfiguration)
 
         let diskBacked = try DiskBackedIndexLoader.load(from: url, device: await index.currentDevice())
         let resolvedIDMap = resolveLoadedIDMap(

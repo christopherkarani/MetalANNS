@@ -11,7 +11,7 @@ struct MultiQueuePerformanceTests {
         let ids = (0..<vectors.count).map { "v\($0)" }
         let config = IndexConfiguration(degree: 8, metric: .cosine, efSearch: 96)
 
-        let parallel = ShardedIndex(numShards: 8, nprobe: 4, configuration: config)
+        let parallel = Advanced.ShardedIndex(numShards: 8, nprobe: 4, configuration: config)
 
         let parallelStart = ContinuousClock.now
         try await parallel.build(vectors: vectors, ids: ids)
@@ -46,7 +46,7 @@ struct MultiQueuePerformanceTests {
         let vectors = makeVectors(count: 10_000, dim: 32, seedOffset: 0)
         let ids = (0..<vectors.count).map { "v\($0)" }
         let queries = Array(vectors.prefix(200))
-        let index = ANNSIndex(
+        let index = Advanced.GraphIndex(
             configuration: IndexConfiguration(degree: 8, metric: .cosine, efSearch: 96),
             context: context
         )
@@ -66,7 +66,7 @@ struct MultiQueuePerformanceTests {
         let vectors = makeClusteredVectors(count: 2000, dim: 32, clusters: 10)
         let ids = (0..<vectors.count).map { "v\($0)" }
         let queries = Array(vectors.prefix(100))
-        let index = ShardedIndex(
+        let index = Advanced.ShardedIndex(
             numShards: 4,
             nprobe: 4,
             configuration: IndexConfiguration(degree: 8, metric: .cosine, efSearch: 96)
@@ -85,7 +85,7 @@ struct MultiQueuePerformanceTests {
 
     private struct SequentialState {
         let centroids: [[Float]]
-        let shards: [ANNSIndex]
+        let shards: [Advanced.GraphIndex]
         let nprobe: Int
     }
 
@@ -144,7 +144,7 @@ struct MultiQueuePerformanceTests {
             }
         }
 
-        var builtShards: [ANNSIndex] = []
+        var builtShards: [Advanced.GraphIndex] = []
         var builtCentroids: [[Float]] = []
 
         for shardIndex in 0..<effectiveShards {
@@ -158,7 +158,7 @@ struct MultiQueuePerformanceTests {
                 max(1, shardVectors[shardIndex].count - 1)
             )
 
-            let shard = ANNSIndex(configuration: shardConfiguration)
+            let shard = Advanced.GraphIndex(configuration: shardConfiguration)
             try await shard.build(vectors: shardVectors[shardIndex], ids: shardIDs[shardIndex])
             builtShards.append(shard)
             builtCentroids.append(kmeans.centroids[shardIndex])

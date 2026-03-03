@@ -18,7 +18,7 @@ struct IVFPQGPUTests {
             metric: .l2,
             trainingIterations: 6
         )
-        let index = try IVFPQIndex(capacity: 2_500, dimension: 128, config: config)
+        let index = try Advanced.IVFPQIndex(capacity: 2_500, dimension: 128, config: config)
 
         guard await index.gpuAvailable() else {
             return

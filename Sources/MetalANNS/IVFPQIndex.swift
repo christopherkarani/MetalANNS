@@ -2,7 +2,7 @@ import Foundation
 import Metal
 import MetalANNSCore
 
-public actor IVFPQIndex: Sendable {
+public actor _IVFPQIndex: Sendable {
     private struct PersistedState: Codable, Sendable {
         let capacity: Int
         let dimension: Int
@@ -34,13 +34,13 @@ public actor IVFPQIndex: Sendable {
 
     public init(capacity: Int, dimension: Int, config: IVFPQConfiguration) throws {
         guard capacity > 0 else {
-            throw ANNSError.constructionFailed("IVFPQIndex capacity must be greater than zero")
+            throw ANNSError.constructionFailed("_IVFPQIndex capacity must be greater than zero")
         }
         guard dimension > 0 else {
             throw ANNSError.dimensionMismatch(expected: 1, got: dimension)
         }
         guard config.numCentroids == 256 else {
-            throw ANNSError.constructionFailed("IVFPQIndex requires numCentroids == 256 (UInt8 codes)")
+            throw ANNSError.constructionFailed("_IVFPQIndex requires numCentroids == 256 (UInt8 codes)")
         }
 
         self.capacity = capacity
@@ -51,7 +51,7 @@ public actor IVFPQIndex: Sendable {
 
     public func train(vectors: [[Float]]) async throws {
         guard !vectors.isEmpty else {
-            throw ANNSError.constructionFailed("Cannot train IVFPQIndex with empty vectors")
+            throw ANNSError.constructionFailed("Cannot train _IVFPQIndex with empty vectors")
         }
         guard vectors.count >= config.numCentroids else {
             throw ANNSError.constructionFailed("Need at least \(config.numCentroids) vectors for PQ training")
@@ -102,7 +102,7 @@ public actor IVFPQIndex: Sendable {
 
     public func add(vectors: [[Float]], ids: [String]) async throws {
         guard isTrained, let vectorBuffer else {
-            throw ANNSError.constructionFailed("IVFPQIndex must be trained before add()")
+            throw ANNSError.constructionFailed("_IVFPQIndex must be trained before add()")
         }
         guard vectors.count == ids.count else {
             throw ANNSError.constructionFailed("Vector and ID counts do not match")
@@ -253,7 +253,7 @@ public actor IVFPQIndex: Sendable {
         try data.write(to: url, options: .atomic)
     }
 
-    public static func load(from path: String) async throws -> IVFPQIndex {
+    public static func load(from path: String) async throws -> _IVFPQIndex {
         let url = URL(fileURLWithPath: path)
         let data = try Data(contentsOf: url)
         guard data.count >= 12 else {
@@ -285,7 +285,7 @@ public actor IVFPQIndex: Sendable {
             throw ANNSError.corruptFile("Invalid IVFPQ persistence JSON payload")
         }
 
-        let index = try IVFPQIndex(
+        let index = try _IVFPQIndex(
             capacity: state.capacity,
             dimension: state.dimension,
             config: state.config

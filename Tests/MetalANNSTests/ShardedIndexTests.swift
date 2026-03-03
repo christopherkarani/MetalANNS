@@ -11,7 +11,7 @@ struct ShardedIndexTests {
         let vectors = makeClusteredVectors(count: 500, dim: dim, clusters: 8)
         let ids = (0..<500).map { "v\($0)" }
 
-        let index = ShardedIndex(
+        let index = Advanced.ShardedIndex(
             numShards: 8,
             nprobe: 3,
             configuration: IndexConfiguration(degree: 8, metric: .cosine, efSearch: 96)
@@ -36,7 +36,7 @@ struct ShardedIndexTests {
         let vectors = makeClusteredVectors(count: 200, dim: dim, clusters: 4)
         let ids = (0..<200).map { "v\($0)" }
 
-        let index = ShardedIndex(
+        let index = Advanced.ShardedIndex(
             numShards: 4,
             nprobe: 2,
             configuration: IndexConfiguration(degree: 8, metric: .cosine, efSearch: 96)

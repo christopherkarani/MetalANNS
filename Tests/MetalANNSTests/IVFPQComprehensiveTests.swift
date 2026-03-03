@@ -47,7 +47,7 @@ struct IVFPQComprehensiveTests {
             metric: .l2,
             trainingIterations: 8
         )
-        let index = try IVFPQIndex(capacity: 2_000, dimension: 128, config: config)
+        let index = try Advanced.IVFPQIndex(capacity: 2_000, dimension: 128, config: config)
         let centers = makeClusterCenters(dimension: 128, clusters: 32, seed: 31)
         let training = sampleClusteredVectors(count: 1_200, centers: centers, seed: 32)
         try await index.train(vectors: training)
@@ -97,7 +97,7 @@ struct IVFPQComprehensiveTests {
 }
 
 private struct IVFPQScenario {
-    let index: IVFPQIndex
+    let index: Advanced.IVFPQIndex
     let centers: [[Float]]
     let database: [[Float]]
     let ids: [String]
@@ -112,7 +112,7 @@ private func makeScenario(seed: UInt64, trainingCount: Int, databaseCount: Int) 
         metric: .l2,
         trainingIterations: 8
     )
-    let index = try IVFPQIndex(capacity: trainingCount + databaseCount + 100, dimension: 128, config: config)
+    let index = try Advanced.IVFPQIndex(capacity: trainingCount + databaseCount + 100, dimension: 128, config: config)
 
     let centers = makeClusterCenters(dimension: 128, clusters: 32, seed: seed)
     let training = sampleClusteredVectors(count: trainingCount, centers: centers, seed: seed + 1)
@@ -126,7 +126,7 @@ private func makeScenario(seed: UInt64, trainingCount: Int, databaseCount: Int) 
 }
 
 private func averageRecallAt10(
-    index: IVFPQIndex,
+    index: Advanced.IVFPQIndex,
     databaseVectors: [[Float]],
     databaseIDs: [String],
     queries: [[Float]],

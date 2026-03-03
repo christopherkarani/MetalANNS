@@ -31,7 +31,7 @@ public struct MetadataStore: Sendable, Codable {
         intColumns[column]?[id]
     }
 
-    public func matches(id: UInt32, filter: SearchFilter) -> Bool {
+    public func matches(id: UInt32, filter: _LegacySearchFilter) -> Bool {
         switch filter {
         case .equals(let column, let value):
             return stringColumns[column]?[id] == value

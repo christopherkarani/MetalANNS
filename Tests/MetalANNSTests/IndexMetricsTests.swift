@@ -14,7 +14,7 @@ struct IndexMetricsTests {
         try await index.insert(makeVector(row: 10_000, dim: 8), id: "extra")
         _ = try await index.rangeSearch(query: vectors[1], maxDistance: 10_000, limit: 5)
 
-        let streaming = StreamingIndex(config: StreamingConfiguration(
+        let streaming = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 5,
             mergeStrategy: .blocking,
             indexConfiguration: IndexConfiguration(degree: 8, metric: .cosine, hnswConfiguration: .init(enabled: false))
@@ -140,7 +140,7 @@ struct IndexMetricsTests {
 
     @Test("Streaming merge recorded")
     func streamingMergeRecorded() async throws {
-        let streaming = StreamingIndex(config: StreamingConfiguration(
+        let streaming = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 5,
             mergeStrategy: .blocking,
             indexConfiguration: IndexConfiguration(degree: 8, metric: .cosine, hnswConfiguration: .init(enabled: false))
@@ -159,7 +159,7 @@ struct IndexMetricsTests {
 
     @Test("Streaming single-record merge path not recorded")
     func streamingSingleRecordMergeNotRecorded() async throws {
-        let streaming = StreamingIndex(config: StreamingConfiguration(
+        let streaming = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 5,
             mergeStrategy: .blocking,
             indexConfiguration: IndexConfiguration(degree: 8, metric: .cosine, hnswConfiguration: .init(enabled: false))
@@ -181,7 +181,7 @@ struct IndexMetricsTests {
         let (index, vectors, _) = try await makeIndexFixture()
         await index.setMetrics(shared)
 
-        let streaming = StreamingIndex(config: StreamingConfiguration(
+        let streaming = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 10,
             mergeStrategy: .blocking,
             indexConfiguration: IndexConfiguration(degree: 8, metric: .cosine, hnswConfiguration: .init(enabled: false))
@@ -204,7 +204,7 @@ struct IndexMetricsTests {
         #expect(snapshot.searchCount == 5)
     }
 
-    @Test("ANNSIndex metrics not persisted")
+    @Test("Advanced.GraphIndex metrics not persisted")
     func anIndexMetricsNotPersistedAfterLoad() async throws {
         let (index, vectors, _) = try await makeIndexFixture()
         let metrics = IndexMetrics()
@@ -221,14 +221,14 @@ struct IndexMetricsTests {
         }
 
         try await index.save(to: tempURL)
-        let loaded = try await ANNSIndex.load(from: tempURL)
+        let loaded = try await Advanced.GraphIndex.load(from: tempURL)
 
         #expect(await loaded.metrics == nil)
     }
 
     @Test("Streaming metrics not persisted")
     func streamingMetricsNotPersistedAfterLoad() async throws {
-        let streaming = StreamingIndex(config: StreamingConfiguration(
+        let streaming = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 6,
             mergeStrategy: .blocking,
             indexConfiguration: IndexConfiguration(degree: 8, metric: .cosine, hnswConfiguration: .init(enabled: false))
@@ -246,7 +246,7 @@ struct IndexMetricsTests {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         try await streaming.save(to: dir)
-        let loaded = try await StreamingIndex.load(from: dir)
+        let loaded = try await Advanced.StreamingIndex.load(from: dir)
 
         #expect(await loaded.metrics == nil)
     }
@@ -255,10 +255,10 @@ struct IndexMetricsTests {
         count: Int = 50,
         dim: Int = 16,
         seedOffset: Int = 0
-    ) async throws -> (index: ANNSIndex, vectors: [[Float]], ids: [String]) {
+    ) async throws -> (index: Advanced.GraphIndex, vectors: [[Float]], ids: [String]) {
         let vectors = makeVectors(count: count, dim: dim, seedOffset: seedOffset)
         let ids = (0..<count).map { "v\($0)" }
-        let index = ANNSIndex(configuration: IndexConfiguration(
+        let index = Advanced.GraphIndex(configuration: IndexConfiguration(
             degree: 8,
             metric: .cosine,
             hnswConfiguration: .init(enabled: false)

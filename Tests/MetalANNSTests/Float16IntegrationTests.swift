@@ -7,7 +7,7 @@ import Testing
 struct Float16IntegrationTests {
     @Test func float16FullLifecycle() async throws {
         let config = IndexConfiguration(degree: 8, metric: .cosine, useFloat16: true)
-        let index = ANNSIndex(configuration: config)
+        let index = Advanced.GraphIndex(configuration: config)
 
         let dim = 32
         let n = 100
@@ -36,7 +36,7 @@ struct Float16IntegrationTests {
 
     @Test func float16SaveLoadPreservesData() async throws {
         let config = IndexConfiguration(degree: 8, metric: .l2, useFloat16: true)
-        let index = ANNSIndex(configuration: config)
+        let index = Advanced.GraphIndex(configuration: config)
 
         let dim = 16
         let n = 50
@@ -56,7 +56,7 @@ struct Float16IntegrationTests {
         let fileURL = tempDir.appendingPathComponent("index.mann")
         try await index.save(to: fileURL)
 
-        let loaded = try await ANNSIndex.load(from: fileURL)
+        let loaded = try await Advanced.GraphIndex.load(from: fileURL)
 
         let afterResults = try await loaded.search(query: query, k: 3)
         #expect(afterResults.count == 3)

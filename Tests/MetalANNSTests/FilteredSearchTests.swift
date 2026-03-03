@@ -11,7 +11,7 @@ struct FilteredSearchTests {
         let vectors = makeVectors(count: 100, dim: dim, seedOffset: 0)
         let ids = (0..<100).map { "v\($0)" }
 
-        let index = ANNSIndex(configuration: IndexConfiguration(degree: 8, metric: .cosine))
+        let index = Advanced.GraphIndex(configuration: IndexConfiguration(degree: 8, metric: .cosine))
         try await index.build(vectors: vectors, ids: ids)
 
         for i in 0..<100 {
@@ -36,7 +36,7 @@ struct FilteredSearchTests {
         let vectors = makeVectors(count: 200, dim: dim, seedOffset: 7)
         let ids = (0..<200).map { "v\($0)" }
 
-        let index = ANNSIndex(configuration: IndexConfiguration(degree: 8, metric: .cosine, efSearch: 96))
+        let index = Advanced.GraphIndex(configuration: IndexConfiguration(degree: 8, metric: .cosine, efSearch: 96))
         try await index.build(vectors: vectors, ids: ids)
 
         for i in 0..<200 {
@@ -68,7 +68,7 @@ struct FilteredSearchTests {
         let vectors = makeVectors(count: 100, dim: dim, seedOffset: 21)
         let ids = (0..<100).map { "v\($0)" }
 
-        let index = ANNSIndex(configuration: IndexConfiguration(degree: 8, metric: .cosine, efSearch: 96))
+        let index = Advanced.GraphIndex(configuration: IndexConfiguration(degree: 8, metric: .cosine, efSearch: 96))
         try await index.build(vectors: vectors, ids: ids)
 
         for i in 0..<100 {
@@ -78,7 +78,7 @@ struct FilteredSearchTests {
             try await index.setMetadata("score", value: score, for: "v\(i)")
         }
 
-        let andFilter: SearchFilter = .and([
+        let andFilter: Advanced.LegacyFilter = .and([
             .equals(column: "category", value: "A"),
             .greaterThan(column: "score", value: 3.0)
         ])
@@ -89,7 +89,7 @@ struct FilteredSearchTests {
             #expect(i >= 25 && i < 50)
         }
 
-        let orFilter: SearchFilter = .or([
+        let orFilter: Advanced.LegacyFilter = .or([
             .equals(column: "category", value: "A"),
             .greaterThan(column: "score", value: 3.0)
         ])
@@ -101,7 +101,7 @@ struct FilteredSearchTests {
             #expect(allowed)
         }
 
-        let notFilter: SearchFilter = .not(.equals(column: "category", value: "A"))
+        let notFilter: Advanced.LegacyFilter = .not(.equals(column: "category", value: "A"))
         let notResults = try await index.search(query: vectors[60], k: 20, filter: notFilter)
         #expect(!notResults.isEmpty)
         for result in notResults {
@@ -115,7 +115,7 @@ struct FilteredSearchTests {
         let vectors = makeVectors(count: 20, dim: dim, seedOffset: 200)
         let ids = (0..<20).map { "v\($0)" }
 
-        let index = ANNSIndex(configuration: IndexConfiguration(degree: 8, metric: .cosine, efSearch: 64))
+        let index = Advanced.GraphIndex(configuration: IndexConfiguration(degree: 8, metric: .cosine, efSearch: 64))
         try await index.build(vectors: vectors, ids: ids)
 
         let base: Int64 = 9_000_000_000_000_000_000

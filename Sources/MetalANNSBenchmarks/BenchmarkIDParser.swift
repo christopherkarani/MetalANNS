@@ -1,4 +1,5 @@
 import Foundation
+import MetalANNS
 
 enum BenchmarkIDParser {
     static func uint32(from id: String) -> UInt32? {
@@ -35,4 +36,3 @@ enum BenchmarkIDParser {
         return ids
     }
 }
-

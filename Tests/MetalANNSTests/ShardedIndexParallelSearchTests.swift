@@ -3,7 +3,7 @@ import Testing
 @testable import MetalANNS
 @testable import MetalANNSCore
 
-@Suite("ShardedIndex Parallel Search Tests")
+@Suite("Advanced.ShardedIndex Parallel Search Tests")
 struct ShardedIndexParallelSearchTests {
     @Test("parallelSearchMatchesSequential")
     func parallelSearchMatchesSequential() async throws {
@@ -11,7 +11,7 @@ struct ShardedIndexParallelSearchTests {
         let vectors = makeClusteredVectors(count: 1200, dim: dim, clusters: 12)
         let ids = (0..<vectors.count).map { "v\($0)" }
         let config = IndexConfiguration(degree: 8, metric: .cosine, efSearch: 96)
-        let index = ShardedIndex(numShards: 4, nprobe: 3, configuration: config)
+        let index = Advanced.ShardedIndex(numShards: 4, nprobe: 3, configuration: config)
         try await index.build(vectors: vectors, ids: ids)
 
         let sequential = try await buildSequentialReference(
@@ -54,7 +54,7 @@ struct ShardedIndexParallelSearchTests {
     func parallelBatchSearchCorrect() async throws {
         let vectors = makeClusteredVectors(count: 1500, dim: 32, clusters: 12)
         let ids = (0..<vectors.count).map { "v\($0)" }
-        let index = ShardedIndex(
+        let index = Advanced.ShardedIndex(
             numShards: 4,
             nprobe: 3,
             configuration: IndexConfiguration(degree: 8, metric: .cosine, efSearch: 96)
@@ -80,7 +80,7 @@ struct ShardedIndexParallelSearchTests {
         let ids = (0..<vectors.count).map { "v\($0)" }
         let config = IndexConfiguration(degree: 8, metric: .cosine, efSearch: 96)
 
-        let index = ShardedIndex(numShards: 4, nprobe: 3, configuration: config)
+        let index = Advanced.ShardedIndex(numShards: 4, nprobe: 3, configuration: config)
         try await index.build(vectors: vectors, ids: ids)
         let sequential = try await buildSequentialReference(
             vectors: vectors,
@@ -116,7 +116,7 @@ struct ShardedIndexParallelSearchTests {
 
     private struct SequentialState {
         let centroids: [[Float]]
-        let shards: [ANNSIndex]
+        let shards: [Advanced.GraphIndex]
         let nprobe: Int
     }
 
@@ -175,7 +175,7 @@ struct ShardedIndexParallelSearchTests {
             }
         }
 
-        var builtShards: [ANNSIndex] = []
+        var builtShards: [Advanced.GraphIndex] = []
         var builtCentroids: [[Float]] = []
 
         for shardIndex in 0..<effectiveShards {
@@ -189,7 +189,7 @@ struct ShardedIndexParallelSearchTests {
                 max(1, shardVectors[shardIndex].count - 1)
             )
 
-            let shard = ANNSIndex(configuration: shardConfiguration)
+            let shard = Advanced.GraphIndex(configuration: shardConfiguration)
             try await shard.build(vectors: shardVectors[shardIndex], ids: shardIDs[shardIndex])
             builtShards.append(shard)
             builtCentroids.append(kmeans.centroids[shardIndex])
