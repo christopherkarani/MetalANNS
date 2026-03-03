@@ -44,6 +44,56 @@ struct ANNSIndexTests {
         #expect(await index.count == 55)
     }
 
+    @Test("Insert and search with UInt64 ID returns numericID in results")
+    func insertAndSearchWithUInt64IDs() async throws {
+        let dim = 16
+        let baseVectors = makeVectors(count: 20, dim: dim, seedOffset: 1_000)
+        let baseIDs = (0..<20).map { "base-\($0)" }
+
+        let index = ANNSIndex(configuration: IndexConfiguration(degree: 8, metric: .cosine))
+        try await index.build(vectors: baseVectors, ids: baseIDs)
+
+        // Insert with UInt64 key.
+        let newVector = makeVectors(count: 1, dim: dim, seedOffset: 9_999)[0]
+        try await index.insert(newVector, numericID: 9_001)
+
+        // Search using the inserted vector as query — first result should be itself.
+        let results = try await index.search(query: newVector, k: 1)
+        #expect(results.count == 1)
+        #expect(
+            results[0].numericID == 9_001,
+            "Expected numericID 9001, got \(String(describing: results[0].numericID))"
+        )
+        // String ID for a UInt64-keyed result should be empty.
+        #expect(results[0].id.isEmpty, "UInt64-inserted nodes have no String ID")
+    }
+
+    @Test("String-keyed results have nil numericID; UInt64-keyed results have nil String id")
+    func stringAndUInt64ResultsCoexist() async throws {
+        let dim = 16
+        let baseVectors = makeVectors(count: 10, dim: dim, seedOffset: 500)
+        let baseIDs = (0..<10).map { "str-\($0)" }
+
+        let index = ANNSIndex(configuration: IndexConfiguration(degree: 8, metric: .cosine))
+        try await index.build(vectors: baseVectors, ids: baseIDs)
+        try await index.insert(makeVectors(count: 1, dim: dim, seedOffset: 88_888)[0], numericID: 42)
+
+        // Search with broad k to get both String and UInt64 results.
+        let results = try await index.search(
+            query: makeVectors(count: 1, dim: dim, seedOffset: 88_888)[0],
+            k: 5
+        )
+
+        let numericResults = results.filter { $0.numericID != nil }
+        let stringResults = results.filter { !$0.id.isEmpty }
+
+        #expect(!numericResults.isEmpty, "At least one UInt64-keyed result expected")
+        // String-keyed results must not have a numericID.
+        for result in stringResults {
+            #expect(result.numericID == nil, "String-keyed result '\(result.id)' should have nil numericID")
+        }
+    }
+
     @Test("Delete excludes soft-deleted IDs from search")
     func deleteAndSearch() async throws {
         let dim = 16

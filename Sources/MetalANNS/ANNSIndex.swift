@@ -262,6 +262,91 @@ public actor ANNSIndex {
         }
     }
 
+    /// Inserts a vector with a numeric (UInt64) key.
+    /// For use by Wax's UInt64 frameId-based API.
+    public func insert(_ vector: [Float], numericID: UInt64) async throws {
+        guard isBuilt, let vectors, let graph else {
+            throw ANNSError.indexEmpty
+        }
+        guard !isReadOnlyLoadedIndex else {
+            throw ANNSError.constructionFailed("Index is read-only (mmap-loaded)")
+        }
+        guard vector.count == vectors.dim else {
+            throw ANNSError.dimensionMismatch(expected: vectors.dim, got: vector.count)
+        }
+        if idMap.internalID(forNumeric: numericID) != nil {
+            throw ANNSError.idAlreadyExists(String(numericID))
+        }
+
+        guard idMap.canAllocate(1) else {
+            throw ANNSError.constructionFailed("Internal ID space exhausted")
+        }
+
+        let nextInternalID = Int(idMap.nextInternalID)
+        guard nextInternalID < vectors.capacity, nextInternalID < graph.capacity else {
+            throw ANNSError.constructionFailed("Index capacity exceeded; rebuild with larger capacity")
+        }
+
+        let graphVector = vectors is BinaryVectorBuffer ? Self.quantizeForHamming(vector) : vector
+        let slot = nextInternalID
+        let previousVectorCount = vectors.count
+        let previousGraphCount = graph.nodeCount
+
+        let metricsRecorder = metrics
+        let insertStart = metricsRecorder == nil ? nil : ContinuousClock.now
+
+        do {
+            try vectors.insert(vector: graphVector, at: slot)
+            if vectors.count < slot + 1 {
+                vectors.setCount(slot + 1)
+            }
+
+            try IncrementalBuilder.insert(
+                vector: graphVector,
+                at: slot,
+                into: graph,
+                vectors: vectors,
+                entryPoint: entryPoint,
+                metric: configuration.metric,
+                degree: configuration.degree
+            )
+            if graph.nodeCount < slot + 1 {
+                graph.setCount(slot + 1)
+            }
+            hnsw = nil
+
+            let repairConfig = configuration.repairConfiguration
+            if repairConfig.enabled && repairConfig.repairInterval > 0 {
+                pendingRepairIDs.append(UInt32(slot))
+                if pendingRepairIDs.count >= repairConfig.repairInterval {
+                    try triggerRepair(throwOnFailure: false)
+                }
+            }
+
+            guard let assignedID = idMap.assign(numericID: numericID), Int(assignedID) == slot else {
+                throw ANNSError.constructionFailed("Failed to commit internal ID for numeric \(numericID)")
+            }
+        } catch {
+            vectors.setCount(previousVectorCount)
+            graph.setCount(previousGraphCount)
+
+            // Best-effort cleanup of the uncommitted node slot.
+            let emptyIDs = Array(repeating: UInt32.max, count: configuration.degree)
+            let emptyDistances = Array(repeating: Float.greatestFiniteMagnitude, count: configuration.degree)
+            try? graph.setNeighbors(of: slot, ids: emptyIDs, distances: emptyDistances)
+
+            if let annError = error as? ANNSError {
+                throw annError
+            }
+            throw ANNSError.constructionFailed("Incremental insert (numeric) failed: \(error)")
+        }
+
+        if let metricsRecorder, let insertStart {
+            let duration = ContinuousClock.now - insertStart
+            await metricsRecorder.recordInsert(durationNs: Self.durationNanoseconds(duration))
+        }
+    }
+
     public func batchInsert(_ vectors: [[Float]], ids: [String]) async throws {
         guard isBuilt, let vectorStorage = self.vectors, let graph else {
             throw ANNSError.indexEmpty
@@ -627,10 +712,17 @@ public actor ANNSIndex {
         }
 
         let mapped = filtered.compactMap { result -> SearchResult? in
-            guard let externalID = idMap.externalID(for: result.internalID) else {
+            let externalID = idMap.externalID(for: result.internalID) ?? ""
+            let numericID = idMap.numericID(for: result.internalID)
+            guard !externalID.isEmpty || numericID != nil else {
                 return nil
             }
-            return SearchResult(id: externalID, score: result.score, internalID: result.internalID)
+            return SearchResult(
+                id: externalID,
+                score: result.score,
+                internalID: result.internalID,
+                numericID: numericID
+            )
         }
         let output = Array(mapped.prefix(k))
         if let metricsRecorder, let searchStart {
@@ -759,10 +851,17 @@ public actor ANNSIndex {
         let withinRange = filtered.filter { $0.score <= maxDistance }
 
         let mapped = withinRange.compactMap { result -> SearchResult? in
-            guard let externalID = idMap.externalID(for: result.internalID) else {
+            let externalID = idMap.externalID(for: result.internalID) ?? ""
+            let numericID = idMap.numericID(for: result.internalID)
+            guard !externalID.isEmpty || numericID != nil else {
                 return nil
             }
-            return SearchResult(id: externalID, score: result.score, internalID: result.internalID)
+            return SearchResult(
+                id: externalID,
+                score: result.score,
+                internalID: result.internalID,
+                numericID: numericID
+            )
         }
         let output = Array(mapped.prefix(limit))
         if let metricsRecorder, let searchStart {
