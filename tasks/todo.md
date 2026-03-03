@@ -2144,7 +2144,7 @@ All six phases implemented:
 > **Last Updated**: 2026-03-03
 
 - [x] Pre-step — Backfill `GPUCPUParityTests.swift` and validate parity gate.
-- [ ] 6.1 — Fix `StreamingIndex.rangeSearch(maxDistance: 0)` exact-match behavior with TDD.
+- [x] 6.1 — Fix `StreamingIndex.rangeSearch(maxDistance: 0)` exact-match behavior with TDD.
 - [ ] 6.2 — Consolidate duplicated test `SeededGenerator` into shared `TestUtilities.swift`.
 - [ ] 6.3 — Add local_join early-exit CAS guards in float32/float16 kernels.
 - [ ] 6.4 — Add PQ threadgroup memory guard in `GPUADCSearch` with boundary test.
@@ -2154,3 +2154,5 @@ All six phases implemented:
 
 - Added `Tests/MetalANNSTests/GPUCPUParityTests.swift` with parameterized GPU-vs-CPU overlap checks and deterministic repeatability coverage.
 - `swift test --filter GPUCPUParityTests` passes in this environment via standard GPU-context skip behavior when the Metal default library is unavailable.
+- Added `rangeSearchZeroDistanceReturnsExactMatch` to `StreamingIndexSearchTests`; RED confirmed before fix.
+- Fixed `StreamingIndex.rangeSearch` guard from `maxDistance > 0` to `maxDistance >= 0`; `swift test --filter StreamingIndexSearchTests` passes (5/5).

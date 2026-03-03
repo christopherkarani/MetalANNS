@@ -103,6 +103,26 @@ struct StreamingIndexSearchTests {
         #expect(!results.isEmpty)
     }
 
+    @Test("rangeSearch with maxDistance 0 returns exact matches")
+    func rangeSearchZeroDistanceReturnsExactMatch() async throws {
+        let index = StreamingIndex(config: StreamingConfiguration(
+            deltaCapacity: 50,
+            mergeStrategy: .blocking,
+            indexConfiguration: IndexConfiguration(degree: 4, metric: .l2)
+        ))
+
+        let dim = 8
+        let vectors = (0..<10).map { makeVector(row: 30_000 + $0, dim: dim) }
+        let ids = (0..<10).map { "v-\($0)" }
+        try await index.batchInsert(vectors, ids: ids)
+
+        let results = try await index.rangeSearch(query: vectors[3], maxDistance: 0.0, limit: 10)
+        #expect(
+            results.contains(where: { $0.id == "v-3" }),
+            "rangeSearch(maxDistance: 0) must return the exact-match vector"
+        )
+    }
+
     private func makeVector(row: Int, dim: Int) -> [Float] {
         (0..<dim).map { col in
             let i = Float(row * dim + col)

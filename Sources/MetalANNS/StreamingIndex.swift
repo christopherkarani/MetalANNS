@@ -245,7 +245,7 @@ public actor StreamingIndex {
     ) async throws -> [SearchResult] {
         try checkBackgroundMergeError()
         try validateQueryDimension(query)
-        guard maxDistance > 0 else {
+        guard maxDistance >= 0 else {
             return []
         }
         guard limit > 0 else {
