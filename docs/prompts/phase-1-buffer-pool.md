@@ -7,15 +7,15 @@ You are a senior Swift/Metal engineer implementing a performance optimization in
 ## Context
 
 **Project:** MetalANNS at `/Users/chriskarani/CodingProjects/MetalANNS`
-**Branch:** `phase25` (current working branch)
+**Branch:** `grdb4` (current working branch)
 **Language:** Swift 6.0 with strict concurrency
 **Build system:** SPM via xcodebuild (NOT `swift build` — Metal shaders require xcodebuild)
 **Task tracker:** `tasks/wax-readiness-todo.md` — check off items as you complete each step
 **Full plan:** `docs/plans/2026-02-28-metalanns-wax-readiness.md`
 
-**The problem:** `FullGPUSearch.search()` at `Sources/MetalANNSCore/FullGPUSearch.swift:58-74` allocates 3 new `MTLBuffer` objects on every call. Metal buffer allocation involves page table modifications. Under concurrent `batchSearch` (which calls `search()` N times), this creates significant allocator pressure and is the dominant non-compute cost.
+**The problem:** `FullGPUSearch.search()` at `Sources/MetalANNSCore/FullGPUSearch.swift:53-77` allocates 4 new `MTLBuffer` objects on every call in a single guard chain (queryBuffer, outputDistanceBuffer, outputIDBuffer, visitedGenerationBuffer). Metal buffer allocation involves page table modifications. Under concurrent `batchSearch` (which calls `search()` N times), this creates significant allocator pressure and is the dominant non-compute cost.
 
-**The fix:** Introduce a `SearchBufferPool` that pre-allocates and reuses buffers across search calls. Wire it into `MetalContext` (the shared GPU context object) so `FullGPUSearch` can acquire/release without API changes.
+**The fix:** Introduce a `SearchBufferPool` that pre-allocates and reuses 3 of those buffers across search calls (queryBuffer, outputDistanceBuffer, outputIDBuffer). The `visitedGenerationBuffer` is sized by `nodeCount` (not query dimensions) and will be pooled separately in Phase 2 — leave it as a regular allocation for now. Wire the pool into `MetalContext` so `FullGPUSearch` can acquire/release without API changes.
 
 ## Constraints (READ FIRST)
 
@@ -310,9 +310,12 @@ self.searchBufferPool = SearchBufferPool(device: device)
 
 Open `Sources/MetalANNSCore/FullGPUSearch.swift`.
 
-**Replace lines 58-74** (the entire block starting with `guard let queryBuffer = context.device.makeBuffer` through the closing `}`) with:
+Read the file first to understand the exact guard chain. You will see a single `guard` block (around lines 53-77) that allocates all 4 buffers: `queryBuffer`, `outputDistanceBuffer`, `outputIDBuffer`, and `visitedGenerationBuffer`.
+
+**Replace only the first 3 buffer allocations** — keep `visitedGenerationBuffer` as a regular `device.makeBuffer` call. The result should look like:
 
 ```swift
+// Pool-managed buffers (query, output distances, output IDs)
 let buffers = try context.searchBufferPool.acquire(queryDim: query.count, maxK: kLimit)
 defer { context.searchBufferPool.release(buffers) }
 
@@ -320,9 +323,19 @@ let queryBuffer = buffers.queryBuffer
 queryBuffer.contents().copyMemory(from: query, byteCount: query.count * floatSize)
 let outputDistanceBuffer = buffers.outputDistanceBuffer
 let outputIDBuffer = buffers.outputIDBuffer
+
+// visitedGenerationBuffer stays as a direct allocation (pooled in Phase 2)
+let visitedLength = max(nodeCount * uintSize, uintSize)
+guard let visitedGenerationBuffer = context.device.makeBuffer(
+    length: visitedLength, options: .storageModeShared
+) else {
+    throw ANNSError.searchFailed("Failed to allocate visited generation buffer")
+}
+// Zero-initialize so generation 0 is never a valid active generation
+visitedGenerationBuffer.contents().initializeMemory(as: UInt32.self, repeating: 0, count: nodeCount)
 ```
 
-**Critical:** The `defer` ensures buffers are returned to the pool even if `context.execute` throws. The `defer` MUST be placed before the `try await context.execute` call so it executes after the GPU work completes.
+**Critical:** The `defer` ensures buffers are returned to the pool even if `context.execute` throws. Verify that `outputDistanceBuffer` and `outputIDBuffer` are still bound at the same encoder indices as before — do not renumber any buffer bindings.
 
 ### Step 5 — Run FULL test suite
 
@@ -358,7 +371,7 @@ Mark Task 1.2 items and Phase 1 exit criteria complete in `tasks/wax-readiness-t
 
 | File | Lines | Role | Touch? |
 |------|-------|------|--------|
-| `Sources/MetalANNSCore/FullGPUSearch.swift` | 58-74 | Buffer allocation to replace | YES — replace |
+| `Sources/MetalANNSCore/FullGPUSearch.swift` | 53-77 | 4-buffer guard chain — replace 3, keep visitedGenerationBuffer | YES — replace |
 | `Sources/MetalANNSCore/FullGPUSearch.swift` | 96-125 | Command encoder setup | NO — leave as-is |
 | `Sources/MetalANNSCore/FullGPUSearch.swift` | 127-141 | Result extraction from output buffers | NO — leave as-is |
 | `Sources/MetalANNSCore/MetalDevice.swift` | 8-12 | MetalContext properties | YES — add pool |
@@ -375,7 +388,7 @@ Before marking Phase 1 complete, confirm:
 - [ ] `SearchBufferPool.swift` exists in `Sources/MetalANNSCore/`
 - [ ] `SearchBufferPoolTests.swift` has 4 tests (3 unit + 1 integration)
 - [ ] `MetalContext` has `searchBufferPool` property
-- [ ] `FullGPUSearch.search()` has zero `device.makeBuffer` calls
+- [ ] `FullGPUSearch.search()` has exactly ONE `device.makeBuffer` call (visitedGenerationBuffer only — 3 buffers now come from pool)
 - [ ] `FullGPUSearch.search()` uses `defer` for buffer release
 - [ ] Full test suite passes: `xcodebuild test -scheme MetalANNS -destination 'platform=macOS'`
 - [ ] Two commits on the branch: one for pool creation, one for wiring

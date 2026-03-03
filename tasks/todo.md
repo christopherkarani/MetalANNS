@@ -1,3 +1,26 @@
+## MetalANNS — Fix SearchBufferPool Unbounded Retention
+
+> **Status**: COMPLETE
+> **Owner**: Codex
+> **Last Updated**: 2026-03-02
+
+## Task Checklist
+
+- [x] Add bounded retention policy to `SearchBufferPool` (entry/byte cap + eviction).
+- [x] Add regression tests for entry-cap and byte-cap behavior in `SearchBufferPoolTests`.
+- [x] Run targeted `SearchBufferPool` tests and record results.
+
+## Review Results
+
+- Added bounded pooling with both `maxRetainedEntries` and `maxRetainedBytes` caps, plus eviction on release.
+- Added deterministic pool-cap tests:
+  - `releaseEvictsToEntryCap`
+  - `releaseEvictsToByteCap`
+  - `releaseDropsOversizedBuffer`
+- Targeted validation:
+  - `swift test --filter "releaseEvictsToEntryCap|releaseEvictsToByteCap|releaseDropsOversizedBuffer"` passed (3/3).
+  - `swift test --filter SearchBufferPoolTests` runs 7 tests; only `fullGPUSearchCorrectAfterPoolRefactor` fails in this environment due known Metal default-library issue (`MTLLibraryErrorDomain Code=6`).
+
 ## MetalANNS — Remediation: `docs/code-audit-report.md`
 
 > **Status**: COMPLETE
