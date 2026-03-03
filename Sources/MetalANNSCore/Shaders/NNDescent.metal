@@ -252,6 +252,30 @@ inline bool try_insert_neighbor(
     return true;
 }
 
+inline float current_worst_distance(
+    device atomic_uint *adj_ids,
+    device atomic_uint *adj_dists_bits,
+    uint node,
+    uint degree
+) {
+    uint base = node * degree;
+    float worst_distance = -FLT_MAX;
+    bool found = false;
+    for (uint slot = 0; slot < degree; slot++) {
+        uint slot_id = atomic_load_explicit(&adj_ids[base + slot], memory_order_relaxed);
+        if (slot_id == LOCKED_SLOT) {
+            continue;
+        }
+        uint bits = atomic_load_explicit(&adj_dists_bits[base + slot], memory_order_relaxed);
+        float distance = as_type<float>(bits);
+        if (!found || distance > worst_distance) {
+            worst_distance = distance;
+            found = true;
+        }
+    }
+    return found ? worst_distance : -FLT_MAX;
+}
+
 kernel void build_reverse_list(
     device const uint *adjacency [[buffer(0)]],
     device uint *reverse_list [[buffer(1)]],
@@ -320,35 +344,45 @@ kernel void local_join(
             continue;
         }
 
+        float a_worst = current_worst_distance(adj_ids, adj_dists_bits, a, degree);
+
         for (uint ri = 0; ri < actual_reverse; ri++) {
             uint b = rev[ri];
             if (b >= node_count || a == b) {
                 continue;
             }
 
+            float b_worst = current_worst_distance(adj_ids, adj_dists_bits, b, degree);
             float pair_dist = compute_metric_distance(vectors, a, b, dim, metric_type);
 
-            try_insert_neighbor(
-                adj_ids,
-                adj_dists_bits,
-                a,
-                b,
-                node_count,
-                degree,
-                pair_dist,
-                update_counter
-            );
+            if (pair_dist < a_worst) {
+                bool inserted = try_insert_neighbor(
+                    adj_ids,
+                    adj_dists_bits,
+                    a,
+                    b,
+                    node_count,
+                    degree,
+                    pair_dist,
+                    update_counter
+                );
+                if (inserted) {
+                    a_worst = current_worst_distance(adj_ids, adj_dists_bits, a, degree);
+                }
+            }
 
-            try_insert_neighbor(
-                adj_ids,
-                adj_dists_bits,
-                b,
-                a,
-                node_count,
-                degree,
-                pair_dist,
-                update_counter
-            );
+            if (pair_dist < b_worst) {
+                try_insert_neighbor(
+                    adj_ids,
+                    adj_dists_bits,
+                    b,
+                    a,
+                    node_count,
+                    degree,
+                    pair_dist,
+                    update_counter
+                );
+            }
         }
     }
 }

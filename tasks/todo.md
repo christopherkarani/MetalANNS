@@ -2146,7 +2146,7 @@ All six phases implemented:
 - [x] Pre-step — Backfill `GPUCPUParityTests.swift` and validate parity gate.
 - [x] 6.1 — Fix `StreamingIndex.rangeSearch(maxDistance: 0)` exact-match behavior with TDD.
 - [x] 6.2 — Consolidate duplicated test `SeededGenerator` into shared `TestUtilities.swift`.
-- [ ] 6.3 — Add local_join early-exit CAS guards in float32/float16 kernels.
+- [x] 6.3 — Add local_join early-exit CAS guards in float32/float16 kernels.
 - [ ] 6.4 — Add PQ threadgroup memory guard in `GPUADCSearch` with boundary test.
 - [ ] Final verification — Run full `swift test` and record outcomes.
 
@@ -2160,3 +2160,6 @@ All six phases implemented:
 - Removed file-local `private struct SeededGenerator` blocks from 9 test files (including `GPUCPUParityTests`).
 - Verified singleton definition via `rg -n \"struct SeededGenerator\" Tests/MetalANNSTests` (only `TestUtilities.swift` remains).
 - `swift test` currently reports 243/262 pass; remaining failures are mostly known Metal default-library environment failures plus two flaky non-GPU tests (`ShardedIndexParallelSearchTests.parallelSearchMatchesSequential`, `StreamingIndexMergeTests.mergeClearsIsMerging`).
+- Added correctness-safe early-exit guards in `local_join` (`NNDescent.metal` / `NNDescentFloat16.metal`) using scanned worst-distance bounds before attempting CAS inserts.
+- Kept existing symmetric updates intact (`a <- b` and `b <- a`), only gating CAS attempts with `pair_dist < worst` checks.
+- `swift test --filter GPUCPUParityTests` passes (with GPU context skipped in this environment); `swift test --filter NNDescentGPUTests` remains blocked by known Metal default-library load failures.
