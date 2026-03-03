@@ -2166,3 +2166,4 @@ All six phases implemented:
 - Added `rejectsDistanceTableExceedingThreadgroupLimit` in `GPUADCSearchTests` and fail-fast guard in `GPUADCSearch.computeDistances` immediately after `tableLengthBytes` calculation.
 - `swift test --filter GPUADCSearchTests` passes (12/12; GPU-specific paths skip when Metal context is unavailable).
 - Final `swift test`: 246/263 pass; remaining 17 failures are all known Metal default-library environment failures (`MTLLibraryErrorDomain Code=6`).
+- Follow-up review fix: recompute `a_worst` inside each `(a,b)` loop iteration in both NN-Descent kernels to avoid stale early-exit gating under concurrent lock/unlock churn.

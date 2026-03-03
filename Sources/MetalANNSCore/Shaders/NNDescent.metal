@@ -344,19 +344,18 @@ kernel void local_join(
             continue;
         }
 
-        float a_worst = current_worst_distance(adj_ids, adj_dists_bits, a, degree);
-
         for (uint ri = 0; ri < actual_reverse; ri++) {
             uint b = rev[ri];
             if (b >= node_count || a == b) {
                 continue;
             }
 
+            float a_worst = current_worst_distance(adj_ids, adj_dists_bits, a, degree);
             float b_worst = current_worst_distance(adj_ids, adj_dists_bits, b, degree);
             float pair_dist = compute_metric_distance(vectors, a, b, dim, metric_type);
 
             if (pair_dist < a_worst) {
-                bool inserted = try_insert_neighbor(
+                try_insert_neighbor(
                     adj_ids,
                     adj_dists_bits,
                     a,
@@ -366,9 +365,6 @@ kernel void local_join(
                     pair_dist,
                     update_counter
                 );
-                if (inserted) {
-                    a_worst = current_worst_distance(adj_ids, adj_dists_bits, a, degree);
-                }
             }
 
             if (pair_dist < b_worst) {
