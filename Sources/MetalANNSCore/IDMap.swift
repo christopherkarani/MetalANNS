@@ -5,6 +5,8 @@ public struct IDMap: Sendable, Codable {
     private var externalToInternal: [String: UInt32] = [:]
     private var internalToExternal: [UInt32: String] = [:]
     private var nextID: UInt32 = 0
+    private var numericToInternal: [UInt64: UInt32] = [:]
+    private var internalToNumeric: [UInt32: UInt64] = [:]
 
     public init() {}
 
@@ -48,7 +50,67 @@ public struct IDMap: Sendable, Codable {
     }
 
     public var count: Int {
-        externalToInternal.count
+        externalToInternal.count + numericToInternal.count
+    }
+}
+
+// MARK: - UInt64 Key Support
+
+extension IDMap {
+    /// Assigns a new internal ID for a numeric (UInt64) key.
+    /// Returns nil if the numeric key already exists or capacity is exhausted.
+    public mutating func assign(numericID: UInt64) -> UInt32? {
+        guard numericToInternal[numericID] == nil else {
+            return nil
+        }
+        guard nextID < UInt32.max else {
+            return nil
+        }
+
+        let internalID = nextID
+        numericToInternal[numericID] = internalID
+        internalToNumeric[internalID] = numericID
+        nextID += 1
+        return internalID
+    }
+
+    public func internalID(forNumeric numericID: UInt64) -> UInt32? {
+        numericToInternal[numericID]
+    }
+
+    public func numericID(for internalID: UInt32) -> UInt64? {
+        internalToNumeric[internalID]
+    }
+}
+
+// MARK: - Codable (explicit, for backward-compat when loading old indexes)
+
+extension IDMap {
+    private enum CodingKeys: CodingKey {
+        case externalToInternal
+        case internalToExternal
+        case nextID
+        case numericToInternal
+        case internalToNumeric
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        externalToInternal = try c.decode([String: UInt32].self, forKey: .externalToInternal)
+        internalToExternal = try c.decode([UInt32: String].self, forKey: .internalToExternal)
+        nextID = try c.decode(UInt32.self, forKey: .nextID)
+        // Backward compatibility: older indexes do not include numeric maps.
+        numericToInternal = try c.decodeIfPresent([UInt64: UInt32].self, forKey: .numericToInternal) ?? [:]
+        internalToNumeric = try c.decodeIfPresent([UInt32: UInt64].self, forKey: .internalToNumeric) ?? [:]
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(externalToInternal, forKey: .externalToInternal)
+        try c.encode(internalToExternal, forKey: .internalToExternal)
+        try c.encode(nextID, forKey: .nextID)
+        try c.encode(numericToInternal, forKey: .numericToInternal)
+        try c.encode(internalToNumeric, forKey: .internalToNumeric)
     }
 }
 
@@ -56,12 +118,26 @@ public struct IDMap: Sendable, Codable {
 // MARK: - Persistence Reconstruction
 extension IDMap {
     package static func makeForPersistence(rows: [(String, UInt32)], nextID: UInt32) -> IDMap {
+        makeForPersistence(rows: rows, numericRows: [], nextID: nextID)
+    }
+
+    package static func makeForPersistence(
+        rows: [(String, UInt32)],
+        numericRows: [(UInt64, UInt32)],
+        nextID: UInt32
+    ) -> IDMap {
         var map = IDMap()
         map.externalToInternal.removeAll()
         map.internalToExternal.removeAll()
+        map.numericToInternal.removeAll()
+        map.internalToNumeric.removeAll()
         for (externalID, internalID) in rows {
             map.externalToInternal[externalID] = internalID
             map.internalToExternal[internalID] = externalID
+        }
+        for (numericID, internalID) in numericRows {
+            map.numericToInternal[numericID] = internalID
+            map.internalToNumeric[internalID] = numericID
         }
         map.nextID = nextID
         return map
