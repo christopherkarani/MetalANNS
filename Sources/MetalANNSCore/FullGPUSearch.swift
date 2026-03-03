@@ -42,92 +42,22 @@ public enum FullGPUSearch {
 
         let kLimit = min(k, nodeCount)
         let efLimit = min(max(ef, kLimit), nodeCount)
-
-        let kernelName = vectors.isFloat16 ? "beam_search_f16" : "beam_search"
-        let pipeline = try await context.pipelineCache.pipeline(for: kernelName)
-
-        let floatSize = MemoryLayout<Float>.stride
-        let uintSize = MemoryLayout<UInt32>.stride
-
-        let buffers = try context.searchBufferPool.acquire(queryDim: query.count, maxK: kLimit)
-        defer { context.searchBufferPool.release(buffers) }
-        let visited = try context.searchBufferPool.acquireVisited(nodeCount: nodeCount)
-        defer { context.searchBufferPool.releaseVisited(visited.buffer, capacity: nodeCount) }
-
-        let queryBuffer = buffers.queryBuffer
-        query.withUnsafeBytes { bytes in
-            if let baseAddress = bytes.baseAddress {
-                queryBuffer.contents().copyMemory(from: baseAddress, byteCount: bytes.count)
-            }
-        }
-        let outputDistanceBuffer = buffers.outputDistanceBuffer
-        let outputIDBuffer = buffers.outputIDBuffer
-
-        let visitedGenerationBuffer = visited.buffer
-
-        var nodeCountValue = UInt32(nodeCount)
-        var degreeValue = UInt32(graph.degree)
-        var dimValue = UInt32(vectors.dim)
-        var kValue = UInt32(kLimit)
-        var efValue = UInt32(efLimit)
-        var entryPointValue = UInt32(entryPoint)
-        var visitGenerationValue = visited.generation
         guard metric != .hamming else {
             throw ANNSError.searchFailed("FullGPUSearch does not support metric .hamming")
         }
-        var metricType: UInt32 = switch metric {
-        case .cosine:
-            0
-        case .l2:
-            1
-        case .innerProduct:
-            2
-        case .hamming:
-            0
-        }
 
-        try await context.execute { commandBuffer in
-            guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                throw ANNSError.searchFailed("Failed to create compute command encoder")
-            }
-
-            encoder.setComputePipelineState(pipeline)
-            encoder.setBuffer(vectors.buffer, offset: 0, index: 0)
-            encoder.setBuffer(graph.adjacencyBuffer, offset: 0, index: 1)
-            encoder.setBuffer(queryBuffer, offset: 0, index: 2)
-            encoder.setBuffer(outputDistanceBuffer, offset: 0, index: 3)
-            encoder.setBuffer(outputIDBuffer, offset: 0, index: 4)
-            encoder.setBytes(&nodeCountValue, length: uintSize, index: 5)
-            encoder.setBytes(&degreeValue, length: uintSize, index: 6)
-            encoder.setBytes(&dimValue, length: uintSize, index: 7)
-            encoder.setBytes(&kValue, length: uintSize, index: 8)
-            encoder.setBytes(&efValue, length: uintSize, index: 9)
-            encoder.setBytes(&entryPointValue, length: uintSize, index: 10)
-            encoder.setBytes(&metricType, length: uintSize, index: 11)
-            encoder.setBuffer(visitedGenerationBuffer, offset: 0, index: 12)
-            encoder.setBytes(&visitGenerationValue, length: uintSize, index: 13)
-
-            let threadWidth = max(1, min(pipeline.maxTotalThreadsPerThreadgroup, max(32, min(efLimit, 128))))
-            let threadsPerThreadgroup = MTLSize(width: threadWidth, height: 1, depth: 1)
-            let threadgroups = MTLSize(width: 1, height: 1, depth: 1)
-            encoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
-            encoder.endEncoding()
-        }
-
-        let outputIDPointer = outputIDBuffer.contents().bindMemory(to: UInt32.self, capacity: kLimit)
-        let outputDistancePointer = outputDistanceBuffer.contents().bindMemory(to: Float.self, capacity: kLimit)
-
-        var results: [SearchResult] = []
-        results.reserveCapacity(kLimit)
-        for index in 0..<kLimit {
-            let nodeID = outputIDPointer[index]
-            if nodeID == UInt32.max {
-                continue
-            }
-            results.append(
-                SearchResult(id: "", score: outputDistancePointer[index], internalID: nodeID)
-            )
-        }
-        return results
+        // Full GPU beam-search kernel currently exhibits recall regressions on
+        // larger/random graphs. Delegate to the hybrid GPU distance path for
+        // correctness parity while preserving GPU acceleration for distance math.
+        return try await SearchGPU.search(
+            context: context,
+            query: query,
+            vectors: vectors,
+            graph: graph,
+            entryPoint: entryPoint,
+            k: kLimit,
+            ef: efLimit,
+            metric: metric
+        )
     }
 }

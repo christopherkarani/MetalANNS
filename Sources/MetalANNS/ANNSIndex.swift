@@ -642,7 +642,7 @@ public actor ANNSIndex {
 
         if let context, canAttemptGPU {
             do {
-                rawResults = try await FullGPUSearch.search(
+                rawResults = try await SearchGPU.search(
                     context: context,
                     query: normalizedQuery,
                     vectors: vectors,
@@ -660,7 +660,7 @@ public actor ANNSIndex {
                 let extractedVectors = extractVectors(from: vectors)
                 let extractedGraph = extractGraph(from: graph)
 
-                if let hnsw, searchMetric == configuration.metric {
+                if !isReadOnlyLoadedIndex, let hnsw, searchMetric == configuration.metric {
                     rawResults = try await HNSWSearchCPU.search(
                         query: normalizedQuery,
                         vectors: extractedVectors,
@@ -690,7 +690,7 @@ public actor ANNSIndex {
             let extractedVectors = extractVectors(from: vectors)
             let extractedGraph = extractGraph(from: graph)
 
-            if let hnsw, searchMetric == configuration.metric {
+            if !isReadOnlyLoadedIndex, let hnsw, searchMetric == configuration.metric {
                 rawResults = try await HNSWSearchCPU.search(
                     query: normalizedQuery,
                     vectors: extractedVectors,
@@ -780,7 +780,7 @@ public actor ANNSIndex {
 
         if let context, canAttemptGPU {
             do {
-                rawResults = try await FullGPUSearch.search(
+                rawResults = try await SearchGPU.search(
                     context: context,
                     query: normalizedQuery,
                     vectors: vectors,
@@ -798,7 +798,7 @@ public actor ANNSIndex {
                 let extractedVectors = extractVectors(from: vectors)
                 let extractedGraph = extractGraph(from: graph)
 
-                if let hnsw, searchMetric == configuration.metric {
+                if !isReadOnlyLoadedIndex, let hnsw, searchMetric == configuration.metric {
                     rawResults = try await HNSWSearchCPU.search(
                         query: normalizedQuery,
                         vectors: extractedVectors,
@@ -828,7 +828,7 @@ public actor ANNSIndex {
             let extractedVectors = extractVectors(from: vectors)
             let extractedGraph = extractGraph(from: graph)
 
-            if let hnsw, searchMetric == configuration.metric {
+            if !isReadOnlyLoadedIndex, let hnsw, searchMetric == configuration.metric {
                 rawResults = try await HNSWSearchCPU.search(
                     query: normalizedQuery,
                     vectors: extractedVectors,
