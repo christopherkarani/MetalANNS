@@ -116,9 +116,61 @@ struct StreamingIndexPersistenceTests {
         #expect(count == 30)
     }
 
+    @Test("mergedVectorsAreEvictedFromHistory")
+    func mergedVectorsAreEvictedFromHistory() async throws {
+        let index = StreamingIndex(config: StreamingConfiguration(
+            deltaCapacity: 10,
+            mergeStrategy: .blocking
+        ))
+
+        let vectors = (0..<15).map { makeVector(row: 40_000 + $0, dim: 8) }
+        let ids = (0..<15).map { "m-\($0)" }
+        try await index.batchInsert(vectors, ids: ids)
+        try await index.flush()
+
+        let dir = tempDirectoryURL()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try await index.save(to: dir)
+        let persistedIDs = try persistedHistoryIDs(at: dir)
+        #expect(
+            persistedIDs.isEmpty,
+            "Persisted history should only contain post-merge pending IDs, not merged IDs"
+        )
+    }
+
+    @Test("deletedVectorsAreRemovedFromHistory")
+    func deletedVectorsAreRemovedFromHistory() async throws {
+        let index = StreamingIndex(config: StreamingConfiguration(
+            deltaCapacity: 10,
+            mergeStrategy: .blocking
+        ))
+
+        let vectors = (0..<5).map { makeVector(row: 50_000 + $0, dim: 8) }
+        let ids = (0..<5).map { "d-\($0)" }
+        try await index.batchInsert(vectors, ids: ids)
+        try await index.delete(id: "d-1")
+        try await index.delete(id: "d-3")
+
+        let dir = tempDirectoryURL()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try await index.save(to: dir)
+        let persistedIDs = try persistedHistoryIDs(at: dir)
+        #expect(!persistedIDs.contains("d-1"))
+        #expect(!persistedIDs.contains("d-3"))
+    }
+
     private func tempDirectoryURL() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("metalanns-streaming-\(UUID().uuidString)")
+    }
+
+    private func persistedHistoryIDs(at dir: URL) throws -> [String] {
+        let dbPath = dir.appendingPathComponent("streaming.db").path
+        let db = try StreamingDatabase(path: dbPath)
+        let (_, ids) = try db.loadAllVectors()
+        return ids
     }
 
     private func makeVector(row: Int, dim: Int) -> [Float] {

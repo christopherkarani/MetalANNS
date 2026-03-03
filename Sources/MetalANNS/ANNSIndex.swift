@@ -1116,6 +1116,51 @@ public actor ANNSIndex {
         max(0, idMap.count - softDeletion.deletedCount)
     }
 
+    func streamingActiveExternalIDs() throws -> [String] {
+        guard isBuilt, let vectors else {
+            throw ANNSError.indexEmpty
+        }
+
+        var activeIDs: [String] = []
+        activeIDs.reserveCapacity(max(0, idMap.count - softDeletion.deletedCount))
+        for slot in 0..<vectors.count {
+            let internalID = UInt32(slot)
+            guard !softDeletion.isDeleted(internalID) else {
+                continue
+            }
+            guard let externalID = idMap.externalID(for: internalID) else {
+                continue
+            }
+            activeIDs.append(externalID)
+        }
+        return activeIDs
+    }
+
+    func streamingActiveRecords() throws -> (vectors: [[Float]], ids: [String]) {
+        guard isBuilt, let vectors else {
+            throw ANNSError.indexEmpty
+        }
+
+        var activeVectors: [[Float]] = []
+        var activeIDs: [String] = []
+        activeVectors.reserveCapacity(max(0, idMap.count - softDeletion.deletedCount))
+        activeIDs.reserveCapacity(max(0, idMap.count - softDeletion.deletedCount))
+
+        for slot in 0..<vectors.count {
+            let internalID = UInt32(slot)
+            guard !softDeletion.isDeleted(internalID) else {
+                continue
+            }
+            guard let externalID = idMap.externalID(for: internalID) else {
+                continue
+            }
+            activeIDs.append(externalID)
+            activeVectors.append(vectors.vector(at: slot))
+        }
+
+        return (activeVectors, activeIDs)
+    }
+
     private func batchSearchMaxConcurrency() async -> Int {
         if let context {
             return await context.queuePool.queues.count
