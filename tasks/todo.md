@@ -2147,7 +2147,7 @@ All six phases implemented:
 - [x] 6.1 — Fix `StreamingIndex.rangeSearch(maxDistance: 0)` exact-match behavior with TDD.
 - [x] 6.2 — Consolidate duplicated test `SeededGenerator` into shared `TestUtilities.swift`.
 - [x] 6.3 — Add local_join early-exit CAS guards in float32/float16 kernels.
-- [ ] 6.4 — Add PQ threadgroup memory guard in `GPUADCSearch` with boundary test.
+- [x] 6.4 — Add PQ threadgroup memory guard in `GPUADCSearch` with boundary test.
 - [ ] Final verification — Run full `swift test` and record outcomes.
 
 ### Review Results
@@ -2163,3 +2163,6 @@ All six phases implemented:
 - Added correctness-safe early-exit guards in `local_join` (`NNDescent.metal` / `NNDescentFloat16.metal`) using scanned worst-distance bounds before attempting CAS inserts.
 - Kept existing symmetric updates intact (`a <- b` and `b <- a`), only gating CAS attempts with `pair_dist < worst` checks.
 - `swift test --filter GPUCPUParityTests` passes (with GPU context skipped in this environment); `swift test --filter NNDescentGPUTests` remains blocked by known Metal default-library load failures.
+- Added `rejectsDistanceTableExceedingThreadgroupLimit` in `GPUADCSearchTests` and fail-fast guard in `GPUADCSearch.computeDistances` immediately after `tableLengthBytes` calculation.
+- `swift test --filter GPUADCSearchTests` passes (12/12; GPU-specific paths skip when Metal context is unavailable).
+- Final `swift test`: 246/263 pass; remaining 17 failures are all known Metal default-library environment failures (`MTLLibraryErrorDomain Code=6`).

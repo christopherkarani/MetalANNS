@@ -59,6 +59,13 @@ public enum GPUADCSearch {
         }
 
         let tableLengthBytes = m * ks * MemoryLayout<Float>.stride
+        guard tableLengthBytes <= context.device.maxThreadgroupMemoryLength else {
+            throw ANNSError.searchFailed(
+                "PQ distance table (\(tableLengthBytes) bytes) exceeds device threadgroup memory limit "
+                    + "(\(context.device.maxThreadgroupMemoryLength) bytes). "
+                    + "Reduce M (current: \(m)) or Ks (current: \(ks))."
+            )
+        }
         let distancesLengthBytes = paddedVectorCount * MemoryLayout<Float>.stride
         let codesLengthBytes = candidateCodes.count * MemoryLayout<UInt8>.stride
 

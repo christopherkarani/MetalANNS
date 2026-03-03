@@ -287,6 +287,54 @@ struct GPUADCSearchTests {
         }
     }
 
+    @Test("GPUADCSearch rejects table that exceeds device threadgroup memory")
+    func rejectsDistanceTableExceedingThreadgroupLimit() async throws {
+        guard let context = makeGPUContextOrSkip() else {
+            return
+        }
+
+        let maxThreadgroupBytes = context.device.maxThreadgroupMemoryLength
+        let m = 256
+        let ks = 256
+        let tableLengthBytes = m * ks * MemoryLayout<Float>.stride
+
+        guard tableLengthBytes > maxThreadgroupBytes else {
+            print("Skipping oversized-table guard test: device threadgroup limit is unexpectedly large")
+            return
+        }
+
+        let pq = ProductQuantizer(
+            numSubspaces: m,
+            centroidsPerSubspace: ks,
+            subspaceDimension: 1,
+            codebooks: Array(
+                repeating: Array(repeating: [Float(0)], count: ks),
+                count: m
+            )
+        )
+        let query = Array(repeating: Float(0), count: m)
+        let codes = Array(repeating: Array(repeating: UInt8(0), count: m), count: 4)
+
+        do {
+            _ = try await GPUADCSearch.computeDistances(
+                context: context,
+                query: query,
+                pq: pq,
+                codes: codes
+            )
+            #expect(Bool(false), "Expected oversized threadgroup-table rejection")
+        } catch let error as ANNSError {
+            guard case let .searchFailed(message) = error else {
+                #expect(Bool(false), "Expected searchFailed for oversized threadgroup table, got \(error)")
+                return
+            }
+            #expect(
+                message.contains("threadgroup") || message.contains("table"),
+                "Error message should mention threadgroup/table sizing, got: \(message)"
+            )
+        }
+    }
+
     private func makeGPUContextOrSkip() -> MetalContext? {
         #if targetEnvironment(simulator)
         print("Skipping GPU ADC tests on simulator")
