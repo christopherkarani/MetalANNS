@@ -16,9 +16,50 @@ public struct IVFPQBenchmark: Sendable {
     static func run(
         dataset: BenchmarkDataset,
         annsConfig: BenchmarkRunner.Config,
-        ivfpqConfig: IVFPQConfiguration
+        ivfpqConfig: IVFPQConfiguration,
+        queryCount: Int? = nil,
+        repeatRuns: Int = 1,
+        warmupRuns: Int = 0
     ) async throws -> ComparisonResults {
-        let anns = try await BenchmarkRunner.run(config: annsConfig, dataset: dataset)
+        let repeats = max(1, repeatRuns)
+        let warmups = max(0, warmupRuns)
+        guard !dataset.testVectors.isEmpty else {
+            throw BenchmarkDatasetError.invalidDataset("dataset contains no query vectors")
+        }
+        guard !dataset.groundTruth.isEmpty else {
+            throw BenchmarkDatasetError.invalidDataset("dataset contains no ground truth")
+        }
+
+        let requestedQueryCount = max(1, queryCount ?? annsConfig.queryCount)
+        let effectiveQueryCount = min(requestedQueryCount, dataset.testVectors.count)
+        guard effectiveQueryCount > 0 else {
+            throw BenchmarkDatasetError.invalidDataset("queryCount exceeds available query count")
+        }
+        guard dataset.groundTruth.count >= effectiveQueryCount else {
+            throw BenchmarkDatasetError.invalidDataset("groundTruth does not contain enough rows")
+        }
+
+        let queries = Array(dataset.testVectors.prefix(effectiveQueryCount))
+        let expectedNeighbors = Array(dataset.groundTruth.prefix(effectiveQueryCount))
+
+        let benchmarkDataset = BenchmarkDataset(
+            trainVectors: dataset.trainVectors,
+            testVectors: queries,
+            groundTruth: expectedNeighbors,
+            dimension: dataset.dimension,
+            metric: dataset.metric,
+            neighborsCount: dataset.neighborsCount
+        )
+
+        var adjustedAnnsConfig = annsConfig
+        adjustedAnnsConfig.queryCount = benchmarkDataset.testVectors.count
+
+        let anns = try await BenchmarkRunner.run(
+            config: adjustedAnnsConfig,
+            dataset: benchmarkDataset,
+            repeatRuns: repeats,
+            warmupRuns: warmups
+        )
         let annsRow = BenchmarkReport.Row(
             label: "ANNSIndex",
             recallAt10: anns.recallAt10,
@@ -26,7 +67,12 @@ public struct IVFPQBenchmark: Sendable {
             buildTimeMs: anns.buildTimeMs,
             p50Ms: anns.queryLatencyP50Ms,
             p95Ms: anns.queryLatencyP95Ms,
-            p99Ms: anns.queryLatencyP99Ms
+            p99Ms: anns.queryLatencyP99Ms,
+            recallAt1: anns.recallAt1,
+            recallAt100: anns.recallAt100,
+            queryCount: anns.queryCount,
+            avgQueryMs: anns.queryLatencyMeanMs,
+            maxQueryMs: anns.queryLatencyMaxMs
         )
 
         let capacity = max(dataset.trainVectors.count * 2, dataset.trainVectors.count + 1)
@@ -48,49 +94,62 @@ public struct IVFPQBenchmark: Sendable {
         let top100Count = min(100, dataset.neighborsCount)
         let queryK = max(10, top100Count)
 
-        var latenciesMs: [Double] = []
-        latenciesMs.reserveCapacity(dataset.testVectors.count)
+        var allLatencies: [Double] = []
+        allLatencies.reserveCapacity(queries.count * repeats)
 
         var recallAt1Total: Double = 0
         var recallAt10Total: Double = 0
         var recallAt100Total: Double = 0
+        var totalSearchTimeSeconds: Double = 0
 
-        let batchStart = DispatchTime.now().uptimeNanoseconds
-        for (index, query) in dataset.testVectors.enumerated() {
-            let latencyStart = DispatchTime.now().uptimeNanoseconds
-            let results = await ivfpqIndex.search(query: query, k: queryK)
-            let latencyEnd = DispatchTime.now().uptimeNanoseconds
-            latenciesMs.append(Double(latencyEnd - latencyStart) / 1_000_000.0)
-
-            let expected = dataset.groundTruth[index]
-            let resultIDs = results.compactMap(parseID)
-
-            let approxTop1 = Set(resultIDs.prefix(top1Count))
-            let exactTop1 = Set(expected.prefix(top1Count))
-            recallAt1Total += Double(approxTop1.intersection(exactTop1).count) / Double(max(1, top1Count))
-
-            let approxTop10 = Set(resultIDs.prefix(top10Count))
-            let exactTop10 = Set(expected.prefix(top10Count))
-            recallAt10Total += Double(approxTop10.intersection(exactTop10).count) / Double(max(1, top10Count))
-
-            let approxTop100 = Set(resultIDs.prefix(top100Count))
-            let exactTop100 = Set(expected.prefix(top100Count))
-            recallAt100Total += Double(approxTop100.intersection(exactTop100).count) / Double(max(1, top100Count))
+        if warmups > 0 {
+            for _ in 0..<warmups {
+                _ = try await benchmarkIVFPQBatch(
+                    index: ivfpqIndex,
+                    queryK: queryK,
+                    top1Count: top1Count,
+                    top10Count: top10Count,
+                    top100Count: top100Count,
+                    queries: queries,
+                    expectedNeighbors: expectedNeighbors,
+                    measureLatency: false
+                )
+            }
         }
-        let batchEnd = DispatchTime.now().uptimeNanoseconds
 
-        let queryCount = max(1, dataset.testVectors.count)
-        let totalBatchSeconds = Double(batchEnd - batchStart) / 1_000_000_000.0
-        let qps = totalBatchSeconds > 0 ? Double(dataset.testVectors.count) / totalBatchSeconds : 0
+        for _ in 0..<repeats {
+            let batchStats = try await benchmarkIVFPQBatch(
+                index: ivfpqIndex,
+                queryK: queryK,
+                top1Count: top1Count,
+                top10Count: top10Count,
+                top100Count: top100Count,
+                queries: queries,
+                expectedNeighbors: expectedNeighbors,
+                measureLatency: true
+            )
+            allLatencies.append(contentsOf: batchStats.latencies)
+            recallAt1Total += batchStats.recallAt1
+            recallAt10Total += batchStats.recallAt10
+            recallAt100Total += batchStats.recallAt100
+            totalSearchTimeSeconds += batchStats.totalSearchSeconds
+        }
 
+        let totalQueryCount = queries.count * repeats
+        let sortedLatencies = allLatencies.sorted()
         let ivfpqRow = BenchmarkReport.Row(
             label: "IVFPQIndex",
-            recallAt10: recallAt10Total / Double(queryCount),
-            qps: qps,
+            recallAt10: totalQueryCount > 0 ? recallAt10Total / Double(totalQueryCount) : 0,
+            qps: totalQueryCount > 0 && totalSearchTimeSeconds > 0 ? Double(totalQueryCount) / totalSearchTimeSeconds : 0,
             buildTimeMs: buildTimeMs,
-            p50Ms: percentile(0.50, in: latenciesMs),
-            p95Ms: percentile(0.95, in: latenciesMs),
-            p99Ms: percentile(0.99, in: latenciesMs)
+            p50Ms: percentile(0.50, in: sortedLatencies),
+            p95Ms: percentile(0.95, in: sortedLatencies),
+            p99Ms: percentile(0.99, in: sortedLatencies),
+            recallAt1: totalQueryCount > 0 ? recallAt1Total / Double(totalQueryCount) : 0,
+            recallAt100: totalQueryCount > 0 ? recallAt100Total / Double(totalQueryCount) : 0,
+            queryCount: totalQueryCount,
+            avgQueryMs: mean(in: sortedLatencies),
+            maxQueryMs: sortedLatencies.last ?? 0
         )
 
         return ComparisonResults(annsResults: annsRow, ivfpqResults: ivfpqRow)
@@ -113,15 +172,78 @@ public struct IVFPQBenchmark: Sendable {
         return sorted[index]
     }
 
-    private static func parseID(_ result: SearchResult) -> UInt32? {
-        if let direct = UInt32(result.id) {
-            return direct
+    private static func mean(in values: [Double]) -> Double {
+        guard !values.isEmpty else {
+            return 0
+        }
+        return values.reduce(0, +) / Double(values.count)
+    }
+
+    private static func benchmarkIVFPQBatch(
+        index: IVFPQIndex,
+        queryK: Int,
+        top1Count: Int,
+        top10Count: Int,
+        top100Count: Int,
+        queries: [[Float]],
+        expectedNeighbors: [[UInt32]],
+        measureLatency: Bool
+    ) async throws -> IVFPQBenchmarkBatchStats {
+        var latencies: [Double] = []
+        if measureLatency {
+            latencies.reserveCapacity(queries.count)
         }
 
-        if let underscore = result.id.firstIndex(of: "_") {
-            let suffixIndex = result.id.index(after: underscore)
-            return UInt32(result.id[suffixIndex...])
+        var recallAt1Total: Double = 0
+        var recallAt10Total: Double = 0
+        var recallAt100Total: Double = 0
+
+        let batchStart = DispatchTime.now().uptimeNanoseconds
+        for (queryIndex, query) in queries.enumerated() {
+            let expected = expectedNeighbors[queryIndex]
+
+            let searchStart = DispatchTime.now().uptimeNanoseconds
+            let results = await index.search(query: query, k: queryK)
+            let searchEnd = DispatchTime.now().uptimeNanoseconds
+
+            if measureLatency {
+                latencies.append(Double(searchEnd - searchStart) / 1_000_000.0)
+            }
+
+            let approxTop1 = BenchmarkIDParser.uint32Set(from: results, limit: top1Count)
+            let approxTop10 = BenchmarkIDParser.uint32Set(from: results, limit: top10Count)
+            let approxTop100 = BenchmarkIDParser.uint32Set(from: results, limit: top100Count)
+
+            let exactTop1 = Set(expected.prefix(top1Count))
+            let exactTop10 = Set(expected.prefix(top10Count))
+            let exactTop100 = Set(expected.prefix(top100Count))
+
+            if !exactTop1.isEmpty {
+                recallAt1Total += Double(approxTop1.intersection(exactTop1).count) / Double(exactTop1.count)
+            }
+            if !exactTop10.isEmpty {
+                recallAt10Total += Double(approxTop10.intersection(exactTop10).count) / Double(exactTop10.count)
+            }
+            if !exactTop100.isEmpty {
+                recallAt100Total += Double(approxTop100.intersection(exactTop100).count) / Double(exactTop100.count)
+            }
         }
-        return nil
+        let batchEnd = DispatchTime.now().uptimeNanoseconds
+
+        return IVFPQBenchmarkBatchStats(
+            latencies: latencies,
+            recallAt1: recallAt1Total,
+            recallAt10: recallAt10Total,
+            recallAt100: recallAt100Total,
+            totalSearchSeconds: Double(batchEnd - batchStart) / 1_000_000_000.0
+        )
+    }
+
+    private struct IVFPQBenchmarkBatchStats {
+        let latencies: [Double]
+        let recallAt1: Double
+        let recallAt10: Double
+        let recallAt100: Double
+        let totalSearchSeconds: Double
     }
 }

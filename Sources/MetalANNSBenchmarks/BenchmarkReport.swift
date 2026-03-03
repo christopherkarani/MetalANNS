@@ -9,6 +9,11 @@ public struct BenchmarkReport: Sendable {
         public var p50Ms: Double
         public var p95Ms: Double
         public var p99Ms: Double
+        public var recallAt1: Double
+        public var recallAt100: Double
+        public var queryCount: Int
+        public var avgQueryMs: Double
+        public var maxQueryMs: Double
 
         public init(
             label: String,
@@ -17,7 +22,12 @@ public struct BenchmarkReport: Sendable {
             buildTimeMs: Double,
             p50Ms: Double,
             p95Ms: Double,
-            p99Ms: Double
+            p99Ms: Double,
+            recallAt1: Double = 0,
+            recallAt100: Double = 0,
+            queryCount: Int = 0,
+            avgQueryMs: Double = 0,
+            maxQueryMs: Double = 0
         ) {
             self.label = label
             self.recallAt10 = recallAt10
@@ -26,15 +36,29 @@ public struct BenchmarkReport: Sendable {
             self.p50Ms = p50Ms
             self.p95Ms = p95Ms
             self.p99Ms = p99Ms
+            self.recallAt1 = recallAt1
+            self.recallAt100 = recallAt100
+            self.queryCount = queryCount
+            self.avgQueryMs = avgQueryMs
+            self.maxQueryMs = maxQueryMs
         }
     }
 
     public var rows: [Row]
     public var datasetLabel: String
+    public var metadata: [String: String]
+    public var generatedAt: String
 
-    public init(rows: [Row], datasetLabel: String) {
+    public init(
+        rows: [Row],
+        datasetLabel: String,
+        metadata: [String: String] = [:],
+        generatedAt: String = ISO8601DateFormatter().string(from: Date())
+    ) {
         self.rows = rows
         self.datasetLabel = datasetLabel
+        self.metadata = metadata
+        self.generatedAt = generatedAt
     }
 
     public func renderTable() -> String {
@@ -96,6 +120,36 @@ public struct BenchmarkReport: Sendable {
         return lines.joined(separator: "\n") + "\n"
     }
 
+    public func renderJSON() -> String {
+        var payload: [String: Any] = [
+            "datasetLabel": datasetLabel,
+            "generatedAt": generatedAt,
+            "metadata": metadata,
+            "rows": rows.map { row in
+                [
+                    "label": row.label,
+                    "recallAt10": row.recallAt10,
+                    "qps": row.qps,
+                    "buildTimeMs": row.buildTimeMs,
+                    "p50Ms": row.p50Ms,
+                    "p95Ms": row.p95Ms,
+                    "p99Ms": row.p99Ms,
+                    "recallAt1": row.recallAt1,
+                    "recallAt100": row.recallAt100,
+                    "queryCount": row.queryCount,
+                    "avgQueryMs": row.avgQueryMs,
+                    "maxQueryMs": row.maxQueryMs
+                ]
+            }
+        ]
+
+        let jsonData = try? JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        return String(data: jsonData ?? Data("{}".utf8), encoding: .utf8) ?? "{}"
+    }
+
     public func saveCSV(to path: String) throws {
         let url = URL(fileURLWithPath: path)
         try FileManager.default.createDirectory(
@@ -103,6 +157,15 @@ public struct BenchmarkReport: Sendable {
             withIntermediateDirectories: true
         )
         try renderCSV().write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    public func saveJSON(to path: String) throws {
+        let url = URL(fileURLWithPath: path)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try renderJSON().write(to: url, atomically: true, encoding: .utf8)
     }
 
     public func paretoFrontier() -> [Row] {
