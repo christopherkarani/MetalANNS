@@ -80,11 +80,16 @@ public enum IndexCompactor {
             }
             try compactedVectors.insert(vector: storageVector, at: newIndex)
 
-            guard let externalID = idMap.externalID(for: oldID) else {
-                throw ANNSError.constructionFailed("Missing external ID for internal ID \(oldID)")
-            }
-            guard rebuiltIDMap.assign(externalID: externalID) != nil else {
-                throw ANNSError.idAlreadyExists(externalID)
+            if let externalID = idMap.externalID(for: oldID) {
+                guard rebuiltIDMap.assign(externalID: externalID) != nil else {
+                    throw ANNSError.idAlreadyExists(externalID)
+                }
+            } else if let numericID = idMap.numericID(for: oldID) {
+                guard rebuiltIDMap.assign(numericID: numericID) != nil else {
+                    throw ANNSError.idAlreadyExists(String(numericID))
+                }
+            } else {
+                throw ANNSError.constructionFailed("Missing ID mapping for internal ID \(oldID)")
             }
         }
         compactedVectors.setCount(survivingCount)

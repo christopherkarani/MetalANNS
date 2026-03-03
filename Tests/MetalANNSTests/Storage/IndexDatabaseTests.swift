@@ -28,7 +28,7 @@ struct IndexDatabaseTests {
                 ORDER BY name
                 """)
         }
-        #expect(tables == ["config", "idmap", "soft_deletion"])
+        #expect(tables == ["config", "idmap", "idmap_numeric", "soft_deletion"])
     }
 
     @Test("Reopen existing database")
@@ -65,6 +65,61 @@ struct IndexDatabaseTests {
         #expect(loaded.externalID(for: 0) == "alpha")
         #expect(loaded.externalID(for: 1) == "beta")
         #expect(loaded.externalID(for: 2) == "gamma")
+    }
+
+    @Test("Save and load idMap with mixed String and UInt64 namespaces")
+    func saveAndLoadMixedIDMap() throws {
+        let path = tempDBPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let db = try IndexDatabase(path: path)
+        var idMap = IDMap()
+        let stringA = idMap.assign(externalID: "alpha")
+        let numericA = idMap.assign(numericID: 42)
+        let stringB = idMap.assign(externalID: "beta")
+        let numericB = idMap.assign(numericID: 9_001)
+        #expect(stringA != nil)
+        #expect(numericA != nil)
+        #expect(stringB != nil)
+        #expect(numericB != nil)
+
+        try db.saveIDMap(idMap)
+        let loaded = try db.loadIDMap()
+
+        #expect(loaded.count == 4)
+        #expect(loaded.internalID(for: "alpha") == stringA)
+        #expect(loaded.internalID(for: "beta") == stringB)
+        #expect(loaded.internalID(forNumeric: 42) == numericA)
+        #expect(loaded.internalID(forNumeric: 9_001) == numericB)
+        #expect(loaded.numericID(for: numericA!) == 42)
+        #expect(loaded.numericID(for: numericB!) == 9_001)
+        #expect(loaded.nextInternalID == idMap.nextInternalID)
+    }
+
+    @Test("Save and load idMap with UInt64 edge values")
+    func saveAndLoadIDMapWithUInt64EdgeValues() throws {
+        let path = tempDBPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let db = try IndexDatabase(path: path)
+        var idMap = IDMap()
+        let values: [UInt64] = [0, 1, UInt64.max - 1, 12_345_678_901_234]
+        for value in values {
+            let assigned = idMap.assign(numericID: value)
+            #expect(assigned != nil)
+        }
+
+        try db.saveIDMap(idMap)
+        let loaded = try db.loadIDMap()
+
+        #expect(loaded.count == values.count)
+        for value in values {
+            let internalID = loaded.internalID(forNumeric: value)
+            #expect(internalID != nil, "Missing numeric mapping for \(value)")
+            if let internalID {
+                #expect(loaded.numericID(for: internalID) == value)
+            }
+        }
     }
 
     @Test("Saving idMap overwrites previous values")

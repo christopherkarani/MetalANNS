@@ -94,6 +94,35 @@ struct ANNSIndexTests {
         }
     }
 
+    @Test("Save/load roundtrip preserves UInt64-keyed entries")
+    func saveLoadRoundtripPreservesUInt64IDs() async throws {
+        let dim = 16
+        let baseVectors = makeVectors(count: 20, dim: dim, seedOffset: 3_500)
+        let baseIDs = (0..<20).map { "node-\($0)" }
+        let numericVector = makeVectors(count: 1, dim: dim, seedOffset: 123_456)[0]
+
+        let index = ANNSIndex(configuration: IndexConfiguration(degree: 8, metric: .cosine))
+        try await index.build(vectors: baseVectors, ids: baseIDs)
+        try await index.insert(numericVector, numericID: UInt64.max - 1)
+
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metalanns-numeric-roundtrip-\(UUID().uuidString)")
+            .appendingPathExtension("mann")
+        let tempMetaURL = URL(fileURLWithPath: tempURL.path + ".meta.json")
+        let tempDBURL = URL(fileURLWithPath:
+            tempURL.deletingPathExtension().appendingPathExtension("db").path)
+        defer {
+            try? FileManager.default.removeItem(at: tempURL)
+            try? FileManager.default.removeItem(at: tempMetaURL)
+            try? FileManager.default.removeItem(at: tempDBURL)
+        }
+
+        try await index.save(to: tempURL)
+        let loaded = try await ANNSIndex.load(from: tempURL)
+        let results = try await loaded.search(query: numericVector, k: 3)
+        #expect(results.contains { $0.numericID == UInt64.max - 1 })
+    }
+
     @Test("Delete excludes soft-deleted IDs from search")
     func deleteAndSearch() async throws {
         let dim = 16

@@ -552,8 +552,15 @@ public actor ANNSIndex {
             if softDeletion.isDeleted(oldID) {
                 continue
             }
-            guard let externalID = idMap.externalID(for: oldID),
-                  let newID = result.idMap.internalID(for: externalID) else {
+            let newID: UInt32?
+            if let externalID = idMap.externalID(for: oldID) {
+                newID = result.idMap.internalID(for: externalID)
+            } else if let numericID = idMap.numericID(for: oldID) {
+                newID = result.idMap.internalID(forNumeric: numericID)
+            } else {
+                newID = nil
+            }
+            guard let newID else {
                 continue
             }
             remapping[oldID] = newID

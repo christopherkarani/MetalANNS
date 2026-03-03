@@ -40,6 +40,14 @@ public final class IndexDatabase: @unchecked Sendable {
                 table.column("internalID", .integer).notNull().primaryKey()
             }
         }
+        migrator.registerMigration("v2-idmap-numeric") { db in
+            try db.create(table: "idmap_numeric") { table in
+                // Store as text to preserve the full UInt64 domain.
+                table.column("numericID", .text).notNull().primaryKey()
+                table.column("internalID", .integer).notNull().unique()
+            }
+            try db.create(index: "idmap_numeric_by_internal", on: "idmap_numeric", columns: ["internalID"])
+        }
         try migrator.migrate(pool)
     }
 }
@@ -48,19 +56,34 @@ public final class IndexDatabase: @unchecked Sendable {
 
 public extension IndexDatabase {
     func saveIDMap(_ idMap: IDMap) throws {
-        let rows = (0..<idMap.nextInternalID).compactMap { index -> (String, UInt32)? in
-            guard let externalID = idMap.externalID(for: UInt32(index)) else {
+        let stringRows = (0..<idMap.nextInternalID).compactMap { index -> (String, UInt32)? in
+            let internalID = UInt32(index)
+            guard let externalID = idMap.externalID(for: internalID) else {
                 return nil
             }
-            return (externalID, UInt32(index))
+            return (externalID, internalID)
+        }
+        let numericRows = (0..<idMap.nextInternalID).compactMap { index -> (String, UInt32)? in
+            let internalID = UInt32(index)
+            guard let numericID = idMap.numericID(for: internalID) else {
+                return nil
+            }
+            return (String(numericID), internalID)
         }
 
         try pool.write { db in
             try db.execute(sql: "DELETE FROM idmap")
+            try db.execute(sql: "DELETE FROM idmap_numeric")
             let statement = try db.makeStatement(sql: "INSERT INTO idmap (externalID, internalID) VALUES (?, ?)")
+            let numericStatement = try db.makeStatement(
+                sql: "INSERT INTO idmap_numeric (numericID, internalID) VALUES (?, ?)"
+            )
 
-            for (externalID, internalID) in rows {
+            for (externalID, internalID) in stringRows {
                 try statement.execute(arguments: [externalID, Int64(internalID)])
+            }
+            for (numericID, internalID) in numericRows {
+                try numericStatement.execute(arguments: [numericID, Int64(internalID)])
             }
 
             try db.execute(
@@ -72,16 +95,34 @@ public extension IndexDatabase {
 
     func loadIDMap() throws -> IDMap {
         try pool.read { db in
-            let rows = try Row.fetchAll(db, sql: "SELECT externalID, internalID FROM idmap ORDER BY internalID")
-            var entries: [(String, UInt32)] = []
-            entries.reserveCapacity(rows.count)
-            for row in rows {
+            let stringRows = try Row.fetchAll(db, sql: "SELECT externalID, internalID FROM idmap ORDER BY internalID")
+            var stringEntries: [(String, UInt32)] = []
+            stringEntries.reserveCapacity(stringRows.count)
+            for row in stringRows {
                 let externalID: String = row["externalID"]
                 let internalID: Int64 = row["internalID"]
                 guard let internalIDUInt32 = UInt32(exactly: internalID) else {
                     throw ANNSError.corruptFile("Invalid idmap internalID value: \(internalID)")
                 }
-                entries.append((externalID, internalIDUInt32))
+                stringEntries.append((externalID, internalIDUInt32))
+            }
+
+            let numericRows = try Row.fetchAll(
+                db,
+                sql: "SELECT numericID, internalID FROM idmap_numeric ORDER BY internalID"
+            )
+            var numericEntries: [(UInt64, UInt32)] = []
+            numericEntries.reserveCapacity(numericRows.count)
+            for row in numericRows {
+                let numericIDString: String = row["numericID"]
+                let internalID: Int64 = row["internalID"]
+                guard let numericID = UInt64(numericIDString) else {
+                    throw ANNSError.corruptFile("Invalid idmap_numeric numericID value: \(numericIDString)")
+                }
+                guard let internalIDUInt32 = UInt32(exactly: internalID) else {
+                    throw ANNSError.corruptFile("Invalid idmap_numeric internalID value: \(internalID)")
+                }
+                numericEntries.append((numericID, internalIDUInt32))
             }
 
             let nextIDString = try String.fetchOne(
@@ -96,10 +137,10 @@ public extension IndexDatabase {
                 }
                 nextID = parsedNextID
             } else {
-                nextID = UInt32(entries.count)
+                nextID = UInt32(stringEntries.count + numericEntries.count)
             }
 
-            return IDMap.makeForPersistence(rows: entries, nextID: nextID)
+            return IDMap.makeForPersistence(rows: stringEntries, numericRows: numericEntries, nextID: nextID)
         }
     }
 }

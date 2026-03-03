@@ -63,6 +63,24 @@ struct CompactionTests {
         #expect(postRecall >= baselineRecall * 0.80)
     }
 
+    @Test("Compact preserves UInt64-keyed entries in mixed ID indexes")
+    func compactPreservesUInt64Entries() async throws {
+        let dim = 16
+        let baseVectors = makeVectors(count: 50, dim: dim, seedOffset: 2_000)
+        let baseIDs = (0..<50).map { "base-\($0)" }
+        let numericVector = makeVectors(count: 1, dim: dim, seedOffset: 99_999)[0]
+
+        let index = ANNSIndex(configuration: IndexConfiguration(degree: 8, metric: .cosine))
+        try await index.build(vectors: baseVectors, ids: baseIDs)
+        try await index.insert(numericVector, numericID: 42)
+        try await index.delete(id: "base-0")
+
+        try await index.compact()
+
+        let results = try await index.search(query: numericVector, k: 5)
+        #expect(results.contains { $0.numericID == 42 })
+    }
+
     private func selfRecall(
         index: ANNSIndex,
         vectors: [[Float]],
