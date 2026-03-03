@@ -108,7 +108,7 @@ struct GPUADCSearchTests {
             metric: .l2,
             trainingIterations: 6
         )
-        let index = try IVFPQIndex(capacity: 2_500, dimension: 128, config: config)
+        let index = try Advanced.IVFPQIndex(capacity: 2_500, dimension: 128, config: config)
 
         let centers = makeClusterCenters(dim: 128, clusters: 32, seed: 401)
         let training = sampleClusteredVectors(count: 1_000, centers: centers, seed: 402)

@@ -3,11 +3,11 @@ import Testing
 @testable import MetalANNS
 @testable import MetalANNSCore
 
-@Suite("StreamingIndex Metadata Tests")
+@Suite("Advanced.StreamingIndex Metadata Tests")
 struct StreamingIndexMetadataTests {
     @Test("Set and get string metadata")
     func setAndGetStringMetadata() async throws {
-        let index = StreamingIndex(config: StreamingConfiguration(
+        let index = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 100,
             mergeStrategy: .blocking
         ))
@@ -28,7 +28,7 @@ struct StreamingIndexMetadataTests {
 
     @Test("Metadata preserved after merge")
     func metadataPreservedAfterMerge() async throws {
-        let index = StreamingIndex(config: StreamingConfiguration(
+        let index = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 10,
             mergeStrategy: .blocking
         ))
@@ -51,7 +51,7 @@ struct StreamingIndexMetadataTests {
 
     @Test("Delete removes from results")
     func deleteRemovesFromResults() async throws {
-        let index = StreamingIndex(config: StreamingConfiguration(
+        let index = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 20,
             mergeStrategy: .blocking
         ))

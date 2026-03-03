@@ -7,7 +7,7 @@ import MetalANNSCore
 /// `StreamingConfiguration.deltaCapacity` it is merged into the frozen
 /// `base` index asynchronously (or synchronously for `.blocking` strategy).
 /// Search always probes both shards and also covers pre-build pending inserts.
-public actor StreamingIndex {
+public actor _StreamingIndex {
     private enum MetadataValue: Sendable, Codable {
         case string(String)
         case float(Float)
@@ -76,8 +76,8 @@ public actor StreamingIndex {
         }
     }
 
-    private var base: ANNSIndex?
-    private var delta: ANNSIndex?
+    private var base: _GraphIndex?
+    private var delta: _GraphIndex?
     private var mergeTask: Task<Void, Error>?
     private var lastBackgroundMergeError: ANNSError?
     private var _isMerging = false
@@ -109,7 +109,7 @@ public actor StreamingIndex {
     }
 
     public var count: Int {
-        allIDsList.count - deletedIDs.count
+        allIDs.count - deletedIDs.count
     }
 
     public var isMerging: Bool {
@@ -180,7 +180,7 @@ public actor StreamingIndex {
     public func search(
         query: [Float],
         k: Int,
-        filter: SearchFilter? = nil,
+        filter: _LegacySearchFilter? = nil,
         metric: Metric? = nil
     ) async throws -> [SearchResult] {
         try checkBackgroundMergeError()
@@ -213,7 +213,7 @@ public actor StreamingIndex {
     public func batchSearch(
         queries: [[Float]],
         k: Int,
-        filter: SearchFilter? = nil,
+        filter: _LegacySearchFilter? = nil,
         metric: Metric? = nil
     ) async throws -> [[SearchResult]] {
         guard !queries.isEmpty else {
@@ -240,7 +240,7 @@ public actor StreamingIndex {
         query: [Float],
         maxDistance: Float,
         limit: Int = 1000,
-        filter: SearchFilter? = nil,
+        filter: _LegacySearchFilter? = nil,
         metric: Metric? = nil
     ) async throws -> [SearchResult] {
         try checkBackgroundMergeError()
@@ -347,6 +347,7 @@ public actor StreamingIndex {
         deletedIDs.insert(id)
         idInBase.remove(id)
         idInDelta.remove(id)
+        metadataByID.removeValue(forKey: id)
 
         if let base {
             do {
@@ -369,6 +370,7 @@ public actor StreamingIndex {
         }
 
         removePendingID(id)
+        removeFromPendingHistory(id)
     }
 
     public func flush() async throws {
@@ -467,7 +469,7 @@ public actor StreamingIndex {
         }
     }
 
-    public static func load(from url: URL) async throws -> StreamingIndex {
+    public static func load(from url: URL) async throws -> _StreamingIndex {
         let dbURL = url.appendingPathComponent("streaming.db")
         let baseANNSPath = url.appendingPathComponent("base.anns").path
         let hasFreshDB = hasFreshStreamingDatabase(at: dbURL.path, forBaseANNS: baseANNSPath)
@@ -513,9 +515,9 @@ public actor StreamingIndex {
         }
         try validateLoadedMeta(meta)
 
-        let loadedBase = try await ANNSIndex.load(from: url.appendingPathComponent("base.anns"))
-        let streaming = StreamingIndex(config: meta.config)
-        await streaming.applyLoadedState(base: loadedBase, meta: meta)
+        let loadedBase = try await _GraphIndex.load(from: url.appendingPathComponent("base.anns"))
+        let streaming = _StreamingIndex(config: meta.config)
+        try await streaming.applyLoadedState(base: loadedBase, meta: meta)
         return streaming
     }
 
@@ -537,7 +539,19 @@ public actor StreamingIndex {
         return try JSONDecoder().decode(PersistedMeta.self, from: data)
     }
 
-    private func applyLoadedState(base: ANNSIndex, meta: PersistedMeta) {
+    private func applyLoadedState(base: _GraphIndex, meta: PersistedMeta) async throws {
+        let baseActiveIDs = Set(try await base.streamingActiveExternalIDs())
+        let deleted = Set(meta.deletedIDs)
+        let pending = Self.pendingRecordsFromMeta(
+            meta,
+            excludingBaseIDs: baseActiveIDs,
+            deletedIDs: deleted
+        )
+        let pendingIDSet = Set(pending.ids)
+        let knownIDs = baseActiveIDs.union(pendingIDSet).union(deleted)
+
+        try Self.validateLoadedState(meta, knownIDs: knownIDs)
+
         self.base = base
         self.delta = nil
         self.mergeTask = nil
@@ -545,15 +559,25 @@ public actor StreamingIndex {
         self.pendingVectors = []
         self.pendingIDs = []
 
-        self.allVectorData = meta.allVectorData
-        self.allIDsList = meta.allIDsList
-        self.allIDs = Set(meta.allIDsList)
-        self.deletedIDs = Set(meta.deletedIDs)
+        self.allVectorData = pending.vectors.flatMap { $0 }
+        self.allIDsList = pending.ids
+        self.allIDs = knownIDs
+        self.deletedIDs = deleted
         self.metadataByID = meta.metadataByID
         self.vectorDimension = meta.vectorDimension
 
-        self.idInBase = Set(meta.allIDsList.filter { !self.deletedIDs.contains($0) })
+        self.idInBase = baseActiveIDs
         self.idInDelta = []
+
+        if pending.ids.count >= 2 {
+            let loadedDelta = try await buildIndex(vectors: pending.vectors, ids: pending.ids)
+            self.delta = loadedDelta
+            self.idInDelta = Set(pending.ids)
+        } else if pending.ids.count == 1 {
+            self.pendingVectors = pending.vectors
+            self.pendingIDs = pending.ids
+        }
+
         self.metricsNeedsPropagation = true
     }
 
@@ -585,6 +609,25 @@ public actor StreamingIndex {
             pendingIDs.remove(at: index)
             pendingVectors.remove(at: index)
         }
+    }
+
+    private func removeFromPendingHistory(_ id: String) {
+        guard let historyIndex = allIDsList.firstIndex(of: id) else {
+            return
+        }
+
+        allIDsList.remove(at: historyIndex)
+        guard let dim = vectorDimension else {
+            return
+        }
+
+        let start = historyIndex * dim
+        let end = start + dim
+        guard start >= 0, end <= allVectorData.count else {
+            allVectorData.removeAll(keepingCapacity: true)
+            return
+        }
+        allVectorData.removeSubrange(start..<end)
     }
 
     private func adjustedConfiguration(for nodeCount: Int) -> IndexConfiguration {
@@ -731,8 +774,8 @@ public actor StreamingIndex {
         return (vectors, ids)
     }
 
-    private func buildIndex(vectors: [[Float]], ids: [String]) async throws -> ANNSIndex {
-        let index = ANNSIndex(configuration: adjustedConfiguration(for: vectors.count))
+    private func buildIndex(vectors: [[Float]], ids: [String]) async throws -> _GraphIndex {
+        let index = _GraphIndex(configuration: adjustedConfiguration(for: vectors.count))
         try await index.build(vectors: vectors, ids: ids)
         if let metrics {
             await index.setMetrics(metrics)
@@ -741,7 +784,7 @@ public actor StreamingIndex {
         return index
     }
 
-    private func applyStoredMetadata(to index: ANNSIndex, ids: [String]) async throws {
+    private func applyStoredMetadata(to index: _GraphIndex, ids: [String]) async throws {
         for id in ids {
             guard let row = metadataByID[id] else {
                 continue
@@ -768,41 +811,76 @@ public actor StreamingIndex {
         defer { _isMerging = false }
 
         let snapshotCount = allIDsList.count
-        let merged = activeRecords(upperBound: snapshotCount)
+        let pendingSnapshot = activeRecords(upperBound: snapshotCount)
 
-        guard !merged.ids.isEmpty else {
+        let baseSnapshot: (vectors: [[Float]], ids: [String])
+        if let base {
+            baseSnapshot = try await base.streamingActiveRecords()
+        } else {
+            baseSnapshot = ([], [])
+        }
+
+        var mergedVectors = baseSnapshot.vectors
+        mergedVectors.append(contentsOf: pendingSnapshot.vectors)
+        var mergedIDs = baseSnapshot.ids
+        mergedIDs.append(contentsOf: pendingSnapshot.ids)
+
+        guard !mergedIDs.isEmpty else {
             base = nil
             delta = nil
             idInBase.removeAll()
             idInDelta.removeAll()
             pendingVectors.removeAll(keepingCapacity: true)
             pendingIDs.removeAll(keepingCapacity: true)
+            allIDsList.removeAll(keepingCapacity: true)
+            allVectorData.removeAll(keepingCapacity: true)
+            lastBackgroundMergeError = nil
             return
         }
 
-        guard merged.ids.count >= 2 else {
+        guard mergedIDs.count >= 2 else {
             base = nil
             delta = nil
             idInBase.removeAll()
             idInDelta.removeAll()
-            pendingVectors = merged.vectors
-            pendingIDs = merged.ids
+
+            let tail = activeRecords(in: snapshotCount..<allIDsList.count)
+            var retainedVectors = mergedVectors
+            retainedVectors.append(contentsOf: tail.vectors)
+            var retainedIDs = mergedIDs
+            retainedIDs.append(contentsOf: tail.ids)
+
+            allIDsList = retainedIDs
+            allVectorData = retainedVectors.flatMap { $0 }
+
+            pendingVectors.removeAll(keepingCapacity: true)
+            pendingIDs.removeAll(keepingCapacity: true)
+            if retainedIDs.count >= 2 {
+                let newDelta = try await buildIndex(vectors: retainedVectors, ids: retainedIDs)
+                delta = newDelta
+                idInDelta = Set(retainedIDs)
+            } else if retainedIDs.count == 1 {
+                pendingVectors = retainedVectors
+                pendingIDs = retainedIDs
+            }
+
+            lastBackgroundMergeError = nil
             return
         }
 
-        let newBase = try await buildIndex(vectors: merged.vectors, ids: merged.ids)
+        let newBase = try await buildIndex(vectors: mergedVectors, ids: mergedIDs)
 
         base = newBase
-        idInBase = Set(merged.ids)
+        idInBase = Set(mergedIDs)
         delta = nil
         idInDelta.removeAll()
         pendingVectors.removeAll(keepingCapacity: true)
         pendingIDs.removeAll(keepingCapacity: true)
-        if let metrics {
-            await metrics.recordMerge()
-        }
 
         let tail = activeRecords(in: snapshotCount..<allIDsList.count)
+        allIDsList = tail.ids
+        allVectorData = tail.vectors.flatMap { $0 }
+
         if tail.ids.count >= 2 {
             let newDelta = try await buildIndex(vectors: tail.vectors, ids: tail.ids)
             delta = newDelta
@@ -812,12 +890,15 @@ public actor StreamingIndex {
             pendingIDs = tail.ids
         }
 
+        if let metrics {
+            await metrics.recordMerge()
+        }
         lastBackgroundMergeError = nil
     }
 
     private func pendingSearchResults(
         query: [Float],
-        filter: SearchFilter?,
+        filter: _LegacySearchFilter?,
         metric: Metric
     ) -> [SearchResult] {
         var results: [SearchResult] = []
@@ -857,7 +938,7 @@ public actor StreamingIndex {
         }
     }
 
-    private func matchesFilter(for id: String, filter: SearchFilter?) -> Bool {
+    private func matchesFilter(for id: String, filter: _LegacySearchFilter?) -> Bool {
         guard let filter else {
             return true
         }
@@ -865,7 +946,7 @@ public actor StreamingIndex {
         return evaluate(filter: filter, row: row)
     }
 
-    private func evaluate(filter: SearchFilter, row: [String: MetadataValue]) -> Bool {
+    private func evaluate(filter: _LegacySearchFilter, row: [String: MetadataValue]) -> Bool {
         switch filter {
         case .equals(column: let column, value: let value):
             if case .string(let current)? = row[column] {
@@ -954,16 +1035,13 @@ public actor StreamingIndex {
     }
 
     private static func validateLoadedMeta(_ meta: PersistedMeta) throws {
-        let allIDSet = Set(meta.allIDsList)
-        guard allIDSet.count == meta.allIDsList.count else {
-            throw ANNSError.corruptFile("Streaming metadata contains duplicate IDs")
+        let pendingIDSet = Set(meta.allIDsList)
+        guard pendingIDSet.count == meta.allIDsList.count else {
+            throw ANNSError.corruptFile("Streaming metadata contains duplicate pending IDs")
         }
-        guard Set(meta.deletedIDs).isSubset(of: allIDSet) else {
-            throw ANNSError.corruptFile("Streaming metadata deleted IDs are not a subset of all IDs")
-        }
-
-        for id in meta.metadataByID.keys where !allIDSet.contains(id) {
-            throw ANNSError.corruptFile("Streaming metadata contains row for unknown ID '\(id)'")
+        let deletedIDSet = Set(meta.deletedIDs)
+        guard deletedIDSet.count == meta.deletedIDs.count else {
+            throw ANNSError.corruptFile("Streaming metadata contains duplicate deleted IDs")
         }
 
         let resolvedDimension = meta.vectorDimension
@@ -977,6 +1055,41 @@ public actor StreamingIndex {
             }
         } else if !meta.allVectorData.isEmpty || !meta.allIDsList.isEmpty {
             throw ANNSError.corruptFile("Streaming metadata is missing vector dimension")
+        }
+    }
+
+    private static func pendingRecordsFromMeta(
+        _ meta: PersistedMeta,
+        excludingBaseIDs: Set<String>,
+        deletedIDs: Set<String>
+    ) -> (vectors: [[Float]], ids: [String]) {
+        guard let dim = meta.vectorDimension, dim > 0 else {
+            return ([], [])
+        }
+
+        var vectors: [[Float]] = []
+        var ids: [String] = []
+        vectors.reserveCapacity(meta.allIDsList.count)
+        ids.reserveCapacity(meta.allIDsList.count)
+
+        for (index, id) in meta.allIDsList.enumerated() {
+            guard !excludingBaseIDs.contains(id), !deletedIDs.contains(id) else {
+                continue
+            }
+            let start = index * dim
+            let end = start + dim
+            guard start >= 0, end <= meta.allVectorData.count else {
+                continue
+            }
+            ids.append(id)
+            vectors.append(Array(meta.allVectorData[start..<end]))
+        }
+        return (vectors, ids)
+    }
+
+    private static func validateLoadedState(_ meta: PersistedMeta, knownIDs: Set<String>) throws {
+        for id in meta.metadataByID.keys where !knownIDs.contains(id) {
+            throw ANNSError.corruptFile("Streaming metadata contains row for unknown ID '\(id)'")
         }
     }
 

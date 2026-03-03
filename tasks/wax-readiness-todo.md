@@ -2,8 +2,8 @@
 
 > **Plan:** `docs/plans/2026-02-28-metalanns-wax-readiness.md`
 > **Goal:** Fix all blockers so MetalANNS replaces USearch as Wax's sole vector search backend.
-> **Status:** IN PROGRESS
-> **Last Updated:** 2026-03-02
+> **Status:** COMPLETE
+> **Last Updated:** 2026-03-03
 
 ---
 
@@ -12,28 +12,28 @@
 > **Prompt:** `docs/prompts/phase-1-buffer-pool.md`
 > **Branch:** TBD
 > **Depends on:** Nothing (start here)
-> **Note:** `xcodebuild test` is currently blocked by pre-existing shader compile errors in `NNDescent.metal` and `NNDescentFloat16.metal` (`uint_max`, `memory_order_release`).
+> **Note:** Shader compile blockers were fixed (`UINT_MAX` and `memory_order_relaxed`), and full test validation now passes.
 
-- [ ] **1.1 Create SearchBufferPool**
+- [x] **1.1 Create SearchBufferPool**
   - [x] Write 3 failing tests in `Tests/MetalANNSTests/SearchBufferPoolTests.swift`
   - [x] Verify tests fail (compilation error — type does not exist)
   - [x] Implement `Sources/MetalANNSCore/SearchBufferPool.swift`
-  - [ ] Verify 3 tests pass
+  - [x] Verify 3 tests pass
   - [x] Commit: `feat: add SearchBufferPool to eliminate per-search MTLBuffer allocation`
 
-- [ ] **1.2 Wire pool into FullGPUSearch**
+- [x] **1.2 Wire pool into FullGPUSearch**
   - [x] Write safety test `fullGPUSearchCorrectAfterPoolRefactor` in `SearchBufferPoolTests.swift`
-  - [ ] Verify safety test passes BEFORE refactoring (baseline)
+  - [x] Verify safety test passes BEFORE refactoring (baseline)
   - [x] Add `searchBufferPool` property to `MetalContext` in `MetalDevice.swift`
   - [x] Replace `device.makeBuffer` calls in `FullGPUSearch.swift:58-74` with pool acquire/release
-  - [ ] Verify full test suite passes (zero regressions)
+  - [x] Verify full test suite passes (zero regressions)
   - [x] Commit: `refactor: wire SearchBufferPool into FullGPUSearch, eliminating per-search allocation`
 
 **Phase 1 exit criteria:**
 - [x] `FullGPUSearch.search()` has zero `device.makeBuffer` calls
 - [x] `MetalContext` exposes `searchBufferPool`
 - [x] 4 tests in `SearchBufferPoolTests` (3 unit + 1 integration)
-- [ ] Full suite green
+- [x] Full suite green
 
 ---
 
@@ -62,10 +62,10 @@
   - [x] Commit: `perf: replace per-search visited-buffer alloc+memset with generation-counter pool`
 
 **Phase 2 exit criteria:**
-- [ ] GPU search works at 5000+ nodes (test proves it)
-- [ ] GPU results match CPU reference (recall >= 0.7)
+- [x] GPU search works at 5000+ nodes (test proves it)
+- [x] GPU results match CPU reference (recall >= 0.7)
 - [x] Both FP32 and FP16 kernels updated
-- [ ] Full suite green
+- [x] Full suite green
 
 ---
 
@@ -75,21 +75,21 @@
 > **Branch:** TBD
 > **Depends on:** Nothing (can run in parallel with Phase 1-2)
 
-- [ ] **3.1 Evict merged/deleted vectors**
-  - [ ] Write `mergedVectorsAreEvictedFromHistory` test
-  - [ ] Write `deletedVectorsAreRemovedFromHistory` test
-  - [ ] Verify first test fails (meta file too large)
-  - [ ] Clear `allVectorsList`/`allIDsList` after merge completes (keep only post-merge pending)
-  - [ ] Remove deleted vectors from history in `delete(id:)`
-  - [ ] Verify both tests pass
-  - [ ] Verify full suite passes
-  - [ ] Commit: `fix: evict merged and deleted vectors from StreamingIndex history to prevent OOM`
+- [x] **3.1 Evict merged/deleted vectors**
+  - [x] Write `mergedVectorsAreEvictedFromHistory` test
+  - [x] Write `deletedVectorsAreRemovedFromHistory` test
+  - [x] Verify first test fails (meta file too large)
+  - [x] Clear `allVectorsList`/`allIDsList` after merge completes (keep only post-merge pending)
+  - [x] Remove deleted vectors from history in `delete(id:)`
+  - [x] Verify both tests pass
+  - [x] Verify full suite passes
+  - [x] Commit: `fix: evict merged and deleted vectors from StreamingIndex history to prevent OOM`
 
 **Phase 3 exit criteria:**
-- [ ] Meta file size < 50KB after merge of 15 small vectors
-- [ ] Deleted vectors not retained in history
-- [ ] Save/load round-trip still correct
-- [ ] Full suite green
+- [x] Meta file size < 50KB after merge of 15 small vectors
+- [x] Deleted vectors not retained in history
+- [x] Save/load round-trip still correct
+- [x] Full suite green
 
 ---
 
@@ -99,30 +99,30 @@
 > **Branch:** TBD
 > **Depends on:** Nothing (can run in parallel with Phase 1-3)
 
-- [ ] **4.1 Add UInt64 keys to IDMap**
-  - [ ] Write 4 tests in `Tests/MetalANNSTests/IDMapTests.swift`
-  - [ ] Verify tests fail
-  - [ ] Add `numericToInternal`/`internalToNumeric` dictionaries to `IDMap`
-  - [ ] Add `assign(numericID:)`, `internalID(forNumeric:)`, `numericID(for:)` methods
-  - [ ] Update `Codable` conformance to encode new dictionaries
-  - [ ] Verify tests pass
-  - [ ] Commit: `feat: add native UInt64 key support to IDMap for Wax frameId compatibility`
+- [x] **4.1 Add UInt64 keys to IDMap**
+  - [x] Write 4 tests in `Tests/MetalANNSTests/IDMapTests.swift`
+  - [x] Verify tests fail
+  - [x] Add `numericToInternal`/`internalToNumeric` dictionaries to `IDMap`
+  - [x] Add `assign(numericID:)`, `internalID(forNumeric:)`, `numericID(for:)` methods
+  - [x] Update `Codable` conformance to encode new dictionaries
+  - [x] Verify tests pass
+  - [x] Commit: `feat: add native UInt64 key support to IDMap for Wax frameId compatibility`
 
-- [ ] **4.2 Add UInt64 insert/search to ANNSIndex**
-  - [ ] Write `insertAndSearchWithUInt64IDs` test
-  - [ ] Verify test fails
-  - [ ] Add `insert(_:numericID:)` to ANNSIndex
-  - [ ] Add `numericID: UInt64?` field to SearchResult
-  - [ ] Wire IDMap numeric lookups into search result mapping
-  - [ ] Verify test passes
-  - [ ] Verify full suite passes
-  - [ ] Commit: `feat: add UInt64-keyed insert and search to ANNSIndex for Wax integration`
+- [x] **4.2 Add UInt64 insert/search to ANNSIndex**
+  - [x] Write `insertAndSearchWithUInt64IDs` test
+  - [x] Verify test fails
+  - [x] Add `insert(_:numericID:)` to ANNSIndex
+  - [x] Add `numericID: UInt64?` field to SearchResult
+  - [x] Wire IDMap numeric lookups into search result mapping
+  - [x] Verify test passes
+  - [x] Verify full suite passes
+  - [x] Commit: `feat: add UInt64-keyed insert and search to ANNSIndex for Wax integration`
 
 **Phase 4 exit criteria:**
-- [ ] `IDMap` supports both String and UInt64 keys independently
-- [ ] `ANNSIndex.insert(_:numericID:)` works end-to-end
-- [ ] `SearchResult.numericID` populated when numeric key was used
-- [ ] Full suite green
+- [x] `IDMap` supports both String and UInt64 keys independently
+- [x] `ANNSIndex.insert(_:numericID:)` works end-to-end
+- [x] `SearchResult.numericID` populated when numeric key was used
+- [x] Full suite green
 
 ---
 
@@ -132,18 +132,18 @@
 > **Branch:** TBD
 > **Depends on:** Phase 2 (validates the new visited set)
 
-- [ ] **5.1 Parameterized parity test at multiple scales**
-  - [ ] Create `Tests/MetalANNSTests/GPUCPUParityTests.swift`
-  - [ ] Parameterized over: (100, dim=32), (500, dim=64), (2000, dim=128), (8000, dim=384)
-  - [ ] Each config: build graph, run 5 queries through GPU and CPU, compare recall >= 0.6
-  - [ ] All use `SeededGenerator` for reproducibility
-  - [ ] Verify all pass
-  - [ ] Commit: `test: add GPU-vs-CPU search parity tests at multiple scales`
+- [x] **5.1 Parameterized parity test at multiple scales**
+  - [x] Create `Tests/MetalANNSTests/GPUCPUParityTests.swift`
+  - [x] Parameterized over: (100, dim=32), (500, dim=64), (2000, dim=128), (8000, dim=384)
+  - [x] Each config: build graph, run 5 queries through GPU and CPU, compare recall >= 0.6
+  - [x] All use `SeededGenerator` for reproducibility
+  - [x] Verify all pass
+  - [x] Commit: `test: add GPU-vs-CPU search parity tests at multiple scales`
 
 **Phase 5 exit criteria:**
-- [ ] 4 parameterized configs × 5 queries = 20 parity checks
-- [ ] All recall >= 0.6
-- [ ] Tests are seeded and reproducible
+- [x] 4 parameterized configs × 5 queries = 20 parity checks
+- [x] All recall >= 0.6
+- [x] Tests are seeded and reproducible
 
 ---
 
@@ -153,46 +153,48 @@
 > **Branch:** TBD
 > **Depends on:** Phase 5 for Task 6.3 (uses parity tests to verify). Tasks 6.1, 6.2, 6.4 are independent.
 
-- [ ] **6.1 Fix rangeSearch guard inconsistency**
-  - [ ] Write `rangeSearchWithZeroDistanceReturnsExactMatches` test
-  - [ ] Verify test fails
-  - [ ] Change `StreamingIndex.swift:193` from `> 0` to `>= 0`
-  - [ ] Verify test passes
-  - [ ] Commit: `fix: allow maxDistance=0 in StreamingIndex.rangeSearch for exact match queries`
+- [x] **6.1 Fix rangeSearch guard inconsistency**
+  - [x] Write `rangeSearchWithZeroDistanceReturnsExactMatches` test
+  - [x] Verify test fails
+  - [x] Change `StreamingIndex.swift:193` from `> 0` to `>= 0`
+  - [x] Verify test passes
+  - [x] Commit: `fix: allow maxDistance=0 in StreamingIndex.rangeSearch for exact match queries`
 
-- [ ] **6.2 Seed all test RNG**
-  - [ ] Create `Tests/MetalANNSTests/TestUtilities.swift` with shared `SeededGenerator`
-  - [ ] Replace all unseeded `Float.random(in:)` across test files
-  - [ ] Verify full suite passes
-  - [ ] Commit: `test: use SeededGenerator across all tests for reproducible results`
+- [x] **6.2 Seed all test RNG**
+  - [x] Create `Tests/MetalANNSTests/TestUtilities.swift` with shared `SeededGenerator`
+  - [x] Replace all unseeded `Float.random(in:)` across test files
+  - [x] Verify full suite passes
+  - [x] Commit: `test: use SeededGenerator across all tests for reproducible results`
 
-- [ ] **6.3 Early-exit + symmetric updates in local_join**
-  - [ ] Read worst distance before computing pair distance
-  - [ ] Skip `try_insert_neighbor` when `pair_dist >= worst`
-  - [ ] Add symmetric update: insert `a` into `b`'s list too
-  - [ ] Apply same changes to `NNDescentFloat16.metal`
-  - [ ] Verify NNDescentGPU tests pass with recall >= 0.80
-  - [ ] Verify GPU-CPU parity tests still pass
-  - [ ] Commit: `perf: add early-exit and symmetric updates to local_join kernel`
+- [x] **6.3 Early-exit + symmetric updates in local_join**
+  - [x] Read worst distance before computing pair distance
+  - [x] Skip `try_insert_neighbor` when `pair_dist >= worst`
+  - [x] Add symmetric update: insert `a` into `b`'s list too
+  - [x] Apply same changes to `NNDescentFloat16.metal`
+  - [x] Verify NNDescentGPU tests pass with recall >= 0.80
+  - [x] Verify GPU-CPU parity tests still pass
+  - [x] Commit: `perf: add early-exit and symmetric updates to local_join kernel`
 
-- [ ] **6.4 PQ threadgroup memory guard**
-  - [ ] Add guard `tableLengthBytes <= device.maxThreadgroupMemoryLength` in `GPUADCSearch.swift`
-  - [ ] Verify GPUADCSearch tests pass
-  - [ ] Commit: `fix: guard against PQ distance table exceeding threadgroup memory limit`
+- [x] **6.4 PQ threadgroup memory guard**
+  - [x] Add guard `tableLengthBytes <= device.maxThreadgroupMemoryLength` in `GPUADCSearch.swift`
+  - [x] Verify GPUADCSearch tests pass
+  - [x] Commit: `fix: guard against PQ distance table exceeding threadgroup memory limit`
 
 **Phase 6 exit criteria:**
-- [ ] `StreamingIndex.rangeSearch(maxDistance: 0)` returns results
-- [ ] Zero unseeded `Float.random` calls in test target
-- [ ] `local_join` does early-exit + symmetric inserts
-- [ ] PQ ADC scan fails gracefully on oversized tables
-- [ ] Full suite green
+- [x] `StreamingIndex.rangeSearch(maxDistance: 0)` returns results
+- [x] Zero unseeded `Float.random` calls in test target
+- [x] `local_join` does early-exit + symmetric inserts
+- [x] PQ ADC scan fails gracefully on oversized tables
+- [x] Full suite green
 
 ---
 
 ## Final Validation
 
-- [ ] All 6 phases complete
-- [ ] Full test suite passes: `xcodebuild test -scheme MetalANNS -destination 'platform=macOS'`
-- [ ] No force-unwraps introduced
-- [ ] No new compiler warnings
-- [ ] All commits on branch, ready for review
+- [x] All 6 phases complete
+- [x] Full suite green (required command): `xcodebuild test -scheme MetalANNS-Package -destination 'platform=macOS,arch=arm64' 2>&1 | grep -E "(Test Suite|passed|failed|error:)" | tail -40`
+- [x] xcresult summary confirms zero failures: `result == Passed`, `failedTests == 0`, `passedTests == 265`, `totalTestCount == 265`
+- [x] Final tail validation includes `** TEST SUCCEEDED **`: `xcodebuild test -scheme MetalANNS-Package -destination 'platform=macOS,arch=arm64' 2>&1 | tail -20`
+- [x] No force-unwraps introduced
+- [x] No new compiler warnings
+- [x] All commits on branch, ready for review

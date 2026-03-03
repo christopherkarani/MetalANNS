@@ -3,11 +3,11 @@ import Testing
 @testable import MetalANNS
 @testable import MetalANNSCore
 
-@Suite("StreamingIndex Search Tests")
+@Suite("Advanced.StreamingIndex Search Tests")
 struct StreamingIndexSearchTests {
     @Test("Search finds base and delta")
     func searchFindsBaseAndDelta() async throws {
-        let index = StreamingIndex(config: StreamingConfiguration(
+        let index = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 200,
             mergeStrategy: .blocking
         ))
@@ -27,7 +27,7 @@ struct StreamingIndexSearchTests {
 
     @Test("Recall after merge")
     func recallAfterMerge() async throws {
-        let index = StreamingIndex(config: StreamingConfiguration(
+        let index = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 100,
             mergeStrategy: .blocking
         ))
@@ -61,7 +61,7 @@ struct StreamingIndexSearchTests {
 
     @Test("Search with filter forwards")
     func searchWithFilterForwards() async throws {
-        let index = StreamingIndex(config: StreamingConfiguration(
+        let index = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 100,
             mergeStrategy: .blocking
         ))
@@ -89,7 +89,7 @@ struct StreamingIndexSearchTests {
 
     @Test("Range search covers all")
     func rangeSearchCoversAll() async throws {
-        let index = StreamingIndex(config: StreamingConfiguration(
+        let index = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 100,
             mergeStrategy: .blocking
         ))
@@ -105,7 +105,7 @@ struct StreamingIndexSearchTests {
 
     @Test("rangeSearch with maxDistance 0 returns exact matches")
     func rangeSearchZeroDistanceReturnsExactMatch() async throws {
-        let index = StreamingIndex(config: StreamingConfiguration(
+        let index = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 50,
             mergeStrategy: .blocking,
             indexConfiguration: IndexConfiguration(degree: 4, metric: .l2)

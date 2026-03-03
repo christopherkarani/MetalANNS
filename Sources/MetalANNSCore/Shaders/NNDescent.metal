@@ -21,7 +21,7 @@ kernel void random_init(
     uint base = tid * degree;
     if (node_count <= 1u) {
         for (uint slot = 0; slot < degree; slot++) {
-            adjacency[base + slot] = uint_max;
+            adjacency[base + slot] = UINT_MAX;
         }
         return;
     }
@@ -199,8 +199,8 @@ inline bool try_insert_neighbor(
         }
     }
 
-    uint worst_slot = uint_max;
-    uint worst_id = uint_max;
+    uint worst_slot = UINT_MAX;
+    uint worst_id = UINT_MAX;
     float worst_distance = -FLT_MAX;
     for (uint slot = 0; slot < degree; slot++) {
         uint slot_id = atomic_load_explicit(&adj_ids[base + slot], memory_order_relaxed);
@@ -209,14 +209,14 @@ inline bool try_insert_neighbor(
         }
         uint bits = atomic_load_explicit(&adj_dists_bits[base + slot], memory_order_relaxed);
         float distance = as_type<float>(bits);
-        if (worst_slot == uint_max || distance > worst_distance) {
+        if (worst_slot == UINT_MAX || distance > worst_distance) {
             worst_distance = distance;
             worst_slot = slot;
             worst_id = slot_id;
         }
     }
 
-    if (worst_slot == uint_max) {
+    if (worst_slot == UINT_MAX) {
         return false;
     }
     if (candidate_distance >= worst_distance) {
@@ -238,7 +238,7 @@ inline bool try_insert_neighbor(
     uint observed_bits = atomic_load_explicit(&adj_dists_bits[base + worst_slot], memory_order_relaxed);
     float observed_distance = as_type<float>(observed_bits);
     if (candidate_distance >= observed_distance) {
-        atomic_store_explicit(&adj_ids[base + worst_slot], expected_id, memory_order_release);
+        atomic_store_explicit(&adj_ids[base + worst_slot], expected_id, memory_order_relaxed);
         return false;
     }
 
@@ -247,7 +247,7 @@ inline bool try_insert_neighbor(
         as_type<uint>(candidate_distance),
         memory_order_relaxed
     );
-    atomic_store_explicit(&adj_ids[base + worst_slot], candidate, memory_order_release);
+    atomic_store_explicit(&adj_ids[base + worst_slot], candidate, memory_order_relaxed);
     atomic_fetch_add_explicit(update_counter, 1u, memory_order_relaxed);
     return true;
 }

@@ -1,13 +1,13 @@
 import Foundation
 import MetalANNSCore
 
-public actor ShardedIndex {
+public actor _ShardedIndex {
     private let numShards: Int
     private let nprobe: Int
     private let configuration: IndexConfiguration
 
     private var centroids: [[Float]] = []
-    private var shards: [ANNSIndex] = []
+    private var shards: [_GraphIndex] = []
     private var isBuilt = false
 
     public init(
@@ -97,10 +97,10 @@ public actor ShardedIndex {
             }
         }
 
-        var indexedShards: [(index: Int, shard: ANNSIndex)] = []
+        var indexedShards: [(index: Int, shard: _GraphIndex)] = []
         indexedShards.reserveCapacity(effectiveShards)
 
-        try await withThrowingTaskGroup(of: (Int, ANNSIndex).self) { group in
+        try await withThrowingTaskGroup(of: (Int, _GraphIndex).self) { group in
             for shardIndex in 0..<effectiveShards {
                 guard !shardVectors[shardIndex].isEmpty else {
                     continue
@@ -112,7 +112,7 @@ public actor ShardedIndex {
                 shardConfiguration.degree = min(configuration.degree, max(1, shardData.count - 1))
 
                 group.addTask {
-                    let shard = ANNSIndex(configuration: shardConfiguration)
+                    let shard = _GraphIndex(configuration: shardConfiguration)
                     try await shard.build(vectors: shardData, ids: shardDataIDs)
                     return (shardIndex, shard)
                 }
@@ -135,7 +135,7 @@ public actor ShardedIndex {
     public func search(
         query: [Float],
         k: Int,
-        filter: SearchFilter? = nil,
+        filter: _LegacySearchFilter? = nil,
         metric: Metric? = nil
     ) async throws -> [SearchResult] {
         guard isBuilt, !shards.isEmpty, !centroids.isEmpty else {
@@ -189,7 +189,7 @@ public actor ShardedIndex {
     public func batchSearch(
         queries: [[Float]],
         k: Int,
-        filter: SearchFilter? = nil,
+        filter: _LegacySearchFilter? = nil,
         metric: Metric? = nil
     ) async throws -> [[SearchResult]] {
         guard isBuilt, !shards.isEmpty, !centroids.isEmpty else {
@@ -210,7 +210,12 @@ public actor ShardedIndex {
                 nextIndex += 1
 
                 group.addTask { [self] in
-                    let result = try await self.search(query: query, k: k, filter: filter, metric: metric)
+                    let result = try await self.searchForBatch(
+                        query: query,
+                        k: k,
+                        filter: filter,
+                        metric: metric
+                    )
                     return (idx, result)
                 }
             }
@@ -224,7 +229,12 @@ public actor ShardedIndex {
                     nextIndex += 1
 
                     group.addTask { [self] in
-                        let result = try await self.search(query: query, k: k, filter: filter, metric: metric)
+                        let result = try await self.searchForBatch(
+                            query: query,
+                            k: k,
+                            filter: filter,
+                            metric: metric
+                        )
                         return (idx, result)
                     }
                 }
@@ -232,6 +242,59 @@ public actor ShardedIndex {
 
             return orderedResults.map { $0 ?? [] }
         }
+    }
+
+    private func searchForBatch(
+        query: [Float],
+        k: Int,
+        filter: _LegacySearchFilter?,
+        metric: Metric?
+    ) async throws -> [SearchResult] {
+        guard k > 0 else {
+            return []
+        }
+        guard let firstCentroid = centroids.first else {
+            throw ANNSError.indexEmpty
+        }
+        guard query.count == firstCentroid.count else {
+            throw ANNSError.dimensionMismatch(expected: firstCentroid.count, got: query.count)
+        }
+
+        let searchMetric = metric ?? configuration.metric
+        let centroidDistances = centroids.enumerated().map { (index, centroid) in
+            (index, SIMDDistance.distance(query, centroid, metric: searchMetric))
+        }.sorted { $0.1 < $1.1 }
+
+        let probeCount = min(shards.count, nprobe + 1)
+        let probeIndices = centroidDistances.prefix(probeCount).map { $0.0 }
+        // Batch mode uses a deeper per-shard candidate set. Keeping this above
+        // the GPU beam-search cutoff steers toward the CPU/HNSW path, which is
+        // currently more stable for batched sharded recall.
+        let perShardK = max(k, max(257, min(512, max(configuration.efSearch * 4, k * 16))))
+
+        var mergedResults: [SearchResult] = []
+        mergedResults.reserveCapacity(probeCount * perShardK)
+
+        try await withThrowingTaskGroup(of: [SearchResult].self) { group in
+            for shardIndex in probeIndices {
+                let shard = shards[shardIndex]
+                group.addTask {
+                    try await shard.search(
+                        query: query,
+                        k: perShardK,
+                        filter: filter,
+                        metric: metric
+                    )
+                }
+            }
+
+            for try await shardResults in group {
+                mergedResults.append(contentsOf: shardResults)
+            }
+        }
+
+        mergedResults.sort { $0.score < $1.score }
+        return Array(mergedResults.prefix(k))
     }
 
     public var count: Int {

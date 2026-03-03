@@ -2,11 +2,11 @@ import Foundation
 import Testing
 @testable import MetalANNS
 
-@Suite("StreamingIndex Insert Tests")
+@Suite("Advanced.StreamingIndex Insert Tests")
 struct StreamingIndexInsertTests {
     @Test("Insert single vector")
     func insertSingleVector() async throws {
-        let index = StreamingIndex(config: StreamingConfiguration(
+        let index = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 10,
             mergeStrategy: .blocking
         ))
@@ -18,7 +18,7 @@ struct StreamingIndexInsertTests {
 
     @Test("Insert beyond single capacity")
     func insertBeyondSingleCapacity() async throws {
-        let index = StreamingIndex(config: StreamingConfiguration(
+        let index = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 10,
             mergeStrategy: .blocking
         ))
@@ -32,7 +32,7 @@ struct StreamingIndexInsertTests {
 
     @Test("Batch insert")
     func batchInsert() async throws {
-        let index = StreamingIndex(config: StreamingConfiguration(
+        let index = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 20,
             mergeStrategy: .blocking
         ))
@@ -46,7 +46,7 @@ struct StreamingIndexInsertTests {
 
     @Test("Duplicate ID throws")
     func duplicateIDThrows() async throws {
-        let index = StreamingIndex(config: StreamingConfiguration(
+        let index = Advanced.StreamingIndex(config: StreamingConfiguration(
             deltaCapacity: 10,
             mergeStrategy: .blocking
         ))

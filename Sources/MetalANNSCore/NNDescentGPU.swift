@@ -238,7 +238,8 @@ public enum NNDescentGPU {
             throw ANNSError.constructionFailed("Bitonic sort supports degree up to 64")
         }
         guard (degree & (degree - 1)) == 0 else {
-            throw ANNSError.constructionFailed("Bitonic sort requires degree to be a power of two")
+            try sortNeighborListsCPU(graph: graph, nodeCount: nodeCount)
+            return
         }
 
         let pipeline = try await context.pipelineCache.pipeline(for: "bitonic_sort_neighbors")
@@ -263,6 +264,25 @@ public enum NNDescentGPU {
             let threadsPerThreadgroup = MTLSize(width: threadgroupWidth, height: 1, depth: 1)
             encoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
             encoder.endEncoding()
+        }
+    }
+
+    private static func sortNeighborListsCPU(graph: GraphBuffer, nodeCount: Int) throws {
+        for nodeID in 0..<nodeCount {
+            let ids = graph.neighborIDs(of: nodeID)
+            let distances = graph.neighborDistances(of: nodeID)
+            var pairs = Array(zip(ids, distances))
+            pairs.sort { lhs, rhs in
+                if lhs.1 == rhs.1 {
+                    return lhs.0 < rhs.0
+                }
+                return lhs.1 < rhs.1
+            }
+            try graph.setNeighbors(
+                of: nodeID,
+                ids: pairs.map(\.0),
+                distances: pairs.map(\.1)
+            )
         }
     }
 }

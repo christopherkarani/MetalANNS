@@ -2,7 +2,7 @@ import Foundation
 import Metal
 import MetalANNSCore
 
-public actor ANNSIndex {
+public actor _GraphIndex {
     private static let fullGPUMaxEF = 256
 
     private struct PersistedMetadata: Codable, Sendable {
@@ -602,7 +602,7 @@ public actor ANNSIndex {
     public func search(
         query: [Float],
         k: Int,
-        filter: SearchFilter? = nil,
+        filter: _LegacySearchFilter? = nil,
         metric: Metric? = nil
     ) async throws -> [SearchResult] {
         guard isBuilt, let vectors, let graph else {
@@ -642,7 +642,7 @@ public actor ANNSIndex {
 
         if let context, canAttemptGPU {
             do {
-                rawResults = try await FullGPUSearch.search(
+                rawResults = try await SearchGPU.search(
                     context: context,
                     query: normalizedQuery,
                     vectors: vectors,
@@ -743,7 +743,7 @@ public actor ANNSIndex {
         query: [Float],
         maxDistance: Float,
         limit: Int = 1000,
-        filter: SearchFilter? = nil,
+        filter: _LegacySearchFilter? = nil,
         metric: Metric? = nil
     ) async throws -> [SearchResult] {
         guard isBuilt, let vectors, let graph else {
@@ -780,7 +780,7 @@ public actor ANNSIndex {
 
         if let context, canAttemptGPU {
             do {
-                rawResults = try await FullGPUSearch.search(
+                rawResults = try await SearchGPU.search(
                     context: context,
                     query: normalizedQuery,
                     vectors: vectors,
@@ -881,7 +881,7 @@ public actor ANNSIndex {
     public func batchSearch(
         queries: [[Float]],
         k: Int,
-        filter: SearchFilter? = nil,
+        filter: _LegacySearchFilter? = nil,
         metric: Metric? = nil
     ) async throws -> [[SearchResult]] {
         guard isBuilt else {
@@ -1019,10 +1019,10 @@ public actor ANNSIndex {
         }
     }
 
-    public static func load(from url: URL) async throws -> ANNSIndex {
+    public static func load(from url: URL) async throws -> _GraphIndex {
         let persistedState = try resolvePersistedState(for: url)
         let initialConfiguration = persistedState.configuration ?? .default
-        let index = ANNSIndex(configuration: initialConfiguration)
+        let index = _GraphIndex(configuration: initialConfiguration)
 
         let loaded = try IndexSerializer.load(from: url, device: await index.currentDevice())
         let resolvedIDMap = resolveLoadedIDMap(
@@ -1049,10 +1049,10 @@ public actor ANNSIndex {
         return index
     }
 
-    public static func loadMmap(from url: URL) async throws -> ANNSIndex {
+    public static func loadMmap(from url: URL) async throws -> _GraphIndex {
         let persistedState = try resolvePersistedState(for: url)
         let initialConfiguration = persistedState.configuration ?? .default
-        let index = ANNSIndex(configuration: initialConfiguration)
+        let index = _GraphIndex(configuration: initialConfiguration)
         let loaded = try MmapIndexLoader.load(from: url, device: await index.currentDevice())
         let resolvedIDMap = resolveLoadedIDMap(
             persistedIDMap: persistedState.idMap,
@@ -1080,10 +1080,10 @@ public actor ANNSIndex {
         return index
     }
 
-    public static func loadDiskBacked(from url: URL) async throws -> ANNSIndex {
+    public static func loadDiskBacked(from url: URL) async throws -> _GraphIndex {
         let persistedState = try resolvePersistedState(for: url)
         let initialConfiguration = persistedState.configuration ?? .default
-        let index = ANNSIndex(configuration: initialConfiguration)
+        let index = _GraphIndex(configuration: initialConfiguration)
 
         let diskBacked = try DiskBackedIndexLoader.load(from: url, device: await index.currentDevice())
         let resolvedIDMap = resolveLoadedIDMap(
@@ -1116,6 +1116,51 @@ public actor ANNSIndex {
         max(0, idMap.count - softDeletion.deletedCount)
     }
 
+    func streamingActiveExternalIDs() throws -> [String] {
+        guard isBuilt, let vectors else {
+            throw ANNSError.indexEmpty
+        }
+
+        var activeIDs: [String] = []
+        activeIDs.reserveCapacity(max(0, idMap.count - softDeletion.deletedCount))
+        for slot in 0..<vectors.count {
+            let internalID = UInt32(slot)
+            guard !softDeletion.isDeleted(internalID) else {
+                continue
+            }
+            guard let externalID = idMap.externalID(for: internalID) else {
+                continue
+            }
+            activeIDs.append(externalID)
+        }
+        return activeIDs
+    }
+
+    func streamingActiveRecords() throws -> (vectors: [[Float]], ids: [String]) {
+        guard isBuilt, let vectors else {
+            throw ANNSError.indexEmpty
+        }
+
+        var activeVectors: [[Float]] = []
+        var activeIDs: [String] = []
+        activeVectors.reserveCapacity(max(0, idMap.count - softDeletion.deletedCount))
+        activeIDs.reserveCapacity(max(0, idMap.count - softDeletion.deletedCount))
+
+        for slot in 0..<vectors.count {
+            let internalID = UInt32(slot)
+            guard !softDeletion.isDeleted(internalID) else {
+                continue
+            }
+            guard let externalID = idMap.externalID(for: internalID) else {
+                continue
+            }
+            activeIDs.append(externalID)
+            activeVectors.append(vectors.vector(at: slot))
+        }
+
+        return (activeVectors, activeIDs)
+    }
+
     private func batchSearchMaxConcurrency() async -> Int {
         if let context {
             return await context.queuePool.queues.count
@@ -1128,7 +1173,7 @@ public actor ANNSIndex {
     }
 
     private func supportsGPUSearch(for vectors: any VectorStorage) -> Bool {
-        !(vectors is DiskBackedVectorBuffer) && !(vectors is BinaryVectorBuffer)
+        !(vectors is BinaryVectorBuffer)
     }
 
     private func applyLoadedState(

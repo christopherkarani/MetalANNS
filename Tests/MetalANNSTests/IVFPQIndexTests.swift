@@ -3,7 +3,7 @@ import Testing
 @testable import MetalANNS
 @testable import MetalANNSCore
 
-@Suite("IVFPQIndex Tests")
+@Suite("Advanced.IVFPQIndex Tests")
 struct IVFPQIndexTests {
     @Test("Train and add vectors")
     func trainAndAdd() async throws {
@@ -15,7 +15,7 @@ struct IVFPQIndexTests {
             metric: .l2,
             trainingIterations: 6
         )
-        let index = try IVFPQIndex(capacity: 2_000, dimension: 128, config: config)
+        let index = try Advanced.IVFPQIndex(capacity: 2_000, dimension: 128, config: config)
 
         let centers = makeClusterCenters(dimension: 128, clusters: 32, seed: 5)
         let training = sampleClusteredVectors(count: 800, centers: centers, seed: 6)
@@ -39,7 +39,7 @@ struct IVFPQIndexTests {
             metric: .l2,
             trainingIterations: 8
         )
-        let index = try IVFPQIndex(capacity: 3_000, dimension: 128, config: config)
+        let index = try Advanced.IVFPQIndex(capacity: 3_000, dimension: 128, config: config)
 
         let centers = makeClusterCenters(dimension: 128, clusters: 32, seed: 31)
         let training = sampleClusteredVectors(count: 1_200, centers: centers, seed: 32)
@@ -70,7 +70,7 @@ struct IVFPQIndexTests {
             metric: .l2,
             trainingIterations: 8
         )
-        let index = try IVFPQIndex(capacity: 3_000, dimension: 128, config: config)
+        let index = try Advanced.IVFPQIndex(capacity: 3_000, dimension: 128, config: config)
 
         let centers = makeClusterCenters(dimension: 128, clusters: 32, seed: 71)
         let training = sampleClusteredVectors(count: 1_100, centers: centers, seed: 72)
@@ -117,7 +117,7 @@ struct IVFPQIndexTests {
             metric: .l2,
             trainingIterations: 6
         )
-        let index = try IVFPQIndex(capacity: 2_000, dimension: 128, config: config)
+        let index = try Advanced.IVFPQIndex(capacity: 2_000, dimension: 128, config: config)
 
         let centers = makeClusterCenters(dimension: 128, clusters: 16, seed: 101)
         let training = sampleClusteredVectors(count: 900, centers: centers, seed: 102)
@@ -136,7 +136,7 @@ struct IVFPQIndexTests {
 }
 
 private func averageRecallAt10(
-    index: IVFPQIndex,
+    index: Advanced.IVFPQIndex,
     databaseVectors: [[Float]],
     databaseIDs: [String],
     queries: [[Float]],

@@ -15,7 +15,7 @@ struct IVFPQPersistenceTests {
             metric: .l2,
             trainingIterations: 6
         )
-        let index = try IVFPQIndex(capacity: 2_000, dimension: 128, config: config)
+        let index = try Advanced.IVFPQIndex(capacity: 2_000, dimension: 128, config: config)
         let centers = makeClusterCenters(dimension: 128, clusters: 32, seed: 301)
         let training = sampleClusteredVectors(count: 1_000, centers: centers, seed: 302)
         try await index.train(vectors: training)
@@ -31,7 +31,7 @@ struct IVFPQPersistenceTests {
         defer { try? FileManager.default.removeItem(at: url) }
 
         try await index.save(to: url.path)
-        let loaded = try await IVFPQIndex.load(from: url.path)
+        let loaded = try await Advanced.IVFPQIndex.load(from: url.path)
 
         let loadedCount = await loaded.count
         let originalCount = await index.count
@@ -52,7 +52,7 @@ struct IVFPQPersistenceTests {
             metric: .l2,
             trainingIterations: 8
         )
-        let index = try IVFPQIndex(capacity: 2_500, dimension: 128, config: config)
+        let index = try Advanced.IVFPQIndex(capacity: 2_500, dimension: 128, config: config)
         let centers = makeClusterCenters(dimension: 128, clusters: 32, seed: 401)
         let training = sampleClusteredVectors(count: 1_200, centers: centers, seed: 402)
         try await index.train(vectors: training)
@@ -72,7 +72,7 @@ struct IVFPQPersistenceTests {
         defer { try? FileManager.default.removeItem(at: url) }
 
         try await index.save(to: url.path)
-        let loaded = try await IVFPQIndex.load(from: url.path)
+        let loaded = try await Advanced.IVFPQIndex.load(from: url.path)
         var after: [[SearchResult]] = []
         after.reserveCapacity(queries.count)
         for query in queries {
