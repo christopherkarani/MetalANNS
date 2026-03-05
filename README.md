@@ -1,58 +1,21 @@
 # MetalANNS
 
-GPU-native approximate nearest neighbor search for Apple platforms, built in Swift + Metal.
+**GPU-native vector search for Apple Silicon.** Pure Swift + Metal. No C++. No cloud. No compromise.
 
-MetalANNS is designed for production vector search on-device and on Apple Silicon servers: mutable indexes, streaming ingest, persistence, filtering, and benchmark tooling.
+MetalANNS brings production-grade approximate nearest neighbor search to iOS, macOS, and visionOS — running entirely on-device with GPU acceleration via Metal compute shaders.
 
-## Why MetalANNS
+## Why MetalANNS?
 
-- Metal-first ANN search path with CPU fallback for portability.
-- High-recall graph search via `VectorIndex` (backed by `Advanced.GraphIndex`).
-- Real update lifecycle: `build`, `insert`, `batchInsert`, `delete`, `compact`, `save`, `load`.
-- Optional advanced modes in `Advanced.*` for explicit streaming, sharding, and IVFPQ.
-- Multiple persistence modes: binary, mmap read-only, disk-backed read-only.
-- Swift 6 concurrency-safe actor API.
+Most ANN libraries are C++ ports bolted onto Apple platforms. MetalANNS was designed from scratch for Metal's memory model and compute architecture.
 
-## Performance Snapshot
+- **CAGRA, not HNSW** — Fixed out-degree directed graphs are fully GPU-parallelizable. No sequential insert bottleneck. [2.2-27x faster construction, 33-77x faster queries](https://arxiv.org/abs/2308.15136) vs. HNSW.
+- **Dual backend** — Metal shaders on Apple Silicon, Accelerate (vDSP/BLAS) fallback on simulators and CI. Same API, same results.
+- **Mutable indexes** — Insert, delete, batch update, compact. Not just build-once-query-forever.
+- **Multiple persistence modes** — Binary save/load, zero-copy mmap, disk-backed streaming for large indexes.
+- **Type-safe filtering** — Rich query DSL with boolean logic, range queries, and set membership.
+- **Swift 6 concurrency** — Actor-based thread safety with `Sendable` enforced at compile time.
 
-The benchmark harness is in-repo (`swift run MetalANNSBenchmarks`). Numbers below are from recorded local harness runs with synthetic data unless dataset paths are supplied.
-
-### Baseline (graph index)
-
-| Metric | Value |
-|---|---:|
-| Build time | 21,967.6 ms |
-| Query mean | 9.607 ms |
-| p50 / p95 / p99 | 9.62 / 9.97 / 10.06 ms |
-| Throughput | 102.97 QPS |
-| Recall@1 / @10 / @100 | 1.000 / 1.000 / 1.000 |
-
-### efSearch Sweep (graph index, queryCount=100, runs=2)
-
-| efSearch | Recall@10 | QPS | p95 (ms) |
-|---|---:|---:|---:|
-| 16 | 1.000 | 60 | 36.64 |
-| 32 | 1.000 | 64 | 29.75 |
-| 64 | 1.000 | 57 | 33.00 |
-| 128 | 1.000 | 56 | 34.53 |
-| 256 | 1.000 | 44 | 38.80 |
-
-### ANS vs IVFPQ (in-repo comparison)
-
-| Scenario | Index | Recall@10 | QPS |
-|---|---|---:|---:|
-| Speed-first | Graph | 1.000 | 57 |
-| Speed-first | IVFPQ | 0.406 | 581 |
-| High-recall | Graph | 1.000 | 65 |
-| High-recall | IVFPQ | 0.997 | 19 |
-
-What this shows:
-
-1. The graph index can hold perfect recall across `efSearch` settings in this synthetic workload.
-2. IVFPQ gives a speed/accuracy dial: very high QPS at lower recall, or near-graph recall at lower throughput.
-3. At comparable high recall in this snapshot, the graph index was faster.
-
-## Install
+## Quick Start
 
 ```swift
 // Package.swift
@@ -60,15 +23,9 @@ What this shows:
 ```
 
 ```swift
-// target dependencies
-.product(name: "MetalANNS", package: "MetalANNS")
-```
-
-## Quick Start
-
-```swift
 import MetalANNS
 
+// Build an index
 let index = VectorIndex<String, VectorIndexState.Unbuilt>(
     configuration: IndexConfiguration(degree: 32, metric: .cosine, efSearch: 64)
 )
@@ -77,10 +34,12 @@ let ready = try await index.build(
     records: zip(ids, vectors).map { VectorRecord(id: $0.0, vector: $0.1) }
 )
 
-let results = try await ready.search(query: query, topK: 10) {
+// Search with filters
+let results = try await ready.search(query: queryVector, topK: 10) {
     QueryFilter.equals(Field<String>("category"), "docs")
     QueryFilter.greaterThan(Field<Float>("score"), 0.8)
 }
+
 for hit in results {
     print("\(hit.id) -> \(hit.score)")
 }
@@ -89,72 +48,79 @@ for hit in results {
 ## Mutability + Persistence
 
 ```swift
+// Live mutations
 try await index.insert(newVector, id: "doc_123")
 try await index.batchInsert(batchVectors, ids: batchIDs)
 try await index.delete(id: "doc_99")
 try await index.compact()
 
-let fileURL = URL(fileURLWithPath: "/tmp/my-index.mann")
+// Save and load
 try await index.save(to: fileURL)
+let loaded = try await VectorIndex<String, VectorIndexState.Ready>.load(from: fileURL)
 
-let loaded = try await VectorIndex<String, VectorIndexState.Unbuilt>.load(from: fileURL)
-let mmapLoaded = try await VectorIndex<String, VectorIndexState.Unbuilt>.loadReadOnly(from: fileURL, mode: .mmap)
-let diskLoaded = try await VectorIndex<String, VectorIndexState.Unbuilt>.loadReadOnly(from: fileURL, mode: .diskBacked)
+// Zero-copy for read-heavy workloads
+let mmap = try await VectorIndex<String, VectorIndexState.ReadOnly>.loadReadOnly(from: fileURL, mode: .mmap)
 ```
 
-## API Surface
+## Performance
 
-- `VectorIndex<Key, State>`: minimal state-typed public API (`Unbuilt -> Ready -> ReadOnly`).
-- `Advanced.*`: explicit power-user escape hatch for low-level index types.
-  - `Advanced.GraphIndex`
-  - `Advanced.StreamingIndex`
-  - `Advanced.ShardedIndex`
-  - `Advanced.IVFPQIndex`
+Benchmarks from the in-repo harness (`swift run MetalANNSBenchmarks`), synthetic data:
 
-Legacy top-level types were removed. Use `VectorIndex` for default usage and `Advanced.*` for low-level control.
+| | Graph Index | IVFPQ |
+|---|---|---|
+| **Recall@10** | 1.000 | 0.406 - 0.997 |
+| **Throughput** | 57-102 QPS | 19-581 QPS |
+| **Trade-off** | Accuracy-first | Speed dial |
 
-## Power Users
-
-```swift
-import MetalANNS
-
-let raw = Advanced.GraphIndex(configuration: .default)
-try await raw.build(vectors: vectors, ids: ids)
-let hits = try await raw.search(query: query, k: 10)
-```
+The graph index holds **perfect recall** across `efSearch` settings. IVFPQ gives a tunable speed/accuracy knob — up to 10x throughput when you can trade recall.
 
 ## Architecture
 
-- `MetalANNSCore`: data structures, kernels, graph build/search, serialization.
-- `MetalANNS`: public actor-based API and storage integrations.
-
-## Benchmark Commands
-
-```bash
-# baseline
-swift run MetalANNSBenchmarks
-
-# efSearch sweep
-swift run MetalANNSBenchmarks --sweep --runs 2 --query-count 100 --sweep-efsearch 16,32,64,128,256
-
-# ANS vs IVFPQ
-swift run MetalANNSBenchmarks --ivfpq --query-count 50
-swift run MetalANNSBenchmarks --ivfpq --query-count 100 --ivfpq-subspaces 8 --ivfpq-centroids 256 --ivfpq-coarse-centroids 256 --ivfpq-nprobe 1 --ivfpq-iterations 10
-swift run MetalANNSBenchmarks --ivfpq --query-count 100 --ivfpq-subspaces 8 --ivfpq-centroids 256 --ivfpq-coarse-centroids 512 --ivfpq-nprobe 64 --ivfpq-iterations 10
+```
+MetalANNS (public API)          MetalANNSCore (internals)
+┌─────────────────────┐         ┌─────────────────────────────┐
+│ VectorIndex<K,State> │────────▶│ NN-Descent graph build      │
+│ QueryFilter DSL      │         │ Beam search (GPU + CPU)     │
+│ Persistence layer    │         │ Metal shaders / Accelerate  │
+│ Metadata (GRDB)      │         │ FP16 / Binary / PQ codecs   │
+└─────────────────────┘         │ Binary + mmap serialization  │
+                                 └─────────────────────────────┘
 ```
 
-Export raw benchmark data:
+**`VectorIndex<Key, State>`** — The main API. Type-state machine: `Unbuilt` → `Ready` → `ReadOnly`.
+
+**`Advanced.*`** — Power-user escape hatch for direct access to low-level index types:
+
+| Type | Use Case |
+|---|---|
+| `Advanced.GraphIndex` | Raw CAGRA-style graph |
+| `Advanced.StreamingIndex` | Continuous ingest with background merges |
+| `Advanced.ShardedIndex` | Large datasets with k-means routing |
+| `Advanced.IVFPQIndex` | Product quantization for speed/memory trade-off |
+
+## Distance Metrics
+
+`cosine` · `l2` · `innerProduct` · `hamming`
+
+## Benchmarks
 
 ```bash
-swift run MetalANNSBenchmarks --csv-out results.csv --json-out results.json
+swift run MetalANNSBenchmarks                        # baseline
+swift run MetalANNSBenchmarks --sweep                 # efSearch sweep
+swift run MetalANNSBenchmarks --ivfpq                 # graph vs IVFPQ
+swift run MetalANNSBenchmarks --dataset path/to/data  # real dataset
+swift run MetalANNSBenchmarks --csv-out results.csv   # export
 ```
 
 ## Requirements
 
-- iOS 17+
-- macOS 14+
-- visionOS 1.0+
-- Apple Silicon recommended for GPU acceleration
+| Platform | Minimum |
+|---|---|
+| macOS | 14+ |
+| iOS | 17+ |
+| visionOS | 1.0+ |
+
+Apple Silicon recommended for GPU acceleration. Falls back to Accelerate on Intel / simulators.
 
 ## License
 
