@@ -2,8 +2,8 @@
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/chriskarani/MetalANNS/main/docs/assets/banner-dark.png">
-    <img src="https://raw.githubusercontent.com/chriskarani/MetalANNS/main/docs/assets/banner-light.png" alt="MetalANNS Banner" width="800">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
+    <img src="docs/assets/banner-light.svg" alt="MetalANNS Banner" width="800">
   </picture>
 </p>
 
@@ -12,7 +12,7 @@
     <a href="https://developer.apple.com/metal/"><img src="https://img.shields.io/badge/Metal-GPU%20Accelerated-blue.svg" alt="Metal GPU"></a>
     <img src="https://img.shields.io/badge/Platform-macOS%2014+%20%7C%20iOS%2017+%20%7C%20visionOS-black.svg" alt="Platforms">
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License MIT"></a>
-    <a href="https://github.com/chriskarani/MetalANNS/stargazers"><img src="https://img.shields.io/github/stars/chriskarani/MetalANNS.svg?style=social" alt="Stars"></a>
+    <a href="https://github.com/christopherkarani/MetalANNS/stargazers"><img src="https://img.shields.io/github/stars/christopherkarani/MetalANNS.svg?style=social" alt="Stars"></a>
 </p>
 
 ---
@@ -32,14 +32,14 @@ MetalANNS is built for the **Unified Memory Architecture** of M-series and A-ser
 
 ### Index Build Speed (100k Vectors, 128D)
 <p align="center">
-  <img src="https://raw.githubusercontent.com/chriskarani/MetalANNS/main/docs/assets/chart-build-time.png" alt="Build Time Comparison" width="600">
+  <img src="docs/assets/chart-build-time.svg" alt="Build Time Comparison" width="600">
   <br>
   <i>Benchmark: M3 Max (30-core GPU). MetalANNS constructs the graph in parallel using compute shaders.</i>
 </p>
 
 ### Search Efficiency: Recall vs. Latency
 <p align="center">
-  <img src="https://raw.githubusercontent.com/chriskarani/MetalANNS/main/docs/assets/chart-recall-latency.png" alt="Recall vs Latency Curve" width="600">
+  <img src="docs/assets/chart-recall-latency.svg" alt="Recall vs Latency Curve" width="600">
   <br>
   <i>MetalANNS maintains perfect recall at 10x the throughput of competitive CPU libraries.</i>
 </p>
@@ -99,7 +99,7 @@ let loadedIndex = try await VectorIndex<String, VectorIndexState.Ready>
 Why choose MetalANNS over HNSW or FAISS?
 
 | Feature | MetalANNS | HNSWLib (CPU) |
-| :--- | :---: | :---: |
+| :--- | :--- | :--- |
 | **Architecture** | CAGRA (GPU Parallel) | HNSW (CPU Sequential) |
 | **Memory copies** | **Zero (UMA)** | High (PCIe/Bus) |
 | **Concurrency** | Swift 6 Actors | Mutex/Locks |
@@ -126,7 +126,7 @@ Add MetalANNS to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/chriskarani/MetalANNS.git", from: "0.1.2")
+    .package(url: "https://github.com/christopherkarani/MetalANNS.git", from: "0.1.2")
 ]
 ```
 

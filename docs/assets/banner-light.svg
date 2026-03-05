@@ -1,0 +1,8 @@
+<svg width="800" height="200" viewBox="0 0 800 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="800" height="200" fill="white"/>
+  <!-- Modern clean typography -->
+  <text x="400" y="115" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="72" font-weight="800" fill="#1D1D1F" text-anchor="middle" letter-spacing="-2">MetalANNS</text>
+  <!-- Mascot integration -->
+  <text x="590" y="110" font-size="64" transform="rotate(15, 590, 110)">🐊</text>
+  <text x="400" y="150" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="18" fill="#86868B" text-anchor="middle" letter-spacing="4" font-weight="500">GPU-NATIVE VECTOR SEARCH</text>
+</svg>
