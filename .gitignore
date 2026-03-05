@@ -6,3 +6,8 @@ DerivedData/
 *.xcworkspace/xcuserdata/
 
 .wax-repo/
+
+# Project metadata and documentation
+docs/
+tasks/
+scripts/

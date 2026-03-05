@@ -4,7 +4,7 @@
 
 MetalANNS 为 iOS、macOS 和 visionOS 带来生产级近似最近邻搜索——完全在设备端运行，通过 Metal 计算着色器实现 GPU 加速。
 
-*[English](README.md) | 中文 | [日本語](README.ja.md) | [Português](README.pt-BR.md) | [Español](README.es.md)*
+*[English](../README.md) | 中文 | [日本語](README.ja.md) | [Português](README.pt-BR.md) | [Español](README.es.md)*
 
 ## 为什么选择 MetalANNS？
 

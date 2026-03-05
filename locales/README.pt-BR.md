@@ -4,7 +4,7 @@
 
 MetalANNS traz busca aproximada de vizinhos mais proximos em nivel de producao para iOS, macOS e visionOS — rodando inteiramente no dispositivo com aceleracao GPU via Metal compute shaders.
 
-*[English](README.md) | [中文](README.zh-CN.md) | [日本語](README.ja.md) | Portugues | [Espanol](README.es.md)*
+*[English](../README.md) | [中文](README.zh-CN.md) | [日本語](README.ja.md) | Português | [Español](README.es.md)*
 
 ## Por que MetalANNS?
 

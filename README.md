@@ -19,6 +19,8 @@
 
 **MetalANNS** is a high-performance, GPU-native vector search engine engineered exclusively for **Apple Silicon**. By leveraging Metal compute shaders and a CAGRA-inspired graph architecture, it delivers sub-millisecond Approximate Nearest Neighbor Search (ANNS) directly on the device.
 
+*[Español](locales/README.es.md) | [日本語](locales/README.ja.md) | [Português (Brasil)](locales/README.pt-BR.md) | [中文](locales/README.zh-CN.md)*
+
 - **Fast**: 10x-20x faster query throughput than CPU-based HNSW by exploiting GPU parallelism.
 - **Unified Memory**: Optimized for Apple’s UMA — zero unnecessary memory copies between CPU and GPU.
 - **Type-Safe State**: Uses Swift's generic type-state machine to prevent runtime errors (e.g., searching an unbuilt index).

@@ -4,7 +4,7 @@
 
 MetalANNS は、iOS、macOS、visionOS 向けのプロダクショングレードの近似最近傍探索ライブラリです。Metal コンピュートシェーダーによる GPU アクセラレーションで、完全にデバイス上で動作します。
 
-*[English](README.md) | [中文](README.zh-CN.md) | 日本語 | [Português](README.pt-BR.md) | [Español](README.es.md)*
+*[English](../README.md) | [中文](README.zh-CN.md) | 日本語 | [Português](README.pt-BR.md) | [Español](README.es.md)*
 
 ## なぜ MetalANNS？
 
