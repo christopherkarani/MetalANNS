@@ -4,6 +4,8 @@
 
 MetalANNS brings production-grade approximate nearest neighbor search to iOS, macOS, and visionOS — running entirely on-device with GPU acceleration via Metal compute shaders.
 
+*English | [中文](README.zh-CN.md) | [日本語](README.ja.md) | [Portugues](README.pt-BR.md) | [Espanol](README.es.md)*
+
 ## Why MetalANNS?
 
 Most ANN libraries are C++ ports bolted onto Apple platforms. MetalANNS was designed from scratch for Metal's memory model and compute architecture.
