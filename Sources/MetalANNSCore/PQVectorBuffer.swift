@@ -40,8 +40,10 @@ public final class PQVectorBuffer: QuantizedStorage, @unchecked Sendable {
         }
 
         let offset = index * codeLength
-        for i in 0..<codeLength {
-            codes[offset + i] = code[i]
+        codes.withUnsafeMutableBufferPointer { destination in
+            code.withUnsafeBufferPointer { source in
+                destination.baseAddress!.advanced(by: offset).update(from: source.baseAddress!, count: codeLength)
+            }
         }
         if count < index + 1 {
             count = index + 1
@@ -77,6 +79,46 @@ public final class PQVectorBuffer: QuantizedStorage, @unchecked Sendable {
         }
         let offset = index * codeLength
         return Array(codes[offset..<(offset + codeLength)])
+    }
+
+    package func withCode<R>(at index: Int, _ body: (UnsafeBufferPointer<UInt8>) -> R) -> R? {
+        guard index >= 0, index < count else {
+            return nil
+        }
+        let offset = index * codeLength
+        return codes.withUnsafeBufferPointer { buffer in
+            let slice = UnsafeBufferPointer(
+                start: buffer.baseAddress!.advanced(by: offset),
+                count: codeLength
+            )
+            return body(slice)
+        }
+    }
+
+    package func gatherCodes(for ids: [UInt32]) -> [UInt8] {
+        guard !ids.isEmpty else {
+            return []
+        }
+
+        var flattened = [UInt8](repeating: 0, count: ids.count * codeLength)
+        flattened.withUnsafeMutableBufferPointer { destination in
+            codes.withUnsafeBufferPointer { source in
+                for (row, id) in ids.enumerated() {
+                    let index = Int(id)
+                    guard index >= 0, index < count else {
+                        continue
+                    }
+
+                    let sourceOffset = index * codeLength
+                    let destinationOffset = row * codeLength
+                    destination.baseAddress!.advanced(by: destinationOffset).update(
+                        from: source.baseAddress!.advanced(by: sourceOffset),
+                        count: codeLength
+                    )
+                }
+            }
+        }
+        return flattened
     }
 
     public var compressedCodeBytes: Int {

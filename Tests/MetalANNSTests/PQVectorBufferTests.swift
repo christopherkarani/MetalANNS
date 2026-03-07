@@ -73,6 +73,32 @@ struct PQVectorBufferTests {
         #expect(reduction >= 30)
         #expect(reduction <= 70)
     }
+
+    @Test("Gathered codes preserve requested row order")
+    func gatherCodesPreservesOrder() throws {
+        let vectors = makeStructuredVectors(count: 1_000, dimension: 128, seed: 123)
+        let pq = try ProductQuantizer.train(
+            vectors: vectors,
+            numSubspaces: 8,
+            centroidsPerSubspace: 256,
+            maxIterations: 8
+        )
+
+        let buffer = try PQVectorBuffer(capacity: 8, dim: 128, pq: pq)
+        for index in 0..<4 {
+            try buffer.insert(vector: vectors[index], at: index)
+        }
+
+        let ids: [UInt32] = [2, 0, 3]
+        let gathered = buffer.gatherCodes(for: ids)
+
+        #expect(gathered.count == ids.count * pq.numSubspaces)
+        for (row, id) in ids.enumerated() {
+            let start = row * pq.numSubspaces
+            let end = start + pq.numSubspaces
+            #expect(Array(gathered[start..<end]) == buffer.code(at: Int(id)))
+        }
+    }
 }
 
 private func makeStructuredVectors(count: Int, dimension: Int, seed: UInt64) -> [[Float]] {

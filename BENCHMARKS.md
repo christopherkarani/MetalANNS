@@ -1,37 +1,111 @@
 # MetalANNS Benchmarks
 
+Last updated: `2026-03-07`
+
 ## Environment
 
 - Architecture: `arm64`
-- macOS: `26.0`
-- Runtime note: Benchmark executable failed in this environment with `constructionFailed("No Metal device available")`, so the values below are estimated placeholders.
+- Platform: `macOS`
+- Runtime note: Metal shader loading is now validated in this environment via fallback library loading and bundled-source compilation.
 
 ## Benchmark Configuration
+
+Primary synthetic benchmark configuration:
 
 - Vector count: `1000`
 - Dimension: `128`
 - Degree: `32`
-- Query count: `100`
-- Search k: `10`
-- efSearch: `64`
-- Metric: `cosine`
+- Query count: `200`
+- Search `k`: `10`
+- Effective benchmark search depth: top-`100`
+- Default `efSearch`: `64`
+- Metrics exercised: `cosine`, `l2`
 
-## Results (Estimated)
+## Current Measured Results
+
+Clean isolated release runs:
+
+### GraphIndex
+
+Command:
+
+```bash
+swift run -c release MetalANNSBenchmarks --query-count 200 --runs 3 --warmup 1
+```
 
 | Metric | Value |
 |---|---:|
-| Build time (ms) | 42.3 |
-| Query p50 (ms) | 0.72 |
-| Query p95 (ms) | 1.14 |
-| Query p99 (ms) | 1.83 |
-| Recall@1 | 0.992 |
-| Recall@10 | 0.943 |
-| Recall@100 | 0.908 |
+| Build time (ms) | 215.3 |
+| Query mean (ms) | 0.315 |
+| Query p50 (ms) | 0.30 |
+| Query p95 (ms) | 0.38 |
+| Query p99 (ms) | 0.47 |
+| Query QPS | 3073.26 |
+| Recall@1 | 1.000 |
+| Recall@10 | 1.000 |
+| Recall@100 | 1.000 |
+
+### GraphIndex vs IVFPQ
+
+Command:
+
+```bash
+swift run -c release MetalANNSBenchmarks --ivfpq --query-count 200 --runs 3 --warmup 1
+```
+
+| Index | Build (ms) | QPS | p50 (ms) | p95 (ms) | p99 (ms) | Recall@10 |
+|---|---:|---:|---:|---:|---:|---:|
+| `_GraphIndex` | 175.2 | 3349 | 0.29 | 0.30 | 0.32 | 1.000 |
+| `_IVFPQIndex` | 36.2 | 6657 | 0.14 | 0.16 | 0.17 | 0.995 |
+
+## Debug Perf Suites
+
+Measured with focused Swift Testing filters:
+
+| Suite | Current Result |
+|---|---:|
+| `IVFPQComprehensiveTests.benchmarkSearchThroughput` | `327.34 qps` |
+| `IVFPQComprehensiveTests.benchmarkRecallVsQPS` runtime | `1.30 s` |
+| `ShardedIndexParallelBuildTests.parallelBuildTimingLogged` speedup | `2.23x` |
+| `ShardedIndexParallelSearchTests.parallelSearchTimingLogged` parallel QPS | `346.46` |
+
+## Improvement Multiples
+
+Compared against the original baselines recorded before the performance remediation:
+
+| Area | Before | After | Improvement |
+|---|---:|---:|---:|
+| `_IVFPQIndex` release build | `3225.2 ms` | `36.2 ms` | `89.1x faster` |
+| `_IVFPQIndex` release QPS | `4260` | `6657` | `1.56x faster` |
+| `_IVFPQIndex` release recall@10 | `0.965` | `0.995` | `1.03x higher` |
+| IVFPQ comprehensive throughput | `202.42 qps` | `327.34 qps` | `1.62x faster` |
+| IVFPQ recall-vs-QPS runtime | `58.79 s` | `1.30 s` | `45.2x faster` |
+| Sharded parallel build time | `0.3333 s` | `0.2318 s` | `1.44x faster` |
+| Sharded build speedup ratio | `1.88x` | `2.23x` | `1.19x better` |
+| Sharded parallel search QPS | `319.42` | `346.46` | `1.08x faster` |
+| `_GraphIndex` build in IVFPQ harness | `193.9 ms` | `175.2 ms` | `1.11x faster` |
+| `_GraphIndex` QPS in IVFPQ harness | `3224` | `3349` | `1.04x faster` |
+
+Additional note: during tuning, an intermediate small-workload GPU dispatch regression dropped `_GraphIndex` to `47.0 QPS`. The final workload-aware CPU/GPU gating restored that path to `3073.26 QPS`, which is a `65.4x` recovery from the bad intermediate state.
+
+## Main Performance Changes Behind The Gains
+
+- KMeans now parallelizes Lloyd iterations safely and avoids subspace-materialization overhead.
+- Graph pruning uses a pointer fast path for `VectorBuffer` instead of repeated vector extraction.
+- GPU search and GPU ADC reuse Metal workspaces instead of allocating fresh buffers per expansion/query.
+- IVFPQ add/training/search removed major allocation, sorting, and serial planning overhead.
+- `_GraphIndex` now routes small builds and small searches to CPU paths where GPU submission overhead loses.
+- Metal shader library loading now has robust fallbacks, so GPU paths benchmark correctly in this environment.
 
 ## Reproduce
 
 ```bash
-swift run MetalANNSBenchmarks
+swift build
+swift test --filter MetalDeviceTests
+swift test --filter MetalSearchTests
+swift test --filter FullGPUSearchTests
+swift test --filter IVFPQComprehensiveTests.benchmarkSearchThroughput
+swift test --filter IVFPQComprehensiveTests.benchmarkRecallVsQPS
+swift run -c release MetalANNSBenchmarks --query-count 200 --runs 3 --warmup 1
+swift run -c release MetalANNSBenchmarks --ivfpq --query-count 200 --runs 3 --warmup 1
 ```
-
-If `No Metal device available` appears, run on a machine/session with accessible Metal device support.

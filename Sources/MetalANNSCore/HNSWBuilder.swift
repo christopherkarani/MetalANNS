@@ -115,9 +115,13 @@ public enum HNSWBuilder {
         var adjacency = Array(repeating: [UInt32](), count: nodesAtLayer.count)
         let layerNodeSet = Set(nodesAtLayer)
         let targetCandidatePool = max(M * 8, M)
+        let cachedVectors = nodesAtLayer.map { vectors.vector(at: Int($0)) }
+        let layerIndexByNode = Dictionary(uniqueKeysWithValues: nodesAtLayer.enumerated().map { (offset, nodeID) in
+            (nodeID, offset)
+        })
 
         for (layerIndex, nodeID) in nodesAtLayer.enumerated() {
-            let sourceVector = vectors.vector(at: Int(nodeID))
+            let sourceVector = cachedVectors[layerIndex]
             let candidateIDs = collectCandidates(
                 for: nodeID,
                 graph: graph,
@@ -125,17 +129,27 @@ public enum HNSWBuilder {
                 layerNodeSet: layerNodeSet,
                 targetCount: targetCandidatePool
             )
-            var candidates: [(UInt32, Float)] = []
-            candidates.reserveCapacity(candidateIDs.count)
+            var bestNeighbors = BinaryHeap<(UInt32, Float)> { lhs, rhs in
+                lhs.1 > rhs.1
+            }
             for otherID in candidateIDs where otherID != nodeID {
-                let otherVector = vectors.vector(at: Int(otherID))
+                let otherVector: [Float]
+                if let cachedIndex = layerIndexByNode[otherID] {
+                    otherVector = cachedVectors[cachedIndex]
+                } else {
+                    otherVector = vectors.vector(at: Int(otherID))
+                }
                 let distance = SIMDDistance.distance(sourceVector, otherVector, metric: metric)
-                candidates.append((otherID, distance))
+                if bestNeighbors.count < max(1, M) {
+                    bestNeighbors.push((otherID, distance))
+                } else if let worst = bestNeighbors.peek, distance < worst.1 {
+                    bestNeighbors.replaceTop(with: (otherID, distance))
+                }
             }
 
-            candidates.sort { $0.1 < $1.1 }
-            let neighborLimit = min(max(1, M), candidates.count)
-            adjacency[layerIndex] = Array(candidates.prefix(neighborLimit).map(\.0))
+            adjacency[layerIndex] = bestNeighbors.unorderedElements()
+                .sorted { $0.1 < $1.1 }
+                .map { $0.0 }
         }
 
         return SkipLayer(
