@@ -2,6 +2,8 @@ import Foundation
 import Metal
 
 public enum SearchGPU {
+    private static let workspacePool = SearchGPUWorkspacePool()
+
     private struct Candidate {
         let nodeID: UInt32
         let distance: Float
@@ -37,6 +39,11 @@ public enum SearchGPU {
 
         let efLimit = min(ef, nodeCount)
         let entryID = UInt32(entryPoint)
+        let queryBuffer = try makeQueryBuffer(
+            context: context,
+            query: query,
+            vectors: vectors
+        )
         let entryDistance = SIMDDistance.distance(
             query,
             vectors.vector(at: entryPoint),
@@ -44,11 +51,13 @@ public enum SearchGPU {
         )
 
         var visited: Set<UInt32> = [entryID]
-        var candidates: [Candidate] = [Candidate(nodeID: entryID, distance: entryDistance)]
+        var candidates = BinaryHeap<Candidate> { lhs, rhs in
+            lhs.distance < rhs.distance
+        }
         var results: [Candidate] = [Candidate(nodeID: entryID, distance: entryDistance)]
+        candidates.push(Candidate(nodeID: entryID, distance: entryDistance))
 
-        while !candidates.isEmpty {
-            let current = candidates.removeFirst()
+        while let current = candidates.pop() {
             if results.count >= efLimit, let worst = results.last, current.distance > worst.distance {
                 break
             }
@@ -75,7 +84,7 @@ public enum SearchGPU {
 
             let neighborDistances = try await computeDistancesOnGPU(
                 context: context,
-                query: query,
+                queryBuffer: queryBuffer,
                 vectors: vectors,
                 neighborIDs: neighborIDs,
                 metric: metric
@@ -84,7 +93,7 @@ public enum SearchGPU {
             for (offset, distanceValue) in neighborDistances.enumerated() {
                 if results.count < efLimit || distanceValue < results[results.count - 1].distance {
                     let candidate = Candidate(nodeID: neighborIDs[offset], distance: distanceValue)
-                    insertSorted(candidate, into: &candidates)
+                    candidates.push(candidate)
                     insertSorted(candidate, into: &results)
                     if results.count > efLimit {
                         results.removeLast()
@@ -101,7 +110,7 @@ public enum SearchGPU {
 
     private static func computeDistancesOnGPU(
         context: MetalContext,
-        query: [Float],
+        queryBuffer: MTLBuffer,
         vectors: any VectorStorage,
         neighborIDs: [UInt32],
         metric: Metric
@@ -113,89 +122,26 @@ public enum SearchGPU {
         let functionName: String
         switch metric {
         case .cosine:
-            functionName = vectors.isFloat16 ? "cosine_distance_f16" : "cosine_distance"
+            functionName = vectors.isFloat16 ? "cosine_distance_indexed_f16" : "cosine_distance_indexed"
         case .l2:
-            functionName = vectors.isFloat16 ? "l2_distance_f16" : "l2_distance"
+            functionName = vectors.isFloat16 ? "l2_distance_indexed_f16" : "l2_distance_indexed"
         case .innerProduct:
-            functionName = vectors.isFloat16 ? "inner_product_distance_f16" : "inner_product_distance"
+            functionName = vectors.isFloat16 ? "inner_product_distance_indexed_f16" : "inner_product_distance_indexed"
         case .hamming:
             throw ANNSError.searchFailed("SearchGPU does not support metric .hamming")
         }
 
         let pipeline = try await context.pipelineCache.pipeline(for: functionName)
 
+        let neighborLength = neighborIDs.count * MemoryLayout<UInt32>.stride
         let outputLength = neighborIDs.count * MemoryLayout<Float>.stride
-        guard let outputBuffer = context.device.makeBuffer(length: outputLength, options: .storageModeShared) else {
-            throw ANNSError.searchFailed("Failed to allocate search distance output buffer")
-        }
-
-        let queryBuffer: MTLBuffer
-        let neighborBuffer: MTLBuffer
-        if vectors.isFloat16 {
-            var queryHalf: [UInt16] = []
-            queryHalf.reserveCapacity(query.count)
-            for value in query {
-                queryHalf.append(Float16(value).bitPattern)
-            }
-
-            var neighborVectorsHalf: [UInt16] = []
-            neighborVectorsHalf.reserveCapacity(neighborIDs.count * vectors.dim)
-            for neighborID in neighborIDs {
-                let vector = vectors.vector(at: Int(neighborID))
-                for value in vector {
-                    neighborVectorsHalf.append(Float16(value).bitPattern)
-                }
-            }
-
-            let queryLength = queryHalf.count * MemoryLayout<UInt16>.stride
-            let neighborLength = neighborVectorsHalf.count * MemoryLayout<UInt16>.stride
-
-            guard
-                let queryHalfBuffer = context.device.makeBuffer(
-                    bytes: queryHalf,
-                    length: queryLength,
-                    options: .storageModeShared
-                ),
-                let neighborHalfBuffer = context.device.makeBuffer(
-                    bytes: neighborVectorsHalf,
-                    length: neighborLength,
-                    options: .storageModeShared
-                )
-            else {
-                throw ANNSError.searchFailed("Failed to allocate Float16 search distance buffers")
-            }
-
-            queryBuffer = queryHalfBuffer
-            neighborBuffer = neighborHalfBuffer
-        } else {
-            var neighborVectors: [Float] = []
-            neighborVectors.reserveCapacity(neighborIDs.count * vectors.dim)
-            for neighborID in neighborIDs {
-                neighborVectors.append(contentsOf: vectors.vector(at: Int(neighborID)))
-            }
-
-            let scalarSize = MemoryLayout<Float>.stride
-            let queryLength = query.count * scalarSize
-            let neighborLength = neighborVectors.count * scalarSize
-
-            guard
-                let queryFloatBuffer = context.device.makeBuffer(
-                    bytes: query,
-                    length: queryLength,
-                    options: .storageModeShared
-                ),
-                let neighborFloatBuffer = context.device.makeBuffer(
-                    bytes: neighborVectors,
-                    length: neighborLength,
-                    options: .storageModeShared
-                )
-            else {
-                throw ANNSError.searchFailed("Failed to allocate Float32 search distance buffers")
-            }
-
-            queryBuffer = queryFloatBuffer
-            neighborBuffer = neighborFloatBuffer
-        }
+        let workspace = try workspacePool.acquire(
+            device: context.device,
+            neighborBytes: neighborLength,
+            outputBytes: outputLength
+        )
+        defer { workspacePool.release(workspace) }
+        copy(neighborIDs, into: workspace.neighborBuffer, byteCount: neighborLength)
 
         var dim = UInt32(vectors.dim)
         var count = UInt32(neighborIDs.count)
@@ -207,10 +153,11 @@ public enum SearchGPU {
 
             encoder.setComputePipelineState(pipeline)
             encoder.setBuffer(queryBuffer, offset: 0, index: 0)
-            encoder.setBuffer(neighborBuffer, offset: 0, index: 1)
-            encoder.setBuffer(outputBuffer, offset: 0, index: 2)
-            encoder.setBytes(&dim, length: MemoryLayout<UInt32>.stride, index: 3)
-            encoder.setBytes(&count, length: MemoryLayout<UInt32>.stride, index: 4)
+            encoder.setBuffer(vectors.buffer, offset: 0, index: 1)
+            encoder.setBuffer(workspace.neighborBuffer, offset: 0, index: 2)
+            encoder.setBuffer(workspace.outputBuffer, offset: 0, index: 3)
+            encoder.setBytes(&dim, length: MemoryLayout<UInt32>.stride, index: 4)
+            encoder.setBytes(&count, length: MemoryLayout<UInt32>.stride, index: 5)
 
             let threadsPerGrid = MTLSize(width: neighborIDs.count, height: 1, depth: 1)
             let threadgroupWidth = max(1, min(neighborIDs.count, pipeline.maxTotalThreadsPerThreadgroup))
@@ -219,16 +166,122 @@ public enum SearchGPU {
             encoder.endEncoding()
         }
 
-        let outputPointer = outputBuffer.contents().bindMemory(to: Float.self, capacity: neighborIDs.count)
+        let outputPointer = workspace.outputBuffer.contents().bindMemory(to: Float.self, capacity: neighborIDs.count)
         return Array(UnsafeBufferPointer(start: outputPointer, count: neighborIDs.count))
     }
 
-    private static func insertSorted(_ candidate: Candidate, into list: inout [Candidate]) {
-        var insertionIndex = list.endIndex
-        for index in list.indices where candidate.distance < list[index].distance {
-            insertionIndex = index
-            break
+    private static func makeQueryBuffer(
+        context: MetalContext,
+        query: [Float],
+        vectors: any VectorStorage
+    ) throws -> MTLBuffer {
+        if vectors.isFloat16 {
+            var queryHalf: [UInt16] = []
+            queryHalf.reserveCapacity(query.count)
+            for value in query {
+                queryHalf.append(Float16(value).bitPattern)
+            }
+
+            let queryLength = queryHalf.count * MemoryLayout<UInt16>.stride
+            guard let buffer = context.device.makeBuffer(
+                bytes: queryHalf,
+                length: queryLength,
+                options: .storageModeShared
+            ) else {
+                throw ANNSError.searchFailed("Failed to allocate Float16 query buffer")
+            }
+            return buffer
         }
+
+        let queryLength = query.count * MemoryLayout<Float>.stride
+        guard let buffer = context.device.makeBuffer(
+            bytes: query,
+            length: queryLength,
+            options: .storageModeShared
+        ) else {
+            throw ANNSError.searchFailed("Failed to allocate Float32 query buffer")
+        }
+        return buffer
+    }
+
+    private static func insertSorted(_ candidate: Candidate, into list: inout [Candidate]) {
+        let insertionIndex = lowerBound(of: candidate.distance, in: list)
         list.insert(candidate, at: insertionIndex)
+    }
+
+    private static func lowerBound(of distance: Float, in list: [Candidate]) -> Int {
+        var low = 0
+        var high = list.count
+
+        while low < high {
+            let mid = (low + high) / 2
+            if list[mid].distance < distance {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+
+        return low
+    }
+
+    private static func copy<T>(_ source: [T], into buffer: MTLBuffer, byteCount: Int) {
+        source.withUnsafeBytes { bytes in
+            guard let baseAddress = bytes.baseAddress, byteCount > 0 else {
+                return
+            }
+            buffer.contents().copyMemory(from: baseAddress, byteCount: byteCount)
+        }
+    }
+}
+
+private final class SearchGPUWorkspacePool: @unchecked Sendable {
+    final class Workspace: @unchecked Sendable {
+        let deviceID: ObjectIdentifier
+        let neighborBuffer: MTLBuffer
+        let outputBuffer: MTLBuffer
+
+        init(deviceID: ObjectIdentifier, neighborBuffer: MTLBuffer, outputBuffer: MTLBuffer) {
+            self.deviceID = deviceID
+            self.neighborBuffer = neighborBuffer
+            self.outputBuffer = outputBuffer
+        }
+    }
+
+    private let lock = NSLock()
+    private var available: [Workspace] = []
+
+    func acquire(device: MTLDevice, neighborBytes: Int, outputBytes: Int) throws -> Workspace {
+        let deviceID = ObjectIdentifier(device)
+
+        lock.lock()
+        if let index = available.firstIndex(where: {
+            $0.deviceID == deviceID &&
+                $0.neighborBuffer.length >= max(neighborBytes, 1) &&
+                $0.outputBuffer.length >= max(outputBytes, 1)
+        }) {
+            let workspace = available.remove(at: index)
+            lock.unlock()
+            return workspace
+        }
+        lock.unlock()
+
+        guard
+            let neighborBuffer = device.makeBuffer(length: max(neighborBytes, 1), options: .storageModeShared),
+            let outputBuffer = device.makeBuffer(length: max(outputBytes, 1), options: .storageModeShared)
+        else {
+            throw ANNSError.searchFailed("Failed to allocate SearchGPU workspace buffers")
+        }
+
+        return Workspace(deviceID: deviceID, neighborBuffer: neighborBuffer, outputBuffer: outputBuffer)
+    }
+
+    func release(_ workspace: Workspace) {
+        lock.lock()
+        available.append(workspace)
+        if available.count > 16 {
+            available.removeFirst(available.count - 16)
+        }
+        lock.unlock()
     }
 }

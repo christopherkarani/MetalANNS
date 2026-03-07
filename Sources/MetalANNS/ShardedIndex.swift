@@ -49,6 +49,7 @@ public actor _ShardedIndex {
         }
 
         let effectiveShards = min(numShards, vectors.count)
+        let sharedContext = try? MetalContext()
 
         let kmeans = try KMeans.cluster(
             vectors: vectors,
@@ -112,7 +113,10 @@ public actor _ShardedIndex {
                 shardConfiguration.degree = min(configuration.degree, max(1, shardData.count - 1))
 
                 group.addTask {
-                    let shard = _GraphIndex(configuration: shardConfiguration)
+                    let shard = _GraphIndex(
+                        configuration: shardConfiguration,
+                        context: sharedContext
+                    )
                     try await shard.build(vectors: shardData, ids: shardDataIDs)
                     return (shardIndex, shard)
                 }
@@ -154,15 +158,14 @@ public actor _ShardedIndex {
 
         let searchMetric = metric ?? configuration.metric
 
-        let centroidDistances = centroids.enumerated().map { (index, centroid) in
-            (index, SIMDDistance.distance(query, centroid, metric: searchMetric))
-        }.sorted { $0.1 < $1.1 }
-
         let probeCount = min(nprobe, shards.count)
-        let probeIndices = centroidDistances.prefix(probeCount).map { $0.0 }
+        let probeIndices = selectClosestCentroids(
+            query: query,
+            metric: searchMetric,
+            count: probeCount
+        )
 
-        var mergedResults: [SearchResult] = []
-        mergedResults.reserveCapacity(probeCount * k)
+        var mergedResults = TopResults(limit: k)
 
         try await withThrowingTaskGroup(of: [SearchResult].self) { group in
             for shardIndex in probeIndices {
@@ -178,12 +181,11 @@ public actor _ShardedIndex {
             }
 
             for try await shardResults in group {
-                mergedResults.append(contentsOf: shardResults)
+                mergedResults.insert(contentsOf: shardResults)
             }
         }
 
-        mergedResults.sort { $0.score < $1.score }
-        return Array(mergedResults.prefix(k))
+        return mergedResults.results
     }
 
     public func batchSearch(
@@ -261,19 +263,19 @@ public actor _ShardedIndex {
         }
 
         let searchMetric = metric ?? configuration.metric
-        let centroidDistances = centroids.enumerated().map { (index, centroid) in
-            (index, SIMDDistance.distance(query, centroid, metric: searchMetric))
-        }.sorted { $0.1 < $1.1 }
 
         let probeCount = min(shards.count, nprobe + 1)
-        let probeIndices = centroidDistances.prefix(probeCount).map { $0.0 }
+        let probeIndices = selectClosestCentroids(
+            query: query,
+            metric: searchMetric,
+            count: probeCount
+        )
         // Batch mode uses a deeper per-shard candidate set. Keeping this above
         // the GPU beam-search cutoff steers toward the CPU/HNSW path, which is
         // currently more stable for batched sharded recall.
         let perShardK = max(k, max(257, min(512, max(configuration.efSearch * 4, k * 16))))
 
-        var mergedResults: [SearchResult] = []
-        mergedResults.reserveCapacity(probeCount * perShardK)
+        var mergedResults = TopResults(limit: k)
 
         try await withThrowingTaskGroup(of: [SearchResult].self) { group in
             for shardIndex in probeIndices {
@@ -289,12 +291,11 @@ public actor _ShardedIndex {
             }
 
             for try await shardResults in group {
-                mergedResults.append(contentsOf: shardResults)
+                mergedResults.insert(contentsOf: shardResults)
             }
         }
 
-        mergedResults.sort { $0.score < $1.score }
-        return Array(mergedResults.prefix(k))
+        return mergedResults.results
     }
 
     public var count: Int {
@@ -316,5 +317,110 @@ public actor _ShardedIndex {
         }
 
         return sizes
+    }
+
+    private func selectClosestCentroids(
+        query: [Float],
+        metric: Metric,
+        count: Int
+    ) -> [Int] {
+        guard count > 0 else {
+            return []
+        }
+
+        var best: [(index: Int, distance: Float)] = []
+        best.reserveCapacity(min(count, centroids.count))
+
+        for (index, centroid) in centroids.enumerated() {
+            let distance = SIMDDistance.distance(query, centroid, metric: metric)
+            insertBounded((index, distance), into: &best, limit: count)
+        }
+
+        return best.map(\.index)
+    }
+
+    private func insertBounded(
+        _ candidate: (index: Int, distance: Float),
+        into list: inout [(index: Int, distance: Float)],
+        limit: Int
+    ) {
+        if limit <= 0 {
+            return
+        }
+        if list.count == limit, let worst = list.last, candidate.distance >= worst.distance {
+            return
+        }
+
+        let insertionIndex = lowerBound(of: candidate.distance, in: list)
+        list.insert(candidate, at: insertionIndex)
+        if list.count > limit {
+            list.removeLast()
+        }
+    }
+
+    private func lowerBound(
+        of distance: Float,
+        in list: [(index: Int, distance: Float)]
+    ) -> Int {
+        var low = 0
+        var high = list.count
+
+        while low < high {
+            let mid = (low + high) / 2
+            if list[mid].distance < distance {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+
+        return low
+    }
+}
+
+private struct TopResults {
+    let limit: Int
+    private(set) var results: [SearchResult] = []
+
+    init(limit: Int) {
+        self.limit = max(0, limit)
+        self.results.reserveCapacity(self.limit)
+    }
+
+    mutating func insert(contentsOf newResults: [SearchResult]) {
+        guard limit > 0 else {
+            return
+        }
+        for result in newResults {
+            insert(result)
+        }
+    }
+
+    private mutating func insert(_ result: SearchResult) {
+        if results.count == limit, let worst = results.last, result.score >= worst.score {
+            return
+        }
+
+        let insertionIndex = lowerBound(of: result.score)
+        results.insert(result, at: insertionIndex)
+        if results.count > limit {
+            results.removeLast()
+        }
+    }
+
+    private func lowerBound(of score: Float) -> Int {
+        var low = 0
+        var high = results.count
+
+        while low < high {
+            let mid = (low + high) / 2
+            if results[mid].score < score {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+
+        return low
     }
 }

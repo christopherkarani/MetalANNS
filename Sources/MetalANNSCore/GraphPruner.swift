@@ -19,6 +19,88 @@ public enum GraphPruner {
             return
         }
 
+        if let floatVectors = vectors as? VectorBuffer {
+            try pruneFloat32(
+                graph: graph,
+                vectors: floatVectors,
+                nodeCount: nodeCount,
+                metric: metric
+            )
+            return
+        }
+
+        for nodeID in 0..<nodeCount {
+            let neighborIDs = graph.neighborIDs(of: nodeID)
+            let neighborDistances = graph.neighborDistances(of: nodeID)
+
+            var candidates: [(id: UInt32, distance: Float, vector: [Float])] = []
+            candidates.reserveCapacity(degree)
+            for slot in 0..<degree {
+                let neighborID = neighborIDs[slot]
+                if neighborID == UInt32.max {
+                    continue
+                }
+                let neighborIndex = Int(neighborID)
+                if neighborIndex < 0 || neighborIndex >= nodeCount {
+                    continue
+                }
+                candidates.append((neighborID, neighborDistances[slot], vectors.vector(at: neighborIndex)))
+            }
+
+            var prunedIDs: [UInt32] = []
+            var prunedDistances: [Float] = []
+            var prunedVectors: [[Float]] = []
+            prunedIDs.reserveCapacity(degree)
+            prunedDistances.reserveCapacity(degree)
+            prunedVectors.reserveCapacity(degree)
+
+            for candidate in candidates {
+                var isRedundant = false
+
+                for selectedVector in prunedVectors {
+                    let pathDistance = SIMDDistance.distance(
+                        selectedVector,
+                        candidate.vector,
+                        metric: metric
+                    )
+                    if pathDistance < candidate.distance {
+                        isRedundant = true
+                        break
+                    }
+                }
+
+                if !isRedundant {
+                    prunedIDs.append(candidate.id)
+                    prunedDistances.append(candidate.distance)
+                    prunedVectors.append(candidate.vector)
+                }
+            }
+
+            if prunedIDs.count < degree {
+                prunedIDs.append(contentsOf: Array(repeating: UInt32.max, count: degree - prunedIDs.count))
+                prunedDistances.append(contentsOf: Array(
+                    repeating: Float.greatestFiniteMagnitude,
+                    count: degree - prunedDistances.count
+                ))
+            } else if prunedIDs.count > degree {
+                prunedIDs = Array(prunedIDs.prefix(degree))
+                prunedDistances = Array(prunedDistances.prefix(degree))
+            }
+
+            try graph.setNeighbors(of: nodeID, ids: prunedIDs, distances: prunedDistances)
+        }
+    }
+
+    private static func pruneFloat32(
+        graph: GraphBuffer,
+        vectors: VectorBuffer,
+        nodeCount: Int,
+        metric: Metric
+    ) throws {
+        let degree = graph.degree
+        let dim = vectors.dim
+        let rawVectors = vectors.floatPointer
+
         for nodeID in 0..<nodeCount {
             let neighborIDs = graph.neighborIDs(of: nodeID)
             let neighborDistances = graph.neighborDistances(of: nodeID)
@@ -43,14 +125,15 @@ public enum GraphPruner {
             prunedDistances.reserveCapacity(degree)
 
             for candidate in candidates {
-                let candidateVector = vectors.vector(at: Int(candidate.id))
+                let candidateBase = rawVectors.baseAddress!.advanced(by: Int(candidate.id) * dim)
                 var isRedundant = false
 
                 for selectedID in prunedIDs {
-                    let selectedVector = vectors.vector(at: Int(selectedID))
+                    let selectedBase = rawVectors.baseAddress!.advanced(by: Int(selectedID) * dim)
                     let pathDistance = SIMDDistance.distance(
-                        selectedVector,
-                        candidateVector,
+                        selectedBase,
+                        candidateBase,
+                        dim: dim,
                         metric: metric
                     )
                     if pathDistance < candidate.distance {

@@ -1,3 +1,4 @@
+import Dispatch
 import Foundation
 import Metal
 import MetalANNSCore
@@ -24,6 +25,7 @@ public actor _IVFPQIndex: Sendable {
     private let context: MetalContext?
 
     private var coarseCentroids: [[Float]] = []
+    private var flattenedCoarseCentroids: [Float] = []
     private var pq: ProductQuantizer?
     private var flattenedCodebooks: [Float] = []
     private var vectorBuffer: PQVectorBuffer?
@@ -91,6 +93,7 @@ public actor _IVFPQIndex: Sendable {
         )
 
         self.coarseCentroids = trainedCoarseCentroids
+        self.flattenedCoarseCentroids = trainedCoarseCentroids.flatMap { $0 }
         self.pq = trainedPQ
         self.flattenedCodebooks = GPUADCSearch.flattenCodebooks(from: trainedPQ)
         self.vectorBuffer = try PQVectorBuffer(capacity: capacity, dim: dimension, pq: trainedPQ)
@@ -101,7 +104,7 @@ public actor _IVFPQIndex: Sendable {
     }
 
     public func add(vectors: [[Float]], ids: [String]) async throws {
-        guard isTrained, let vectorBuffer else {
+        guard isTrained, let vectorBuffer, let pq else {
             throw ANNSError.constructionFailed("_IVFPQIndex must be trained before add()")
         }
         guard vectors.count == ids.count else {
@@ -125,16 +128,47 @@ public actor _IVFPQIndex: Sendable {
             throw ANNSError.dimensionMismatch(expected: dimension, got: vector.count)
         }
 
-        for (offset, vector) in vectors.enumerated() {
+        let localCoarseCentroids = coarseCentroids
+        let localFlattenedCoarseCentroids = flattenedCoarseCentroids
+        let localMetric = config.metric
+        let localDimension = dimension
+        let planningState = ParallelAddPlanningState(
+            vectorCount: vectors.count,
+            codeLength: pq.numSubspaces
+        )
+
+        DispatchQueue.concurrentPerform(iterations: vectors.count) { offset in
+            guard planningState.shouldContinue else {
+                return
+            }
+
+            do {
+                let vector = vectors[offset]
+                let cluster = Self.nearestCoarseCentroid(
+                    for: vector,
+                    flattenedCentroids: localFlattenedCoarseCentroids,
+                    centroidCount: localCoarseCentroids.count,
+                    dimension: localDimension,
+                    metric: localMetric
+                )
+                let encoded = try pq.encode(vector: vector, subtracting: localCoarseCentroids[cluster])
+                planningState.store(cluster: cluster, code: encoded, at: offset)
+            } catch {
+                planningState.store(error: error)
+            }
+        }
+
+        if let planningError = planningState.firstError {
+            throw planningError
+        }
+
+        for offset in vectors.indices {
             guard let internalID = idMap.assign(externalID: ids[offset]) else {
                 throw ANNSError.idAlreadyExists(ids[offset])
             }
 
-            let cluster = nearestCoarseCentroid(for: vector)
-            let centroid = coarseCentroids[cluster]
-            let residualVector = residual(vector: vector, centroid: centroid)
-
-            try vectorBuffer.insert(vector: residualVector, at: Int(internalID))
+            let cluster = planningState.clusterAssignments[offset]
+            try vectorBuffer.insertEncoded(code: planningState.encodedCodes[offset], at: Int(internalID))
             invertedLists[cluster].append(internalID)
             coarseAssignments.append(UInt32(cluster))
         }
@@ -159,18 +193,14 @@ public actor _IVFPQIndex: Sendable {
         }
 
         let probeCount = max(1, min(nprobe ?? config.nprobe, coarseCentroids.count))
-        let centroidScores = coarseCentroids.enumerated().map { (index, centroid) in
-            (index, SIMDDistance.distance(query, centroid, metric: config.metric))
-        }.sorted { $0.1 < $1.1 }
-
-        var merged: [SearchResult] = []
-        merged.reserveCapacity(probeCount * max(k, 16))
+        let centroidScores = selectClosestCentroids(to: query, limit: probeCount)
+        var merged = TopResults(limit: k)
 
         guard let pq else {
             return []
         }
 
-        for (clusterIndex, _) in centroidScores.prefix(probeCount) {
+        for (clusterIndex, _) in centroidScores {
             let queryResidual = residual(vector: query, centroid: coarseCentroids[clusterIndex])
             let candidateIDs = invertedLists[clusterIndex]
             let scores = await distancesForCluster(
@@ -186,15 +216,11 @@ public actor _IVFPQIndex: Sendable {
                 guard let externalID = idMap.externalID(for: internalID) else {
                     continue
                 }
-                merged.append(SearchResult(id: externalID, score: score, internalID: internalID))
+                merged.insert(SearchResult(id: externalID, score: score, internalID: internalID))
             }
         }
 
-        merged.sort { $0.score < $1.score }
-        if merged.count > k {
-            merged.removeSubrange(k...)
-        }
-        return merged
+        return merged.results
     }
 
     public var count: Int {
@@ -325,17 +351,13 @@ public actor _IVFPQIndex: Sendable {
     }
 
     private func nearestCoarseCentroid(for vector: [Float]) -> Int {
-        var bestIndex = 0
-        var bestDistance = Float.greatestFiniteMagnitude
-
-        for (index, centroid) in coarseCentroids.enumerated() {
-            let distance = SIMDDistance.distance(vector, centroid, metric: config.metric)
-            if distance < bestDistance {
-                bestDistance = distance
-                bestIndex = index
-            }
-        }
-        return bestIndex
+        Self.nearestCoarseCentroid(
+            for: vector,
+            flattenedCentroids: flattenedCoarseCentroids,
+            centroidCount: coarseCentroids.count,
+            dimension: dimension,
+            metric: config.metric
+        )
     }
 
     private func residual(vector: [Float], centroid: [Float]) -> [Float] {
@@ -396,24 +418,28 @@ public actor _IVFPQIndex: Sendable {
         pq: ProductQuantizer,
         vectorBuffer: PQVectorBuffer
     ) -> [Float] {
-        guard let table = makeDistanceTable(query: queryResidual, pq: pq, metric: config.metric) else {
+        guard let table = pq.distanceTableFlattened(query: queryResidual, metric: config.metric) else {
             return [Float](repeating: Float.greatestFiniteMagnitude, count: candidateIDs.count)
         }
 
         var distances: [Float] = []
         distances.reserveCapacity(candidateIDs.count)
         for internalID in candidateIDs {
-            let code = vectorBuffer.code(at: Int(internalID))
-            guard code.count == pq.numSubspaces else {
+            guard let distance = vectorBuffer.withCode(at: Int(internalID), { code in
+                guard code.count == pq.numSubspaces else {
+                    return Float.greatestFiniteMagnitude
+                }
+
+                var total: Float = 0
+                for subspace in 0..<pq.numSubspaces {
+                    total += table[(subspace * pq.centroidsPerSubspace) + Int(code[subspace])]
+                }
+                return total
+            }) else {
                 distances.append(Float.greatestFiniteMagnitude)
                 continue
             }
-
-            var total: Float = 0
-            for subspace in 0..<pq.numSubspaces {
-                total += table[subspace][Int(code[subspace])]
-            }
-            distances.append(total)
+            distances.append(distance)
         }
         return distances
     }
@@ -434,8 +460,6 @@ public actor _IVFPQIndex: Sendable {
             return []
         }
 
-        let codes = candidateIDs.map { vectorBuffer.code(at: Int($0)) }
-
         if flattenedCodebooks.isEmpty {
             flattenedCodebooks = GPUADCSearch.flattenCodebooks(from: pq)
         }
@@ -444,9 +468,109 @@ public actor _IVFPQIndex: Sendable {
             context: context,
             query: queryResidual,
             pq: pq,
-            codes: codes,
+            packedCodes: vectorBuffer.gatherCodes(for: candidateIDs),
+            vectorCount: candidateIDs.count,
             flatCodebooks: flattenedCodebooks
         )
+    }
+
+    private func selectClosestCentroids(to vector: [Float], limit: Int) -> [(Int, Float)] {
+        guard limit > 0 else {
+            return []
+        }
+        guard !flattenedCoarseCentroids.isEmpty else {
+            return []
+        }
+
+        var closest: [(Int, Float)] = []
+        closest.reserveCapacity(min(limit, coarseCentroids.count))
+
+        vector.withUnsafeBufferPointer { vectorBuffer in
+            flattenedCoarseCentroids.withUnsafeBufferPointer { centroidBuffer in
+                let vectorBase = vectorBuffer.baseAddress!
+                let centroidBase = centroidBuffer.baseAddress!
+                for index in coarseCentroids.indices {
+                    let distance = SIMDDistance.distance(
+                        vectorBase,
+                        centroidBase.advanced(by: index * dimension),
+                        dim: dimension,
+                        metric: config.metric
+                    )
+                    insertBounded((index, distance), into: &closest, limit: limit)
+                }
+            }
+        }
+        return closest
+    }
+
+    private func insertBounded(
+        _ candidate: (Int, Float),
+        into results: inout [(Int, Float)],
+        limit: Int
+    ) {
+        if results.count == limit, let worst = results.last, candidate.1 >= worst.1 {
+            return
+        }
+
+        let insertionIndex = lowerBound(of: candidate.1, in: results)
+        results.insert(candidate, at: insertionIndex)
+        if results.count > limit {
+            results.removeLast()
+        }
+    }
+
+    private func lowerBound(of distance: Float, in list: [(Int, Float)]) -> Int {
+        var low = 0
+        var high = list.count
+
+        while low < high {
+            let mid = (low + high) / 2
+            if list[mid].1 < distance {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+
+        return low
+    }
+
+    private nonisolated static func nearestCoarseCentroid(
+        for vector: [Float],
+        flattenedCentroids: [Float],
+        centroidCount: Int,
+        dimension: Int,
+        metric: Metric
+    ) -> Int {
+        guard centroidCount > 0, !flattenedCentroids.isEmpty else {
+            return 0
+        }
+
+        var bestIndex = 0
+        var bestDistance = Float.greatestFiniteMagnitude
+        vector.withUnsafeBufferPointer { vectorBuffer in
+            flattenedCentroids.withUnsafeBufferPointer { centroidBuffer in
+                guard
+                    let vectorBase = vectorBuffer.baseAddress,
+                    let centroidBase = centroidBuffer.baseAddress
+                else {
+                    return
+                }
+                for index in 0..<centroidCount {
+                    let distance = SIMDDistance.distance(
+                        vectorBase,
+                        centroidBase.advanced(by: index * dimension),
+                        dim: dimension,
+                        metric: metric
+                    )
+                    if distance < bestDistance {
+                        bestDistance = distance
+                        bestIndex = index
+                    }
+                }
+            }
+        }
+        return bestIndex
     }
 
     private func restore(from state: PersistedState) throws {
@@ -456,6 +580,7 @@ public actor _IVFPQIndex: Sendable {
         }
 
         self.coarseCentroids = state.coarseCentroids
+        self.flattenedCoarseCentroids = state.coarseCentroids.flatMap { $0 }
         self.pq = state.pq
         self.flattenedCodebooks = GPUADCSearch.flattenCodebooks(from: state.pq)
         self.vectorBuffer = rebuiltBuffer
@@ -484,33 +609,78 @@ public actor _IVFPQIndex: Sendable {
         return b0 | b1 | b2 | b3
     }
 
-    private func makeDistanceTable(
-        query: [Float],
-        pq: ProductQuantizer,
-        metric: Metric
-    ) -> [[Float]]? {
-        let expectedDimension = pq.numSubspaces * pq.subspaceDimension
-        guard query.count == expectedDimension else {
-            return nil
+}
+
+private final class ParallelAddPlanningState: @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var clusterAssignments: [Int]
+    private(set) var encodedCodes: [[UInt8]]
+    private(set) var firstError: Error?
+
+    init(vectorCount: Int, codeLength: Int) {
+        clusterAssignments = [Int](repeating: 0, count: vectorCount)
+        encodedCodes = Array(repeating: [UInt8](repeating: 0, count: codeLength), count: vectorCount)
+    }
+
+    var shouldContinue: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return firstError == nil
+    }
+
+    func store(cluster: Int, code: [UInt8], at index: Int) {
+        lock.lock()
+        clusterAssignments[index] = cluster
+        encodedCodes[index] = code
+        lock.unlock()
+    }
+
+    func store(error: Error) {
+        lock.lock()
+        if firstError == nil {
+            firstError = error
+        }
+        lock.unlock()
+    }
+}
+
+private struct TopResults {
+    let limit: Int
+    private(set) var results: [SearchResult] = []
+
+    init(limit: Int) {
+        self.limit = max(0, limit)
+        results.reserveCapacity(self.limit)
+    }
+
+    mutating func insert(_ result: SearchResult) {
+        guard limit > 0 else {
+            return
+        }
+        if results.count == limit, let worst = results.last, result.score >= worst.score {
+            return
         }
 
-        var table = [[Float]](
-            repeating: [Float](repeating: 0, count: pq.centroidsPerSubspace),
-            count: pq.numSubspaces
-        )
+        let insertionIndex = lowerBound(of: result.score)
+        results.insert(result, at: insertionIndex)
+        if results.count > limit {
+            results.removeLast()
+        }
+    }
 
-        for subspace in 0..<pq.numSubspaces {
-            let start = subspace * pq.subspaceDimension
-            let end = start + pq.subspaceDimension
-            let subQuery = Array(query[start..<end])
-            for centroid in 0..<pq.centroidsPerSubspace {
-                table[subspace][centroid] = SIMDDistance.distance(
-                    subQuery,
-                    pq.codebooks[subspace][centroid],
-                    metric: metric
-                )
+    private func lowerBound(of score: Float) -> Int {
+        var low = 0
+        var high = results.count
+
+        while low < high {
+            let mid = (low + high) / 2
+            if results[mid].score < score {
+                low = mid + 1
+            } else {
+                high = mid
             }
         }
-        return table
+
+        return low
     }
 }

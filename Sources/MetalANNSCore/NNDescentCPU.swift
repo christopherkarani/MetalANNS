@@ -45,6 +45,8 @@ public enum NNDescentCPU {
 
         typealias Neighbor = (UInt32, Float)
         var graph = [[Neighbor]](repeating: [], count: nodeCount)
+        var marks = [Int](repeating: -1, count: nodeCount)
+        var candidateScratch: [Int] = []
 
         for node in 0..<nodeCount {
             var generator = LCG(state: UInt64(node + 1) &* 0x9E3779B97F4A7C15)
@@ -111,15 +113,32 @@ public enum NNDescentCPU {
             var updateCount = 0
 
             for node in 0..<nodeCount {
-                let candidates = Array(Set(graph[node].map { Int($0.0) } + reverse[node]))
-                if candidates.count < 2 {
+                let markToken = ((iteration + 1) * nodeCount) + node
+                candidateScratch.removeAll(keepingCapacity: true)
+                for (neighborID, _) in graph[node] {
+                    let neighbor = Int(neighborID)
+                    guard neighbor >= 0, neighbor < nodeCount, marks[neighbor] != markToken else {
+                        continue
+                    }
+                    marks[neighbor] = markToken
+                    candidateScratch.append(neighbor)
+                }
+                for neighbor in reverse[node] where neighbor >= 0 && neighbor < nodeCount {
+                    guard marks[neighbor] != markToken else {
+                        continue
+                    }
+                    marks[neighbor] = markToken
+                    candidateScratch.append(neighbor)
+                }
+
+                if candidateScratch.count < 2 {
                     continue
                 }
 
-                for i in 0..<(candidates.count - 1) {
-                    let a = candidates[i]
-                    for j in (i + 1)..<candidates.count {
-                        let b = candidates[j]
+                for i in 0..<(candidateScratch.count - 1) {
+                    let a = candidateScratch[i]
+                    for j in (i + 1)..<candidateScratch.count {
+                        let b = candidateScratch[j]
                         if a == b {
                             continue
                         }
