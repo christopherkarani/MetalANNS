@@ -68,15 +68,6 @@ public enum BeamSearchCPU {
         )
     }
 
-    private static func insertSorted(_ candidate: Candidate, into list: inout [Candidate]) {
-        var insertionIndex = list.endIndex
-        for index in list.indices where candidate.distance < list[index].distance {
-            insertionIndex = index
-            break
-        }
-        list.insert(candidate, at: insertionIndex)
-    }
-
     private static func searchImpl(
         query: [Float],
         vectorCount: Int,
@@ -109,12 +100,17 @@ public enum BeamSearchCPU {
         let entryDistance = SIMDDistance.distance(query, vectorAt(entryPoint), metric: metric)
 
         var visited: Set<UInt32> = [entryID]
-        var candidates: [Candidate] = [Candidate(nodeID: entryID, distance: entryDistance)]
-        var results: [Candidate] = [Candidate(nodeID: entryID, distance: entryDistance)]
+        var candidates = BinaryHeap<Candidate> { lhs, rhs in
+            lhs.distance < rhs.distance
+        }
+        var results = BinaryHeap<Candidate> { lhs, rhs in
+            lhs.distance > rhs.distance
+        }
+        candidates.push(Candidate(nodeID: entryID, distance: entryDistance))
+        results.push(Candidate(nodeID: entryID, distance: entryDistance))
 
-        while !candidates.isEmpty {
-            let current = candidates.removeFirst()
-            if results.count >= efLimit, let worst = results.last, current.distance > worst.distance {
+        while let current = candidates.pop() {
+            if results.count >= efLimit, let worst = results.peek, current.distance > worst.distance {
                 break
             }
 
@@ -130,20 +126,23 @@ public enum BeamSearchCPU {
 
                 let candidateDistance = SIMDDistance.distance(query, vectorAt(neighborIndex), metric: metric)
 
-                if results.count < efLimit || candidateDistance < results[results.count - 1].distance {
+                if results.count < efLimit || (results.peek?.distance ?? .greatestFiniteMagnitude) > candidateDistance {
                     let candidate = Candidate(nodeID: neighborID, distance: candidateDistance)
-                    insertSorted(candidate, into: &candidates)
-                    insertSorted(candidate, into: &results)
+                    candidates.push(candidate)
+                    results.push(candidate)
                     if results.count > efLimit {
-                        results.removeLast()
+                        _ = results.pop()
                     }
                 }
             }
         }
 
         let topK = min(k, results.count)
-        return results.prefix(topK).map { result in
-            SearchResult(id: "", score: result.distance, internalID: result.nodeID)
-        }
+        return results.unorderedElements()
+            .sorted { $0.distance < $1.distance }
+            .prefix(topK)
+            .map { result in
+                SearchResult(id: "", score: result.distance, internalID: result.nodeID)
+            }
     }
 }

@@ -1,3 +1,4 @@
+import Dispatch
 import Foundation
 
 public enum KMeans {
@@ -18,6 +19,46 @@ public enum KMeans {
         metric: Metric = .l2,
         seed: UInt64 = 42
     ) throws -> Result {
+        try cluster(
+            vectors: vectors,
+            offset: 0,
+            dimension: nil,
+            k: k,
+            maxIterations: maxIterations,
+            metric: metric,
+            seed: seed
+        )
+    }
+
+    static func clusterSubspace(
+        vectors: [[Float]],
+        offset: Int,
+        dimension: Int,
+        k: Int,
+        maxIterations: Int = 20,
+        metric: Metric = .l2,
+        seed: UInt64 = 42
+    ) throws -> Result {
+        try cluster(
+            vectors: vectors,
+            offset: offset,
+            dimension: dimension,
+            k: k,
+            maxIterations: maxIterations,
+            metric: metric,
+            seed: seed
+        )
+    }
+
+    private static func cluster(
+        vectors: [[Float]],
+        offset: Int,
+        dimension: Int?,
+        k: Int,
+        maxIterations: Int,
+        metric: Metric,
+        seed: UInt64
+    ) throws -> Result {
         guard !vectors.isEmpty else {
             throw ANNSError.constructionFailed("Cannot cluster empty vectors")
         }
@@ -25,51 +66,175 @@ public enum KMeans {
             throw ANNSError.constructionFailed("k must be between 1 and vector count")
         }
 
-        let dim = vectors[0].count
+        let dim = dimension ?? vectors[0].count
         guard dim > 0 else {
             throw ANNSError.dimensionMismatch(expected: 1, got: 0)
         }
 
-        for vector in vectors where vector.count != dim {
-            throw ANNSError.dimensionMismatch(expected: dim, got: vector.count)
+        for vector in vectors {
+            let vectorDimension = vector.count
+            if vectorDimension < offset + dim {
+                throw ANNSError.dimensionMismatch(expected: offset + dim, got: vectorDimension)
+            }
         }
 
-        var centroids = initializeCentroids(vectors: vectors, k: k, metric: metric, seed: seed)
-        var assignments = [Int](repeating: 0, count: vectors.count)
+        var centroids = initializeCentroids(
+            vectors: vectors,
+            offset: offset,
+            dim: dim,
+            k: k,
+            metric: metric,
+            seed: seed
+        )
+        var assignments = [Int](repeating: -1, count: vectors.count)
+        var centroidSums = [Float](repeating: 0, count: k * dim)
+        var counts = [Int](repeating: 0, count: k)
+        let workerCount = min(max(1, ProcessInfo.processInfo.activeProcessorCount), vectors.count)
+        let useParallelLloyd = workerCount > 1 && vectors.count >= 512 && k >= 8
 
         for _ in 0..<maxIterations {
-            var changed = false
+            centroidSums.withUnsafeMutableBufferPointer { sumsBuffer in
+                sumsBuffer.initialize(repeating: 0)
+            }
+            counts.withUnsafeMutableBufferPointer { countsBuffer in
+                countsBuffer.initialize(repeating: 0)
+            }
 
-            for i in 0..<vectors.count {
-                var bestCluster = 0
-                var bestDistance = Float.greatestFiniteMagnitude
+            let changed: Bool
+            if useParallelLloyd {
+                let chunkSize = (vectors.count + workerCount - 1) / workerCount
+                var nextAssignments = [Int](repeating: -1, count: vectors.count)
+                let previousAssignments = assignments
+                let flatCentroids = centroids.flatMap { $0 }
+                let workerStates = (0..<workerCount).map { _ in
+                    LloydWorkerState(clusterCount: k, dimension: dim)
+                }
 
-                for c in 0..<k {
-                    let distance = SIMDDistance.distance(vectors[i], centroids[c], metric: metric)
-                    if distance < bestDistance {
-                        bestDistance = distance
-                        bestCluster = c
+                DispatchQueue.concurrentPerform(iterations: workerCount) { worker in
+                    let start = worker * chunkSize
+                    let end = min(vectors.count, start + chunkSize)
+                    guard start < end else {
+                        return
+                    }
+
+                    let state = workerStates[worker]
+                    state.reset(assignmentCount: end - start)
+
+                    for i in start..<end {
+                        let vector = vectors[i]
+                        let bestCluster = vector.withUnsafeBufferPointer { vectorBuffer in
+                            let vectorBase = vectorBuffer.baseAddress! + offset
+                            var bestCluster = 0
+                            var bestDistance = Float.greatestFiniteMagnitude
+
+                            for c in 0..<k {
+                                let centroidOffset = c * dim
+                                let distance = flatCentroids.withUnsafeBufferPointer { centroidBuffer in
+                                    SIMDDistance.distance(
+                                        vectorBase,
+                                        centroidBuffer.baseAddress!.advanced(by: centroidOffset),
+                                        dim: dim,
+                                        metric: metric
+                                    )
+                                }
+                                if distance < bestDistance {
+                                    bestDistance = distance
+                                    bestCluster = c
+                                }
+                            }
+
+                            return bestCluster
+                        }
+
+                        state.assignments[i - start] = bestCluster
+                        if previousAssignments[i] != bestCluster {
+                            state.changed = true
+                        }
+
+                        vector.withUnsafeBufferPointer { vectorBuffer in
+                            let vectorBase = vectorBuffer.baseAddress! + offset
+                            state.counts[bestCluster] += 1
+                            let sumOffset = bestCluster * dim
+                            for d in 0..<dim {
+                                state.sums[sumOffset + d] += vectorBase[d]
+                            }
+                        }
                     }
                 }
 
-                if assignments[i] != bestCluster {
-                    assignments[i] = bestCluster
-                    changed = true
+                changed = workerStates.contains(where: \.changed)
+                if !changed {
+                    break
                 }
-            }
 
-            if !changed {
-                break
-            }
+                for worker in 0..<workerCount {
+                    let start = worker * chunkSize
+                    let end = min(vectors.count, start + chunkSize)
+                    guard start < end else {
+                        continue
+                    }
 
-            var sums = [[Float]](repeating: [Float](repeating: 0, count: dim), count: k)
-            var counts = [Int](repeating: 0, count: k)
+                    let state = workerStates[worker]
+                    for localIndex in 0..<(end - start) {
+                        nextAssignments[start + localIndex] = state.assignments[localIndex]
+                    }
+                    for cluster in 0..<k {
+                        counts[cluster] += state.counts[cluster]
+                        let clusterOffset = cluster * dim
+                        for d in 0..<dim {
+                            centroidSums[clusterOffset + d] += state.sums[clusterOffset + d]
+                        }
+                    }
+                }
+                assignments = nextAssignments
+            } else {
+                var sequentialChanged = false
 
-            for i in 0..<vectors.count {
-                let cluster = assignments[i]
-                counts[cluster] += 1
-                for d in 0..<dim {
-                    sums[cluster][d] += vectors[i][d]
+                for i in 0..<vectors.count {
+                    let vector = vectors[i]
+                    let bestCluster = centroids.withUnsafeBufferPointer { centroidRows in
+                        vector.withUnsafeBufferPointer { vectorBuffer in
+                            let vectorBase = vectorBuffer.baseAddress! + offset
+                            var bestCluster = 0
+                            var bestDistance = Float.greatestFiniteMagnitude
+
+                            for c in 0..<k {
+                                let distance = centroidRows[c].withUnsafeBufferPointer { centroidBuffer in
+                                    SIMDDistance.distance(
+                                        vectorBase,
+                                        centroidBuffer.baseAddress!,
+                                        dim: dim,
+                                        metric: metric
+                                    )
+                                }
+                                if distance < bestDistance {
+                                    bestDistance = distance
+                                    bestCluster = c
+                                }
+                            }
+
+                            return bestCluster
+                        }
+                    }
+
+                    if assignments[i] != bestCluster {
+                        assignments[i] = bestCluster
+                        sequentialChanged = true
+                    }
+
+                    counts[bestCluster] += 1
+                    vectors[i].withUnsafeBufferPointer { vectorBuffer in
+                        let vectorBase = vectorBuffer.baseAddress! + offset
+                        let sumOffset = bestCluster * dim
+                        for d in 0..<dim {
+                            centroidSums[sumOffset + d] += vectorBase[d]
+                        }
+                    }
+                }
+
+                changed = sequentialChanged
+                if !changed {
+                    break
                 }
             }
 
@@ -78,8 +243,9 @@ public enum KMeans {
                     continue
                 }
                 let scale = 1.0 / Float(counts[c])
+                let sumOffset = c * dim
                 for d in 0..<dim {
-                    centroids[c][d] = sums[c][d] * scale
+                    centroids[c][d] = centroidSums[sumOffset + d] * scale
                 }
             }
         }
@@ -89,35 +255,46 @@ public enum KMeans {
 
     private static func initializeCentroids(
         vectors: [[Float]],
+        offset: Int,
+        dim: Int,
         k: Int,
         metric: Metric,
         seed: UInt64
     ) -> [[Float]] {
         var rng = RandomNumberGenerator64(seed: seed)
         var centroids: [[Float]] = []
+        centroids.reserveCapacity(k)
+        var minDistances = [Float](repeating: Float.greatestFiniteMagnitude, count: vectors.count)
 
         let firstIndex = Int.random(in: 0..<vectors.count, using: &rng)
-        centroids.append(vectors[firstIndex])
+        centroids.append(Array(vectors[firstIndex][offset..<(offset + dim)]))
+        updateMinDistances(
+            vectors: vectors,
+            offset: offset,
+            dim: dim,
+            metric: metric,
+            newestCentroid: centroids[0],
+            minDistances: &minDistances
+        )
 
         for _ in 1..<k {
-            var distances = [Float](repeating: 0, count: vectors.count)
             var totalDistance: Float = 0
-
-            for i in 0..<vectors.count {
-                var minDistance = Float.greatestFiniteMagnitude
-                for centroid in centroids {
-                    let distance = SIMDDistance.distance(vectors[i], centroid, metric: metric)
-                    if distance < minDistance {
-                        minDistance = distance
-                    }
-                }
-                distances[i] = minDistance
-                totalDistance += minDistance
+            for distance in minDistances {
+                totalDistance += distance
             }
 
             if totalDistance <= 0 {
                 let randomIndex = Int.random(in: 0..<vectors.count, using: &rng)
-                centroids.append(vectors[randomIndex])
+                let centroid = Array(vectors[randomIndex][offset..<(offset + dim)])
+                centroids.append(centroid)
+                updateMinDistances(
+                    vectors: vectors,
+                    offset: offset,
+                    dim: dim,
+                    metric: metric,
+                    newestCentroid: centroid,
+                    minDistances: &minDistances
+                )
                 continue
             }
 
@@ -125,17 +302,53 @@ public enum KMeans {
             var chosenIndex = vectors.count - 1
 
             for i in 0..<vectors.count {
-                threshold -= distances[i]
+                threshold -= minDistances[i]
                 if threshold <= 0 {
                     chosenIndex = i
                     break
                 }
             }
 
-            centroids.append(vectors[chosenIndex])
+            let centroid = Array(vectors[chosenIndex][offset..<(offset + dim)])
+            centroids.append(centroid)
+            updateMinDistances(
+                vectors: vectors,
+                offset: offset,
+                dim: dim,
+                metric: metric,
+                newestCentroid: centroid,
+                minDistances: &minDistances
+            )
         }
 
         return centroids
+    }
+
+    private static func updateMinDistances(
+        vectors: [[Float]],
+        offset: Int,
+        dim: Int,
+        metric: Metric,
+        newestCentroid: [Float],
+        minDistances: inout [Float]
+    ) {
+        newestCentroid.withUnsafeBufferPointer { centroidBuffer in
+            let centroidBase = centroidBuffer.baseAddress!
+            for index in 0..<vectors.count {
+                vectors[index].withUnsafeBufferPointer { vectorBuffer in
+                    let vectorBase = vectorBuffer.baseAddress! + offset
+                    let distance = SIMDDistance.distance(
+                        vectorBase,
+                        centroidBase,
+                        dim: dim,
+                        metric: metric
+                    )
+                    if distance < minDistances[index] {
+                        minDistances[index] = distance
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -151,5 +364,24 @@ private struct RandomNumberGenerator64: RandomNumberGenerator {
         state ^= state >> 7
         state ^= state << 17
         return state
+    }
+}
+
+private final class LloydWorkerState: @unchecked Sendable {
+    var assignments: [Int] = []
+    var sums: [Float]
+    var counts: [Int]
+    var changed = false
+
+    init(clusterCount: Int, dimension: Int) {
+        sums = [Float](repeating: 0, count: clusterCount * dimension)
+        counts = [Int](repeating: 0, count: clusterCount)
+    }
+
+    func reset(assignmentCount: Int) {
+        assignments = [Int](repeating: -1, count: assignmentCount)
+        sums.withUnsafeMutableBufferPointer { $0.initialize(repeating: 0) }
+        counts.withUnsafeMutableBufferPointer { $0.initialize(repeating: 0) }
+        changed = false
     }
 }

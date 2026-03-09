@@ -3,6 +3,7 @@ import Metal
 
 public enum GPUADCSearch {
     private static let scanLoadStride = 32
+    private static let workspacePool = ADCWorkspacePool()
 
     public static func computeDistances(
         context: MetalContext,
@@ -11,11 +12,42 @@ public enum GPUADCSearch {
         codes: [[UInt8]],
         flatCodebooks: [Float]? = nil
     ) async throws -> [Float] {
+        let m = pq.numSubspaces
+        var packedCodes: [UInt8] = []
+        packedCodes.reserveCapacity(codes.count * m)
+        for (index, code) in codes.enumerated() {
+            guard code.count == m else {
+                throw ANNSError.searchFailed("Invalid PQ code size at index \(index)")
+            }
+            packedCodes.append(contentsOf: code)
+        }
+
+        return try await computeDistances(
+            context: context,
+            query: query,
+            pq: pq,
+            packedCodes: packedCodes,
+            vectorCount: codes.count,
+            flatCodebooks: flatCodebooks
+        )
+    }
+
+    public static func computeDistances(
+        context: MetalContext,
+        query: [Float],
+        pq: ProductQuantizer,
+        packedCodes: [UInt8],
+        vectorCount: Int,
+        flatCodebooks: [Float]? = nil
+    ) async throws -> [Float] {
         let expectedDimension = pq.numSubspaces * pq.subspaceDimension
         guard query.count == expectedDimension else {
             throw ANNSError.dimensionMismatch(expected: expectedDimension, got: query.count)
         }
-        guard !codes.isEmpty else {
+        guard vectorCount >= 0 else {
+            throw ANNSError.searchFailed("Vector count must be non-negative")
+        }
+        guard vectorCount > 0 else {
             return []
         }
 
@@ -25,30 +57,19 @@ public enum GPUADCSearch {
         guard ks <= Int(UInt8.max) + 1 else {
             throw ANNSError.searchFailed("GPU ADC supports at most 256 centroids per subspace")
         }
-        let originalVectorCount = codes.count
-        let paddedVectorCount = roundUp(originalVectorCount, toMultipleOf: scanLoadStride)
-
-        var candidateCodes: [UInt8] = []
-        candidateCodes.reserveCapacity(paddedVectorCount * m)
-        for (index, code) in codes.enumerated() {
-            guard code.count == m else {
-                throw ANNSError.searchFailed("Invalid PQ code size at index \(index)")
-            }
-            for value in code {
-                guard Int(value) < ks else {
-                    throw ANNSError.searchFailed("PQ code value out of range at index \(index)")
-                }
-            }
-            candidateCodes.append(contentsOf: code)
-        }
-        if paddedVectorCount > originalVectorCount {
-            candidateCodes.append(
-                contentsOf: repeatElement(
-                    UInt8(0),
-                    count: (paddedVectorCount - originalVectorCount) * m
-                )
+        guard packedCodes.count == vectorCount * m else {
+            throw ANNSError.searchFailed(
+                "Packed PQ code length mismatch. Expected \(vectorCount * m), got \(packedCodes.count)"
             )
         }
+        for (index, value) in packedCodes.enumerated() {
+            guard Int(value) < ks else {
+                throw ANNSError.searchFailed("PQ code value out of range at packed index \(index)")
+            }
+        }
+
+        let originalVectorCount = vectorCount
+        let paddedVectorCount = roundUp(originalVectorCount, toMultipleOf: scanLoadStride)
 
         let flattenedCodebooks = flatCodebooks ?? flattenCodebooks(from: pq)
         let expectedCodebookCount = m * ks * subspaceDim
@@ -67,34 +88,31 @@ public enum GPUADCSearch {
             )
         }
         let distancesLengthBytes = paddedVectorCount * MemoryLayout<Float>.stride
-        let codesLengthBytes = candidateCodes.count * MemoryLayout<UInt8>.stride
+        let queryLengthBytes = query.count * MemoryLayout<Float>.stride
+        let codebookLengthBytes = flattenedCodebooks.count * MemoryLayout<Float>.stride
+        let codesLengthBytes = paddedVectorCount * m * MemoryLayout<UInt8>.stride
 
-        guard
-            let queryBuffer = context.device.makeBuffer(
-                bytes: query,
-                length: query.count * MemoryLayout<Float>.stride,
-                options: .storageModeShared
-            ),
-            let codebookBuffer = context.device.makeBuffer(
-                bytes: flattenedCodebooks,
-                length: flattenedCodebooks.count * MemoryLayout<Float>.stride,
-                options: .storageModeShared
-            ),
-            let distanceTableBuffer = context.device.makeBuffer(
-                length: tableLengthBytes,
-                options: .storageModeShared
-            ),
-            let codesBuffer = context.device.makeBuffer(
-                bytes: candidateCodes,
-                length: codesLengthBytes,
-                options: .storageModeShared
-            ),
-            let distancesBuffer = context.device.makeBuffer(
-                length: distancesLengthBytes,
-                options: .storageModeShared
+        let workspace = try workspacePool.acquire(
+            device: context.device,
+            queryBytes: queryLengthBytes,
+            codebookBytes: codebookLengthBytes,
+            tableBytes: tableLengthBytes,
+            codesBytes: codesLengthBytes,
+            distancesBytes: distancesLengthBytes
+        )
+        defer { workspacePool.release(workspace) }
+
+        copy(query, into: workspace.queryBuffer, byteCount: queryLengthBytes)
+        copy(flattenedCodebooks, into: workspace.codebookBuffer, byteCount: codebookLengthBytes)
+        copy(packedCodes, into: workspace.codesBuffer, byteCount: packedCodes.count)
+        if paddedVectorCount > originalVectorCount {
+            let paddingOffset = packedCodes.count
+            let paddingBytes = (paddedVectorCount - originalVectorCount) * m
+            workspace.codesBuffer.contents().advanced(by: paddingOffset).initializeMemory(
+                as: UInt8.self,
+                repeating: 0,
+                count: paddingBytes
             )
-        else {
-            throw ANNSError.constructionFailed("Failed to allocate Metal buffers for GPU ADC")
         }
 
         let tablePipeline = try await context.pipelineCache.pipeline(for: "pq_compute_distance_table")
@@ -117,9 +135,9 @@ public enum GPUADCSearch {
             }
 
             tableEncoder.setComputePipelineState(tablePipeline)
-            tableEncoder.setBuffer(queryBuffer, offset: 0, index: 0)
-            tableEncoder.setBuffer(codebookBuffer, offset: 0, index: 1)
-            tableEncoder.setBuffer(distanceTableBuffer, offset: 0, index: 2)
+            tableEncoder.setBuffer(workspace.queryBuffer, offset: 0, index: 0)
+            tableEncoder.setBuffer(workspace.codebookBuffer, offset: 0, index: 1)
+            tableEncoder.setBuffer(workspace.distanceTableBuffer, offset: 0, index: 2)
             tableEncoder.setBytes(&mU32, length: MemoryLayout<UInt32>.stride, index: 3)
             tableEncoder.setBytes(&ksU32, length: MemoryLayout<UInt32>.stride, index: 4)
             tableEncoder.setBytes(&subspaceDimU32, length: MemoryLayout<UInt32>.stride, index: 5)
@@ -134,9 +152,9 @@ public enum GPUADCSearch {
             }
 
             scanEncoder.setComputePipelineState(scanPipeline)
-            scanEncoder.setBuffer(codesBuffer, offset: 0, index: 0)
-            scanEncoder.setBuffer(distanceTableBuffer, offset: 0, index: 1)
-            scanEncoder.setBuffer(distancesBuffer, offset: 0, index: 2)
+            scanEncoder.setBuffer(workspace.codesBuffer, offset: 0, index: 0)
+            scanEncoder.setBuffer(workspace.distanceTableBuffer, offset: 0, index: 1)
+            scanEncoder.setBuffer(workspace.distancesBuffer, offset: 0, index: 2)
             scanEncoder.setBytes(&mU32, length: MemoryLayout<UInt32>.stride, index: 3)
             scanEncoder.setBytes(&ksU32, length: MemoryLayout<UInt32>.stride, index: 4)
             scanEncoder.setBytes(&vectorCountU32, length: MemoryLayout<UInt32>.stride, index: 5)
@@ -149,7 +167,7 @@ public enum GPUADCSearch {
             scanEncoder.endEncoding()
         }
 
-        let base = distancesBuffer.contents().bindMemory(to: Float.self, capacity: paddedVectorCount)
+        let base = workspace.distancesBuffer.contents().bindMemory(to: Float.self, capacity: paddedVectorCount)
         let allDistances = Array(UnsafeBufferPointer(start: base, count: paddedVectorCount))
         return Array(allDistances.prefix(originalVectorCount))
     }
@@ -201,19 +219,111 @@ public enum GPUADCSearch {
             return []
         }
 
-        var results: [SearchResult] = []
-        results.reserveCapacity(min(k, distances.count))
+        var topResults = BoundedPriorityBuffer<SearchResult>(capacity: min(k, distances.count)) {
+            lhs,
+            rhs in
+            lhs.score < rhs.score
+        }
         for (index, distance) in distances.enumerated() {
-            results.append(SearchResult(id: ids[index], score: distance, internalID: UInt32(index)))
+            topResults.insert(SearchResult(id: ids[index], score: distance, internalID: UInt32(index)))
         }
-        results.sort { $0.score < $1.score }
-        if results.count > k {
-            results.removeSubrange(k...)
-        }
-        return results
+        return topResults.sortedElements()
     }
 
     private static func roundUp(_ value: Int, toMultipleOf multiple: Int) -> Int {
         ((value + multiple - 1) / multiple) * multiple
+    }
+
+    private static func copy<T>(_ source: [T], into buffer: MTLBuffer, byteCount: Int) {
+        source.withUnsafeBytes { bytes in
+            guard let baseAddress = bytes.baseAddress, byteCount > 0 else {
+                return
+            }
+            buffer.contents().copyMemory(from: baseAddress, byteCount: byteCount)
+        }
+    }
+}
+
+private final class ADCWorkspacePool: @unchecked Sendable {
+    final class Workspace: @unchecked Sendable {
+        let deviceID: ObjectIdentifier
+        let queryBuffer: MTLBuffer
+        let codebookBuffer: MTLBuffer
+        let distanceTableBuffer: MTLBuffer
+        let codesBuffer: MTLBuffer
+        let distancesBuffer: MTLBuffer
+
+        init(
+            deviceID: ObjectIdentifier,
+            queryBuffer: MTLBuffer,
+            codebookBuffer: MTLBuffer,
+            distanceTableBuffer: MTLBuffer,
+            codesBuffer: MTLBuffer,
+            distancesBuffer: MTLBuffer
+        ) {
+            self.deviceID = deviceID
+            self.queryBuffer = queryBuffer
+            self.codebookBuffer = codebookBuffer
+            self.distanceTableBuffer = distanceTableBuffer
+            self.codesBuffer = codesBuffer
+            self.distancesBuffer = distancesBuffer
+        }
+    }
+
+    private let lock = NSLock()
+    private var available: [Workspace] = []
+
+    func acquire(
+        device: MTLDevice,
+        queryBytes: Int,
+        codebookBytes: Int,
+        tableBytes: Int,
+        codesBytes: Int,
+        distancesBytes: Int
+    ) throws -> Workspace {
+        let deviceID = ObjectIdentifier(device)
+
+        lock.lock()
+        if let index = available.firstIndex(where: { workspace in
+            workspace.deviceID == deviceID &&
+                workspace.queryBuffer.length >= queryBytes &&
+                workspace.codebookBuffer.length >= codebookBytes &&
+                workspace.distanceTableBuffer.length >= tableBytes &&
+                workspace.codesBuffer.length >= codesBytes &&
+                workspace.distancesBuffer.length >= distancesBytes
+        }) {
+            let workspace = available.remove(at: index)
+            lock.unlock()
+            return workspace
+        }
+        lock.unlock()
+
+        guard
+            let queryBuffer = device.makeBuffer(length: max(queryBytes, 1), options: .storageModeShared),
+            let codebookBuffer = device.makeBuffer(length: max(codebookBytes, 1), options: .storageModeShared),
+            let distanceTableBuffer = device.makeBuffer(length: max(tableBytes, 1), options: .storageModeShared),
+            let codesBuffer = device.makeBuffer(length: max(codesBytes, 1), options: .storageModeShared),
+            let distancesBuffer = device.makeBuffer(length: max(distancesBytes, 1), options: .storageModeShared)
+        else {
+            throw ANNSError.constructionFailed("Failed to allocate Metal buffers for GPU ADC")
+        }
+
+        return Workspace(
+            deviceID: deviceID,
+            queryBuffer: queryBuffer,
+            codebookBuffer: codebookBuffer,
+            distanceTableBuffer: distanceTableBuffer,
+            codesBuffer: codesBuffer,
+            distancesBuffer: distancesBuffer
+        )
+    }
+
+    func release(_ workspace: Workspace) {
+        lock.lock()
+        available.append(workspace)
+        if available.count > 8 {
+            available.removeFirst(available.count - 8)
+        }
+        lock.unlock()
     }
 }

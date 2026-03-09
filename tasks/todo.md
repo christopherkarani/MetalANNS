@@ -1,3 +1,186 @@
+## MetalANNS — Performance Remediation Pass
+
+> **Status**: COMPLETE
+> **Owner**: Codex
+> **Last Updated**: 2026-03-06
+
+## Task Checklist
+
+- [x] Capture benchmark entry points, configuration, and environment assumptions.
+- [x] Run scoped benchmarks/tests and identify the highest-impact bottlenecks.
+- [x] Batch 1 — Remove avoidable build overhead in `_GraphIndex` (`cpuVectors` materialization, eager HNSW rebuild).
+- [x] Batch 2 — Replace sorted-array frontier management with bounded/heap-style structures in CPU search and candidate-selection paths.
+- [x] Batch 3 — Reduce sharded-index setup/routing overhead (shared context, bounded top-n routing/merge).
+- [x] Batch 4 — Reduce IVFPQ training/add/search overhead (no subvector materialization, less full sorting/scanning, lower ADC allocation churn).
+- [x] Batch 5 — Run targeted verification and rerun representative benchmarks to confirm improvements.
+
+## Review Results
+
+- Benchmark harness notes:
+  - Reliable command in this environment is `swift run -c release MetalANNSBenchmarks ...`.
+  - Direct execution of `.build/arm64-apple-macosx/release/MetalANNSBenchmarks` failed with `constructionFailed("No Metal device available")`, so standalone release binary results were treated as invalid environment behavior.
+  - Benchmark runner inflates search work by forcing `queryK = max(config.k, 100)` for recall accounting, so reported query latency is effectively a top-100 search even when `--k 10` is passed. See `Sources/MetalANNSBenchmarks/BenchmarkRunner.swift`.
+  - `swift test -c release` is not reliable for perf suites in this package because SwiftPM falls through into the `MetalANNSBenchmarks` executable and forwards test-runner flags such as `--test-bundle-path`, which the benchmark CLI rejects. Exact debug-mode test filters worked and were used for the timing-style Swift Testing cases.
+- Implemented fixes:
+  - `_GraphIndex.build` now materializes CPU vectors only for the CPU NN-descent fallback and no longer eagerly rebuilds HNSW at the end of every build.
+  - `SearchGPU` now uploads the query once, gathers candidate vectors directly from the corpus buffer by ID on the GPU, avoids `removeFirst()` on the frontier, and uses binary-search insertion.
+  - `BeamSearchCPU` now uses heap-style frontier/result maintenance instead of `removeFirst()` plus repeated sorted-array churn.
+  - `NNDescentCPU` now reuses scratch state for candidate de-duplication instead of rebuilding `Set`s for every node pass.
+  - `HNSWBuilder` now caches layer-local vectors/index lookups and uses bounded candidate selection instead of sorting full candidate pools.
+  - `ShardedIndex` now reuses a shared `MetalContext`, routes with bounded top-`nprobe` centroid selection, and merges shard results incrementally instead of globally sorting everything.
+  - `KMeans` now supports subspace clustering without subvector materialization and uses incremental k-means++ distance updates.
+  - `ProductQuantizer` now trains/encodes with pointer-based subspace access and flattened distance tables instead of repeated subarray allocation.
+  - `PQVectorBuffer` now supports contiguous packed-code gathering for ADC batches and direct code access without per-candidate array copies.
+  - `_IVFPQIndex` now flattens coarse centroids once, uses bounded top-`nprobe` / top-`k` selection, avoids per-candidate code array allocation on CPU ADC, and feeds packed PQ codes into GPU ADC.
+  - `GPUADCSearch` now reuses Metal workspaces, accepts packed code buffers directly, and ranks results with bounded top-`k` selection instead of full sorting.
+  - `_GraphIndex.build` CPU fallback now consumes the original input corpus directly instead of reading the just-inserted vectors back out of `VectorStorage`.
+  - `ProductQuantizer.train` now parallelizes independent subspace training work across cores.
+  - `ProductQuantizer` can now encode vectors relative to a coarse centroid without allocating an intermediate residual vector.
+  - `_IVFPQIndex.add` now precomputes coarse assignments and PQ codes in parallel, then commits them sequentially to actor-owned state.
+- Measured results on synthetic dataset (`train=1000`, `dim=128`):
+  - `swift run -c release MetalANNSBenchmarks --query-count 200 --runs 3 --warmup 1`
+    - build: `232.9 ms`
+    - query mean: `0.306 ms`
+    - query p95: `0.33 ms`
+    - QPS: `3162.09`
+    - recall@10: `1.000`
+  - `swift run -c release MetalANNSBenchmarks --metric l2 --query-count 200 --runs 3 --warmup 1`
+    - build: `191.3 ms`
+    - query mean: `0.298 ms`
+    - QPS: `3248.46`
+    - recall@10: `1.000`
+  - `swift run -c release MetalANNSBenchmarks --ivfpq --metric l2 --query-count 200 --degree 32 --efsearch 64 --k 10 --ivfpq-subspaces 8 --ivfpq-centroids 256 --ivfpq-coarse-centroids 32 --ivfpq-nprobe 8 --ivfpq-iterations 8 --warmup 1 --runs 3`
+    - `_GraphIndex`: `193.9 ms build`, `3224 QPS`, `1.000 recall@10`
+    - `_IVFPQIndex`: `3225.2 ms build`, `4260 QPS`, `0.965 recall@10`
+  - `swift run -c release MetalANNSBenchmarks --sweep --metric cosine --query-count 100 --degree 32 --k 10 --sweep-efsearch 16,64,256 --warmup 0 --runs 1`
+    - `efSearch=16`: `3129 QPS`, `0.31 ms p50`
+    - `efSearch=64`: `3236 QPS`, `0.30 ms p50`
+    - `efSearch=256`: `2829 QPS`, `0.34 ms p50`
+- Top bottlenecks and risks:
+  - `Sources/MetalANNSCore/SearchGPU.swift`: GPU search repacks neighbor vectors and allocates fresh Metal buffers on every frontier expansion. This is the main query-path overhead and explains why higher `efSearch` only modestly changes latency on the small synthetic set: host marshaling and command submission dominate.
+  - `Sources/MetalANNS/ANNSIndex.swift`: build does multiple full passes, including unconditional `cpuVectors` materialization before the GPU/CPU branch, `GraphPruner.prune`, and `rebuildHNSWFromCurrentState`. This is the clearest build-time cost center.
+  - `Sources/MetalANNSCore/HNSWBuilder.swift`: skip-layer construction repeatedly materializes vectors and sorts candidate pools per node. This compounds the extra build passes above.
+  - `Sources/MetalANNSCore/NNDescentCPU.swift`: CPU fallback still has quadratic local-candidate refinement and will scale poorly if GPU construction/search is unavailable.
+  - `Sources/MetalANNSCore/BeamSearchCPU.swift`: frontier uses `removeFirst()` plus sorted-array insertion, which is avoidable `O(ef^2)` work.
+- Additional measured performance suites:
+  - `swift test --filter MultiQueuePerformanceTests.shardedBuildSpeedup`
+    - sharded build speedup: `2.27x` (`parallel=0.7069 s`, `sequential=1.6057 s`)
+  - `swift test --filter MultiQueuePerformanceTests.shardedSearchQPS`
+    - sharded search QPS: `181.03`
+  - `swift test --filter ShardedIndexParallelBuildTests.parallelBuildTimingLogged`
+    - sharded build timing: `parallel=0.3333 s`, `sequential=0.6263 s`, `speedup=1.88x`
+  - `swift test --filter ShardedIndexParallelSearchTests.parallelSearchTimingLogged`
+    - sharded search timing: `parallelQPS=319.42`, `sequentialQPS=246.72`
+  - `swift test --filter IVFPQComprehensiveTests.benchmarkRecallVsQPS`
+    - runtime: `58.79 s`
+    - recall@10 by probe count: `nprobe=1 0.86`, `nprobe=4 0.86`, `nprobe=8 0.86`, `nprobe=16 0.86`
+  - `swift test --filter IVFPQComprehensiveTests.benchmarkSearchThroughput`
+    - runtime: `49.02 s`
+    - IVFPQ throughput: `202.42 queries/sec`
+- Post-remediation validation:
+  - `swift test --filter ANNSIndexTests.buildAndSearch`
+    - passed
+  - `swift test --filter ShardedIndexParallelBuildTests.parallelBuildTimingLogged`
+    - `parallel=0.2318 s`, `sequential=0.5162 s`, `speedup=2.23x`
+  - `swift test --filter ShardedIndexParallelSearchTests.parallelSearchTimingLogged`
+    - `parallelQPS=346.46`, `sequentialQPS=249.33`
+  - `swift test --filter ProductQuantizerTests`
+    - passed, 4 tests
+  - `swift test --filter PQVectorBufferTests`
+    - passed, 4 tests
+  - `swift test --filter IVFPQIndexTests`
+    - passed, 4 tests
+  - `swift test --filter GPUADCSearchTests`
+    - passed, 12 tests; GPU-executing cases skipped in this environment because `MetalContext` cannot load the default Metal shader library
+  - `swift test --filter IVFPQComprehensiveTests.benchmarkSearchThroughput`
+    - runtime dropped from `49.02 s` to `2.84 s`
+    - throughput improved from `202.42` to `339.44 queries/sec`
+  - `swift test --filter IVFPQComprehensiveTests.benchmarkRecallVsQPS`
+    - runtime dropped from `58.79 s` to `3.71 s`
+    - recall remained `0.86` at `nprobe=1,4,8,16`
+  - `swift run -c release MetalANNSBenchmarks --ivfpq --query-count 200 --runs 3 --warmup 1`
+      - `_GraphIndex`: `183.0 ms build`, `3232 QPS`, `1.000 recall@10`
+      - `_IVFPQIndex`: `191.7 ms build`, `6720 QPS`, `0.995 recall@10`
+      - relative to the earlier IVFPQ release benchmark, `_IVFPQIndex` build dropped from `3225.2 ms` to `191.7 ms` and QPS improved from `4260` to `6720`
+  - Second perf pass:
+    - `swift test --filter ProductQuantizerTests`
+      - passed, 5 tests including residual-encoding parity
+    - `swift test --filter IVFPQIndexTests`
+      - passed, 4 tests
+    - `swift test --filter ANNSIndexTests.buildAndSearch`
+      - passed
+    - `swift test --filter IVFPQComprehensiveTests.benchmarkSearchThroughput`
+      - runtime now `1.54 s`
+      - throughput now `332.49 queries/sec`
+    - `swift test --filter IVFPQComprehensiveTests.benchmarkRecallVsQPS`
+      - runtime now `1.40 s`
+      - recall still `0.86` at `nprobe=1,4,8,16`
+    - `swift run -c release MetalANNSBenchmarks --ivfpq --query-count 200 --runs 3 --warmup 1`
+      - `_GraphIndex`: `186.6 ms build`, `3227 QPS`, `1.000 recall@10`
+      - `_IVFPQIndex`: `114.1 ms build`, `6767 QPS`, `0.995 recall@10`
+      - versus the already-optimized IVFPQ baseline, `_IVFPQIndex` build dropped again from `191.7 ms` to `114.1 ms`
+  - Final remediation pass:
+    - `MetalContext` now falls back from `Bundle.module` default-library loading to `device.makeDefaultLibrary()` and then to runtime compilation from bundled `.metal` sources, which unblocked the previously failing Metal shader path in this environment.
+    - `GraphPruner` now has a `VectorBuffer` pointer fast path that avoids repeated `vector(at:)` materialization during pruning.
+    - `SearchGPU` now reuses Metal neighbor/output buffers via a workspace pool instead of allocating fresh buffers per frontier expansion.
+    - `KMeans` parallel Lloyd iterations are now warning-free and compare against an iteration-local assignment snapshot.
+    - `_GraphIndex` now uses workload-aware GPU policy:
+      - small builds stay on CPU NN-Descent instead of paying GPU setup overhead;
+      - small top-`k` / top-`ef` searches stay on CPU/HNSW instead of paying hybrid GPU submission overhead.
+    - Focused validation:
+      - `swift build`
+        - passed after KMeans parallel-fix cleanup
+      - `swift test --filter GraphPrunerTests`
+        - passed; recall baseline `0.995`, pruned `0.995`
+      - `swift test --filter GPUADCSearchTests`
+        - passed; 12 tests
+      - `swift test --filter MetalDeviceTests`
+        - passed; Metal shader library fallback validated
+      - `swift test --filter MetalSearchTests`
+        - passed; 2 tests
+      - `swift test --filter FullGPUSearchTests`
+        - passed; 4 tests, including the >4096-node GPU search case
+      - `swift test --filter ANNSIndexTests.buildAndSearch`
+        - passed after adaptive GPU build/search gating
+      - `swift test --filter IVFPQComprehensiveTests.benchmarkSearchThroughput`
+        - `327.34 queries/sec`
+      - `swift test --filter IVFPQComprehensiveTests.benchmarkRecallVsQPS`
+        - runtime `1.30 s`; recall remained `0.86` at `nprobe=1,4,8,16`
+    - Clean isolated release benchmarks:
+      - `swift run -c release MetalANNSBenchmarks --query-count 200 --runs 3 --warmup 1`
+        - `_GraphIndex`: `215.3 ms build`, `3073.26 QPS`, `0.315 ms` mean, `1.000 recall@10`
+      - `swift run -c release MetalANNSBenchmarks --ivfpq --query-count 200 --runs 3 --warmup 1`
+        - `_GraphIndex`: `175.2 ms build`, `3349 QPS`, `1.000 recall@10`
+        - `_IVFPQIndex`: `36.2 ms build`, `6657 QPS`, `0.995 recall@10`
+      - These replaced a contaminated intermediate `_GraphIndex` measurement (`47 QPS`) that was caused by routing small synthetic searches through the hybrid GPU path before the adaptive dispatch fix landed.
+- Sampled runtime hotspot evidence:
+  - `sample` captured during `IVFPQComprehensiveTests.benchmarkSearchThroughput` shows time dominated by:
+    - `makeScenario(seed:trainingCount:databaseCount:)`
+    - `_IVFPQIndex.train(vectors:)`
+    - `ProductQuantizer.train(...)`
+    - `KMeans.cluster(...)`
+    - `KMeans.initializeCentroids(...)`
+    - `SIMDDistance.distance` / `SIMDDistance.l2`
+  - This confirms IVFPQ wall-clock cost is dominated by training and centroid initialization, not by the per-query search loop.
+- Sharded-index bottlenecks:
+  - `Sources/MetalANNSCore/KMeans.swift`: shard assignment starts with full Lloyd-style k-means across the corpus.
+  - `Sources/MetalANNS/ShardedIndex.swift`: each shard build creates its own `_GraphIndex`/`MetalContext`, multiplying setup and likely oversubscribing Metal resources.
+  - `Sources/MetalANNS/ANNSIndex.swift`: each shard inherits `_GraphIndex.build`’s extra passes (`cpuVectors`, prune, HNSW rebuild).
+  - `Sources/MetalANNS/ShardedIndex.swift`: query routing fully sorts centroid distances and merged shard results instead of using bounded selection / k-way merge.
+  - `Sources/MetalANNS/ShardedIndex.swift`: batch search can force CPU/HNSW fallback, which then snapshots whole shard state per query through `_GraphIndex.search`.
+- IVFPQ bottlenecks:
+  - `Sources/MetalANNS/IVFPQIndex.swift`: `add()` is still serial and repeatedly computes residuals / coarse assignments vector by vector; search-side overhead is substantially reduced but add-side batching is still available headroom.
+  - `Sources/MetalANNSCore/KMeans.swift`: full Lloyd iterations still dominate coarse/PQ training at larger scales even after removing the worst allocation costs.
+  - `Sources/MetalANNSCore/GPUADCSearch.swift`: the workspace pool removes most per-query allocation churn, but live GPU-kernel validation is still blocked in this environment by the default Metal library load failure.
+- Residual interpretation:
+  - The comprehensive debug fixture still shows flat recall (`~0.86`) as `nprobe` increases. Inference: after the perf fixes, that looks more like a property of the small clustered fixture plus PQ distortion than a broken `nprobe` path, because `IVFPQIndexTests.nprobeEffect` passes and the release benchmark now reaches `0.995 recall@10`.
+- Recommended next experiments:
+  - Add a benchmark mode that separates index build, graph prune, HNSW rebuild, and search so each phase is timed independently.
+  - Add a benchmark option for synthetic `vectorCount`; current default `1000` is too small to expose larger-scale search and construction scaling.
+  - Instrument `SearchGPU` buffer allocation counts and bytes copied per query to verify whether host-side packing is dominating on larger datasets.
+  - Add explicit build/add/search phase timing for IVFPQ (`coarse train`, `PQ train`, `add`, `ADC search`) so throughput and latency are not buried inside one end-to-end wall clock.
+  - Rework `swift test -c release` packaging so benchmark executable arguments do not conflict with SwiftPM’s test helper flags.
+
 ## MetalANNS — Fix SearchBufferPool Unbounded Retention
 
 > **Status**: COMPLETE

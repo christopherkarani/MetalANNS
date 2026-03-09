@@ -4,6 +4,9 @@ import MetalANNSCore
 
 public actor _GraphIndex {
     private static let fullGPUMaxEF = 256
+    private static let minGPUConstructionNodeCount = 4_096
+    private static let minHybridGPUSearchNodeCount = 4_096
+    private static let minHybridGPUSearchWork = 16_384
 
     private struct PersistedMetadata: Codable, Sendable {
         let configuration: IndexConfiguration
@@ -123,8 +126,7 @@ public actor _GraphIndex {
         }
 
         let builtEntryPoint: UInt32
-        let cpuVectors = (0..<inputVectors.count).map { vectorBuffer.vector(at: $0) }
-        if let context, !configuration.useBinary, configuration.metric != .hamming {
+        if let context, shouldUseGPUConstruction(nodeCount: inputVectors.count) {
             try await NNDescentGPU.build(
                 context: context,
                 vectors: vectorBuffer,
@@ -136,6 +138,12 @@ public actor _GraphIndex {
             )
             builtEntryPoint = 0
         } else {
+            let cpuVectors: [[Float]]
+            if configuration.useBinary {
+                cpuVectors = inputVectors.map(Self.quantizeForHamming)
+            } else {
+                cpuVectors = inputVectors
+            }
             let cpuResult = try await NNDescentCPU.build(
                 vectors: cpuVectors,
                 degree: configuration.degree,
@@ -176,7 +184,6 @@ public actor _GraphIndex {
         self.mmapLifetime = nil
         self.pendingRepairIDs.removeAll()
         self.hnsw = nil
-        try rebuildHNSWFromCurrentState()
     }
 
     public func insert(_ vector: [Float], id: String) async throws {
@@ -635,10 +642,12 @@ public actor _GraphIndex {
         let effectiveEf = max(configuration.efSearch, effectiveK)
 
         let rawResults: [SearchResult]
-        let canAttemptGPU = supportsGPUSearch(for: vectors)
-            && searchMetric != .hamming
-            && effectiveK <= Self.fullGPUMaxEF
-            && effectiveEf <= Self.fullGPUMaxEF
+        let canAttemptGPU = shouldUseHybridGPUSearch(
+            for: vectors,
+            metric: searchMetric,
+            k: effectiveK,
+            ef: effectiveEf
+        )
 
         if let context, canAttemptGPU {
             do {
@@ -773,10 +782,12 @@ public actor _GraphIndex {
         let searchEf = min(vectors.count, max(configuration.efSearch, searchK * 2))
 
         let rawResults: [SearchResult]
-        let canAttemptGPU = supportsGPUSearch(for: vectors)
-            && searchMetric != .hamming
-            && searchK <= Self.fullGPUMaxEF
-            && searchEf <= Self.fullGPUMaxEF
+        let canAttemptGPU = shouldUseHybridGPUSearch(
+            for: vectors,
+            metric: searchMetric,
+            k: searchK,
+            ef: searchEf
+        )
 
         if let context, canAttemptGPU {
             do {
@@ -1174,6 +1185,41 @@ public actor _GraphIndex {
 
     private func supportsGPUSearch(for vectors: any VectorStorage) -> Bool {
         !(vectors is BinaryVectorBuffer)
+    }
+
+    private func shouldUseGPUConstruction(nodeCount: Int) -> Bool {
+        guard context != nil else {
+            return false
+        }
+        guard !configuration.useBinary, configuration.metric != .hamming else {
+            return false
+        }
+        return nodeCount >= Self.minGPUConstructionNodeCount
+    }
+
+    private func shouldUseHybridGPUSearch(
+        for vectors: any VectorStorage,
+        metric: Metric,
+        k: Int,
+        ef: Int
+    ) -> Bool {
+        guard supportsGPUSearch(for: vectors) else {
+            return false
+        }
+        guard metric != .hamming else {
+            return false
+        }
+        guard k <= Self.fullGPUMaxEF, ef <= Self.fullGPUMaxEF else {
+            return false
+        }
+
+        let nodeCount = vectors.count
+        guard nodeCount >= Self.minHybridGPUSearchNodeCount else {
+            return false
+        }
+
+        let estimatedDistanceWork = max(k, ef) * max(configuration.degree, 1)
+        return estimatedDistanceWork >= Self.minHybridGPUSearchWork
     }
 
     private func applyLoadedState(

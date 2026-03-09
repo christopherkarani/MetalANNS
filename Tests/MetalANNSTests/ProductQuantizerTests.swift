@@ -86,6 +86,26 @@ struct ProductQuantizerTests {
         let correlation = pearsonCorrelation(exactDistances, approximateDistances)
         #expect(correlation > 0.95, "Observed correlation \(correlation)")
     }
+
+    @Test("Encoding with centroid subtraction matches encoding residual vector directly")
+    func encodeSubtractingCentroidMatchesResidual() throws {
+        let vectors = makeStructuredVectors(count: 1_000, dimension: 128, seed: 303)
+        let pq = try ProductQuantizer.train(
+            vectors: vectors,
+            numSubspaces: 8,
+            centroidsPerSubspace: 256,
+            maxIterations: 8
+        )
+
+        let vector = vectors[17]
+        let centroid = vectors[41]
+        let residual = zip(vector, centroid).map { $0 - $1 }
+
+        let direct = try pq.encode(vector: residual)
+        let subtracting = try pq.encode(vector: vector, subtracting: centroid)
+
+        #expect(direct == subtracting)
+    }
 }
 
 private func l2RelativeError(original: [Float], reconstructed: [Float]) -> Float {

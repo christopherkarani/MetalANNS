@@ -20,12 +20,7 @@ public final class MetalContext: @unchecked Sendable {
             throw ANNSError.deviceNotSupported
         }
 
-        let library: MTLLibrary
-        do {
-            library = try device.makeDefaultLibrary(bundle: Bundle.module)
-        } catch {
-            throw ANNSError.constructionFailed("Failed to load Metal shader library: \(error)")
-        }
+        let library = try Self.loadLibrary(for: device)
 
         self.device = device
         self.commandQueue = queue
@@ -38,6 +33,49 @@ public final class MetalContext: @unchecked Sendable {
         self.searchBufferPool = SearchBufferPool(device: device)
 
         logger.debug("MetalContext initialized: \(device.name)")
+    }
+
+    private static func loadLibrary(for device: MTLDevice) throws -> MTLLibrary {
+        do {
+            return try device.makeDefaultLibrary(bundle: Bundle.module)
+        } catch {
+            logger.warning("Falling back from Bundle.module default Metal library: \(error.localizedDescription)")
+        }
+
+        if let library = device.makeDefaultLibrary() {
+            logger.debug("Loaded Metal shader library via device.makeDefaultLibrary() fallback")
+            return library
+        }
+
+        do {
+            let library = try makeLibraryFromBundledSources(device: device)
+            logger.debug("Compiled Metal shader library from bundled source fallback")
+            return library
+        } catch {
+            throw ANNSError.constructionFailed("Failed to load Metal shader library: \(error)")
+        }
+    }
+
+    private static func makeLibraryFromBundledSources(device: MTLDevice) throws -> MTLLibrary {
+        let bundle = Bundle.module
+        let directURLs = bundle.urls(forResourcesWithExtension: "metal", subdirectory: "Shaders") ?? []
+        let flattenedURLs = bundle.urls(forResourcesWithExtension: "metal", subdirectory: nil) ?? []
+        let shaderURLs = (directURLs + flattenedURLs)
+            .reduce(into: [URL]()) { partial, url in
+                if !partial.contains(url) {
+                    partial.append(url)
+                }
+            }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+        guard !shaderURLs.isEmpty else {
+            throw ANNSError.constructionFailed("No bundled Metal shader sources were found")
+        }
+
+        let source = try shaderURLs
+            .map { try String(contentsOf: $0, encoding: .utf8) }
+            .joined(separator: "\n\n")
+        return try device.makeLibrary(source: source, options: nil)
     }
 
     public func execute(_ encode: (MTLCommandBuffer) throws -> Void) async throws {
