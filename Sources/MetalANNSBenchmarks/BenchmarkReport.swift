@@ -14,6 +14,16 @@ public struct BenchmarkReport: Sendable {
         public var queryCount: Int
         public var avgQueryMs: Double
         public var maxQueryMs: Double
+        public var p90Ms: Double
+        public var p999Ms: Double
+        public var stdDevMs: Double
+        public var minMs: Double
+        public var indexResidentMB: Double = 0
+        public var peakResidentMB: Double = 0
+        public var concurrency: Int = 1
+        public var firstQueryMs: Double = 0
+        public var warmSteadyMeanMs: Double = 0
+        public var backendLabel: String = ""
 
         public init(
             label: String,
@@ -27,7 +37,17 @@ public struct BenchmarkReport: Sendable {
             recallAt100: Double = 0,
             queryCount: Int = 0,
             avgQueryMs: Double = 0,
-            maxQueryMs: Double = 0
+            maxQueryMs: Double = 0,
+            p90Ms: Double = 0,
+            p999Ms: Double = 0,
+            stdDevMs: Double = 0,
+            minMs: Double = 0,
+            indexResidentMB: Double = 0,
+            peakResidentMB: Double = 0,
+            concurrency: Int = 1,
+            firstQueryMs: Double = 0,
+            warmSteadyMeanMs: Double = 0,
+            backendLabel: String = ""
         ) {
             self.label = label
             self.recallAt10 = recallAt10
@@ -41,6 +61,16 @@ public struct BenchmarkReport: Sendable {
             self.queryCount = queryCount
             self.avgQueryMs = avgQueryMs
             self.maxQueryMs = maxQueryMs
+            self.p90Ms = p90Ms
+            self.p999Ms = p999Ms
+            self.stdDevMs = stdDevMs
+            self.minMs = minMs
+            self.indexResidentMB = indexResidentMB
+            self.peakResidentMB = peakResidentMB
+            self.concurrency = concurrency
+            self.firstQueryMs = firstQueryMs
+            self.warmSteadyMeanMs = warmSteadyMeanMs
+            self.backendLabel = backendLabel
         }
     }
 
@@ -63,46 +93,60 @@ public struct BenchmarkReport: Sendable {
 
     public func renderTable() -> String {
         var lines: [String] = []
-        lines.append(
-            padRight("label", to: 16)
-                + " "
-                + padLeft("recall@10", to: 10)
-                + " "
-                + padLeft("QPS", to: 8)
-                + " "
-                + padLeft("buildMs", to: 9)
-                + " "
-                + padLeft("p50ms", to: 7)
-                + " "
-                + padLeft("p95ms", to: 7)
-                + " "
-                + padLeft("p99ms", to: 7)
-        )
-        lines.append(String(repeating: "-", count: 74))
+        let showConcurrency = rows.contains { $0.concurrency != 1 }
+
+        var header = padRight("label", to: 16)
+            + " "
+            + padLeft("recall@10", to: 10)
+            + " "
+            + padLeft("QPS", to: 8)
+            + " "
+            + padLeft("buildMs", to: 9)
+            + " "
+            + padLeft("p50ms", to: 7)
+            + " "
+            + padLeft("p90ms", to: 7)
+            + " "
+            + padLeft("p95ms", to: 7)
+            + " "
+            + padLeft("p99ms", to: 7)
+            + " "
+            + padLeft("p999ms", to: 8)
+        if showConcurrency {
+            header += " " + padLeft("conc", to: 5)
+        }
+        lines.append(header)
+        lines.append(String(repeating: "-", count: showConcurrency ? 97 : 91))
 
         for row in rows {
-            lines.append(
-                padRight(row.label, to: 16)
-                    + " "
-                    + padLeft(String(format: "%.3f", row.recallAt10), to: 10)
-                    + " "
-                    + padLeft(String(format: "%.0f", row.qps), to: 8)
-                    + " "
-                    + padLeft(String(format: "%.1f", row.buildTimeMs), to: 9)
-                    + " "
-                    + padLeft(String(format: "%.2f", row.p50Ms), to: 7)
-                    + " "
-                    + padLeft(String(format: "%.2f", row.p95Ms), to: 7)
-                    + " "
-                    + padLeft(String(format: "%.2f", row.p99Ms), to: 7)
-            )
+            var line = padRight(row.label, to: 16)
+                + " "
+                + padLeft(String(format: "%.3f", row.recallAt10), to: 10)
+                + " "
+                + padLeft(String(format: "%.0f", row.qps), to: 8)
+                + " "
+                + padLeft(String(format: "%.1f", row.buildTimeMs), to: 9)
+                + " "
+                + padLeft(String(format: "%.2f", row.p50Ms), to: 7)
+                + " "
+                + padLeft(String(format: "%.2f", row.p90Ms), to: 7)
+                + " "
+                + padLeft(String(format: "%.2f", row.p95Ms), to: 7)
+                + " "
+                + padLeft(String(format: "%.2f", row.p99Ms), to: 7)
+                + " "
+                + padLeft(String(format: "%.2f", row.p999Ms), to: 8)
+            if showConcurrency {
+                line += " " + padLeft(String(row.concurrency), to: 5)
+            }
+            lines.append(line)
         }
 
         return lines.joined(separator: "\n")
     }
 
     public func renderCSV() -> String {
-        var lines = ["label,recall@10,qps,buildTimeMs,p50ms,p95ms,p99ms"]
+        var lines = ["label,recall@10,qps,buildTimeMs,p50ms,p90ms,p95ms,p99ms,p999ms,minMs,stdDevMs,avgQueryMs,maxQueryMs,indexResidentMB,peakResidentMB,concurrency"]
         for row in rows {
             lines.append(
                 [
@@ -111,8 +155,17 @@ public struct BenchmarkReport: Sendable {
                     String(format: "%.6f", row.qps),
                     String(format: "%.6f", row.buildTimeMs),
                     String(format: "%.6f", row.p50Ms),
+                    String(format: "%.6f", row.p90Ms),
                     String(format: "%.6f", row.p95Ms),
-                    String(format: "%.6f", row.p99Ms)
+                    String(format: "%.6f", row.p99Ms),
+                    String(format: "%.6f", row.p999Ms),
+                    String(format: "%.6f", row.minMs),
+                    String(format: "%.6f", row.stdDevMs),
+                    String(format: "%.6f", row.avgQueryMs),
+                    String(format: "%.6f", row.maxQueryMs),
+                    String(format: "%.6f", row.indexResidentMB),
+                    String(format: "%.6f", row.peakResidentMB),
+                    String(row.concurrency)
                 ]
                 .joined(separator: ",")
             )
@@ -132,13 +185,23 @@ public struct BenchmarkReport: Sendable {
                     "qps": row.qps,
                     "buildTimeMs": row.buildTimeMs,
                     "p50Ms": row.p50Ms,
+                    "p90Ms": row.p90Ms,
                     "p95Ms": row.p95Ms,
                     "p99Ms": row.p99Ms,
+                    "p999Ms": row.p999Ms,
+                    "stdDevMs": row.stdDevMs,
+                    "minMs": row.minMs,
                     "recallAt1": row.recallAt1,
                     "recallAt100": row.recallAt100,
                     "queryCount": row.queryCount,
                     "avgQueryMs": row.avgQueryMs,
-                    "maxQueryMs": row.maxQueryMs
+                    "maxQueryMs": row.maxQueryMs,
+                    "indexResidentMB": row.indexResidentMB,
+                    "peakResidentMB": row.peakResidentMB,
+                    "concurrency": row.concurrency,
+                    "firstQueryMs": row.firstQueryMs,
+                    "warmSteadyMeanMs": row.warmSteadyMeanMs,
+                    "backendLabel": row.backendLabel
                 ]
             }
         ]

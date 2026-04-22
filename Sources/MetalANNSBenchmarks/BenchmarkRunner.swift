@@ -27,6 +27,18 @@ struct BenchmarkRunner {
         var recallAt100: Double
         var queryCount: Int = 0
         var totalSearchTimeSeconds: Double = 0
+        var latencyDistribution: LatencyDistribution = .empty()
+        var memoryBeforeBuild: MemorySnapshot = .zero()
+        var memoryAfterBuild: MemorySnapshot = .zero()
+        var memoryAfterQueries: MemorySnapshot = .zero()
+        var firstQueryLatencyMs: Double = 0
+        var warmSteadyMeanMs: Double = 0
+        var concurrency: Int = 1
+
+        var indexResidentBytesEstimate: UInt64 {
+            // Rough estimate: post-build resident minus pre-build resident, clamped at 0
+            memoryAfterBuild.residentBytes &- min(memoryAfterBuild.residentBytes, memoryBeforeBuild.residentBytes)
+        }
     }
 
     static func run(config: Config, repeatRuns: Int = 1, warmupRuns: Int = 0) async throws -> Results {
@@ -131,7 +143,9 @@ struct BenchmarkRunner {
                     recallAt100: result.recallAt100,
                     queryCount: result.queryCount,
                     avgQueryMs: result.queryLatencyMeanMs,
-                    maxQueryMs: result.queryLatencyMaxMs
+                    maxQueryMs: result.queryLatencyMaxMs,
+                    indexResidentMB: Double(result.indexResidentBytesEstimate) / (1024 * 1024),
+                    peakResidentMB: result.memoryAfterQueries.peakResidentMB
                 )
             )
         }
@@ -188,14 +202,25 @@ struct BenchmarkRunner {
             )
         )
 
+        let memoryBeforeBuild = MemorySnapshot.capture()
         let buildStart = DispatchTime.now().uptimeNanoseconds
         try await index.build(vectors: indexVectors, ids: indexIDs)
         let buildEnd = DispatchTime.now().uptimeNanoseconds
         let buildTimeMs = Double(buildEnd - buildStart) / 1_000_000.0
+        let memoryAfterBuild = MemorySnapshot.capture()
 
         let queryK = max(config.k, top100Count)
         let repeats = max(1, repeatRuns)
         let warmups = max(0, warmupRuns)
+
+        // Cold timing: capture the very first dispatch *before* any warmup loop runs.
+        // This is a real, measured search; its result is discarded for recall purposes
+        // and the recall pass is run normally below so totals stay consistent.
+        let firstQuery = queries[0]
+        let coldStart = DispatchTime.now().uptimeNanoseconds
+        _ = try await index.search(query: firstQuery, k: queryK)
+        let coldEnd = DispatchTime.now().uptimeNanoseconds
+        let firstQueryLatencyMs = Double(coldEnd - coldStart) / 1_000_000.0
 
         if warmups > 0 {
             for _ in 0..<warmups {
@@ -239,23 +264,43 @@ struct BenchmarkRunner {
             totalSearchTimeSeconds += batchStats.totalSearchSeconds
         }
 
+        let memoryAfterQueries = MemorySnapshot.capture()
         let measuredQueryCount = Double(queries.count)
         let totalQueryCount = max(1, queries.count * repeats)
-        let sortedLatencies = allLatencies.sorted()
+        let distribution = LatencyDistribution.compute(fromLatenciesMs: allLatencies)
+
+        // Warm steady-state mean: mean of the measured latencies excluding the very
+        // first measured search of the very first repeat (which is the closest
+        // analogue to "first query post-warmup" in this latency vector).
+        let warmSteadyMeanMs: Double
+        if allLatencies.count > 1 {
+            let warmSubset = allLatencies.dropFirst()
+            warmSteadyMeanMs = warmSubset.reduce(0, +) / Double(warmSubset.count)
+        } else {
+            warmSteadyMeanMs = distribution.meanMs
+        }
+
         return Results(
             buildTimeMs: buildTimeMs,
-            queryLatencyP50Ms: percentile(0.50, in: sortedLatencies),
-            queryLatencyP95Ms: percentile(0.95, in: sortedLatencies),
-            queryLatencyP99Ms: percentile(0.99, in: sortedLatencies),
-            queryLatencyMeanMs: mean(in: sortedLatencies),
-            queryLatencyStdDevMs: standardDeviation(in: sortedLatencies),
-            queryLatencyMinMs: sortedLatencies.first ?? 0,
-            queryLatencyMaxMs: sortedLatencies.last ?? 0,
+            queryLatencyP50Ms: distribution.p50Ms,
+            queryLatencyP95Ms: distribution.p95Ms,
+            queryLatencyP99Ms: distribution.p99Ms,
+            queryLatencyMeanMs: distribution.meanMs,
+            queryLatencyStdDevMs: distribution.stdDevMs,
+            queryLatencyMinMs: distribution.minMs,
+            queryLatencyMaxMs: distribution.maxMs,
             recallAt1: recallAt1Total / (measuredQueryCount * Double(repeats)),
             recallAt10: recallAt10Total / (measuredQueryCount * Double(repeats)),
             recallAt100: recallAt100Total / (measuredQueryCount * Double(repeats)),
             queryCount: totalQueryCount,
-            totalSearchTimeSeconds: totalSearchTimeSeconds
+            totalSearchTimeSeconds: totalSearchTimeSeconds,
+            latencyDistribution: distribution,
+            memoryBeforeBuild: memoryBeforeBuild,
+            memoryAfterBuild: memoryAfterBuild,
+            memoryAfterQueries: memoryAfterQueries,
+            firstQueryLatencyMs: firstQueryLatencyMs,
+            warmSteadyMeanMs: warmSteadyMeanMs,
+            concurrency: 1
         )
     }
 
@@ -328,34 +373,6 @@ struct BenchmarkRunner {
         normalized.k = max(1, config.k)
         normalized.efSearch = max(1, config.efSearch)
         return normalized
-    }
-
-    private static func percentile(_ p: Double, in values: [Double]) -> Double {
-        guard !values.isEmpty else {
-            return 0
-        }
-        let rank = Int(ceil(p * Double(values.count))) - 1
-        let index = min(max(rank, 0), values.count - 1)
-        return values[index]
-    }
-
-    private static func mean(in values: [Double]) -> Double {
-        guard !values.isEmpty else {
-            return 0
-        }
-        return values.reduce(0, +) / Double(values.count)
-    }
-
-    private static func standardDeviation(in values: [Double]) -> Double {
-        guard values.count > 1 else {
-            return 0
-        }
-        let avg = mean(in: values)
-        let squaredSum = values.reduce(0.0) { running, value in
-            let difference = value - avg
-            return running + (difference * difference)
-        }
-        return sqrt(squaredSum / Double(values.count))
     }
 
     private static func makeVectors(count: Int, dim: Int, seedOffset: Int) -> [[Float]] {

@@ -72,7 +72,9 @@ public struct IVFPQBenchmark: Sendable {
             recallAt100: anns.recallAt100,
             queryCount: anns.queryCount,
             avgQueryMs: anns.queryLatencyMeanMs,
-            maxQueryMs: anns.queryLatencyMaxMs
+            maxQueryMs: anns.queryLatencyMaxMs,
+            indexResidentMB: Double(anns.indexResidentBytesEstimate) / (1024 * 1024),
+            peakResidentMB: anns.memoryAfterQueries.peakResidentMB
         )
 
         let capacity = max(dataset.trainVectors.count * 2, dataset.trainVectors.count + 1)
@@ -82,12 +84,14 @@ public struct IVFPQBenchmark: Sendable {
             config: ivfpqConfig
         )
 
+        let ivfpqMemoryBeforeBuild = MemorySnapshot.capture()
         let trainStart = DispatchTime.now().uptimeNanoseconds
         try await ivfpqIndex.train(vectors: dataset.trainVectors)
         let ids = (0..<dataset.trainVectors.count).map { "v_\($0)" }
         try await ivfpqIndex.add(vectors: dataset.trainVectors, ids: ids)
         let trainEnd = DispatchTime.now().uptimeNanoseconds
         let buildTimeMs = Double(trainEnd - trainStart) / 1_000_000.0
+        let ivfpqMemoryAfterBuild = MemorySnapshot.capture()
 
         let top1Count = min(1, dataset.neighborsCount)
         let top10Count = min(10, dataset.neighborsCount)
@@ -137,6 +141,9 @@ public struct IVFPQBenchmark: Sendable {
 
         let totalQueryCount = queries.count * repeats
         let sortedLatencies = allLatencies.sorted()
+        let ivfpqMemoryAfterQueries = MemorySnapshot.capture()
+        let ivfpqResidentDelta = ivfpqMemoryAfterBuild.residentBytes
+            &- min(ivfpqMemoryAfterBuild.residentBytes, ivfpqMemoryBeforeBuild.residentBytes)
         let ivfpqRow = BenchmarkReport.Row(
             label: "_IVFPQIndex",
             recallAt10: totalQueryCount > 0 ? recallAt10Total / Double(totalQueryCount) : 0,
@@ -149,7 +156,9 @@ public struct IVFPQBenchmark: Sendable {
             recallAt100: totalQueryCount > 0 ? recallAt100Total / Double(totalQueryCount) : 0,
             queryCount: totalQueryCount,
             avgQueryMs: mean(in: sortedLatencies),
-            maxQueryMs: sortedLatencies.last ?? 0
+            maxQueryMs: sortedLatencies.last ?? 0,
+            indexResidentMB: Double(ivfpqResidentDelta) / (1024 * 1024),
+            peakResidentMB: ivfpqMemoryAfterQueries.peakResidentMB
         )
 
         return ComparisonResults(annsResults: annsRow, ivfpqResults: ivfpqRow)

@@ -19,7 +19,9 @@ func reportRow(from results: BenchmarkRunner.Results, label: String = "single") 
         recallAt100: results.recallAt100,
         queryCount: results.queryCount,
         avgQueryMs: results.queryLatencyMeanMs,
-        maxQueryMs: results.queryLatencyMaxMs
+        maxQueryMs: results.queryLatencyMaxMs,
+        indexResidentMB: Double(results.indexResidentBytesEstimate) / (1024 * 1024),
+        peakResidentMB: results.memoryAfterQueries.peakResidentMB
     )
 }
 
@@ -32,7 +34,7 @@ func benchmarkMetadata(
     warmupRuns: Int,
     seed: Int?
 ) -> [String: String] {
-    [
+    var metadata: [String: String] = [
         "mode": mode,
         "datasetLabel": datasetLabel,
         "vectorCount": String(config.vectorCount),
@@ -44,11 +46,18 @@ func benchmarkMetadata(
         "metric": config.metric.rawValue,
         "runs": String(repeatRuns),
         "warmupRuns": String(warmupRuns),
-        "swiftVersion": ProcessInfo.processInfo.operatingSystemVersionString,
         "generatedAt": ISO8601DateFormatter().string(from: Date()),
         "csvOut": csvOut ?? "",
         "seed": seed != nil ? String(seed!) : ""
     ]
+
+    // Merge in environment probe metadata. On key collisions, the env probe wins
+    // (it carries the authoritative osVersion, build config, device info, etc.).
+    for (key, value) in EnvironmentProbe.capture().asMetadata() {
+        metadata[key] = value
+    }
+
+    return metadata
 }
 
 func makeBenchmarkConfig(
@@ -99,7 +108,7 @@ func loadOrSyntheticDataset(
     return (dataset, "synthetic")
 }
 
-func printResults(_ results: BenchmarkRunner.Results) {
+func printResults(_ results: BenchmarkRunner.Results, environment: EnvironmentProbe? = nil) {
     print("Build time:          \(String(format: "%.1f", results.buildTimeMs)) ms")
     print("Query count:         \(results.queryCount)")
     print("Query mean:          \(String(format: "%.3f", results.queryLatencyMeanMs)) ms")
@@ -111,6 +120,29 @@ func printResults(_ results: BenchmarkRunner.Results) {
     print("Recall@1:            \(String(format: "%.3f", results.recallAt1))")
     print("Recall@10:           \(String(format: "%.3f", results.recallAt10))")
     print("Recall@100:          \(String(format: "%.3f", results.recallAt100))")
+
+    let indexResidentMB = Double(results.indexResidentBytesEstimate) / (1024 * 1024)
+    print("Index resident:      \(String(format: "%.1f", indexResidentMB)) MB")
+    print("Peak resident:       \(String(format: "%.1f", results.memoryAfterQueries.peakResidentMB)) MB")
+
+    if let environment {
+        print("Device:              \(environment.metalDeviceName ?? "CPU only")")
+        if environment.thermalState != "nominal" {
+            print("Thermal:             \(environment.thermalState) (warning)")
+        } else {
+            print("Thermal:             \(environment.thermalState)")
+        }
+    }
+}
+
+func printRunBanner(_ environment: EnvironmentProbe) {
+    let memoryGiB = Double(environment.physicalMemoryBytes) / (1024.0 * 1024.0 * 1024.0)
+    let deviceLine = environment.metalDeviceName ?? "(no Metal)"
+    print("== MetalANNS Benchmarks ==")
+    print("Device: \(deviceLine)  Cores: \(environment.activeCoreCount)  Mem: \(String(format: "%.1f", memoryGiB)) GiB")
+    let buildSuffix = environment.osBuild.isEmpty ? "" : " (\(environment.osBuild))"
+    print("OS:     \(environment.osVersion)\(buildSuffix)")
+    print("Mode:   \(environment.buildConfiguration)  Thermal: \(environment.thermalState)  LowPower: \(environment.lowPowerModeEnabled)")
 }
 
 func makeConfigsForSweep(
@@ -352,6 +384,9 @@ do {
         exit(0)
     }
 
+    let environment = EnvironmentProbe.capture()
+    printRunBanner(environment)
+
     switch options.mode {
     case .help:
         printUsage()
@@ -394,7 +429,7 @@ do {
             warmupRuns: options.warmupRuns
         )
 
-        printResults(results)
+        printResults(results, environment: environment)
         print("Dataset: \(datasetLabel)")
 
         let report = BenchmarkReport(
