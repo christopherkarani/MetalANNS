@@ -73,6 +73,10 @@ public struct IVFPQBenchmark: Sendable {
             queryCount: anns.queryCount,
             avgQueryMs: anns.queryLatencyMeanMs,
             maxQueryMs: anns.queryLatencyMaxMs,
+            p90Ms: anns.latencyDistribution.p90Ms,
+            p999Ms: anns.latencyDistribution.p999Ms,
+            stdDevMs: anns.queryLatencyStdDevMs,
+            minMs: anns.queryLatencyMinMs,
             indexResidentMB: Double(anns.indexResidentBytesEstimate) / (1024 * 1024),
             peakResidentMB: anns.memoryAfterQueries.peakResidentMB
         )
@@ -140,7 +144,7 @@ public struct IVFPQBenchmark: Sendable {
         }
 
         let totalQueryCount = queries.count * repeats
-        let sortedLatencies = allLatencies.sorted()
+        let ivfpqDistribution = LatencyDistribution.compute(fromLatenciesMs: allLatencies)
         let ivfpqMemoryAfterQueries = MemorySnapshot.capture()
         let ivfpqResidentDelta = ivfpqMemoryAfterBuild.residentBytes
             &- min(ivfpqMemoryAfterBuild.residentBytes, ivfpqMemoryBeforeBuild.residentBytes)
@@ -149,14 +153,18 @@ public struct IVFPQBenchmark: Sendable {
             recallAt10: totalQueryCount > 0 ? recallAt10Total / Double(totalQueryCount) : 0,
             qps: totalQueryCount > 0 && totalSearchTimeSeconds > 0 ? Double(totalQueryCount) / totalSearchTimeSeconds : 0,
             buildTimeMs: buildTimeMs,
-            p50Ms: percentile(0.50, in: sortedLatencies),
-            p95Ms: percentile(0.95, in: sortedLatencies),
-            p99Ms: percentile(0.99, in: sortedLatencies),
+            p50Ms: ivfpqDistribution.p50Ms,
+            p95Ms: ivfpqDistribution.p95Ms,
+            p99Ms: ivfpqDistribution.p99Ms,
             recallAt1: totalQueryCount > 0 ? recallAt1Total / Double(totalQueryCount) : 0,
             recallAt100: totalQueryCount > 0 ? recallAt100Total / Double(totalQueryCount) : 0,
             queryCount: totalQueryCount,
-            avgQueryMs: mean(in: sortedLatencies),
-            maxQueryMs: sortedLatencies.last ?? 0,
+            avgQueryMs: ivfpqDistribution.meanMs,
+            maxQueryMs: ivfpqDistribution.maxMs,
+            p90Ms: ivfpqDistribution.p90Ms,
+            p999Ms: ivfpqDistribution.p999Ms,
+            stdDevMs: ivfpqDistribution.stdDevMs,
+            minMs: ivfpqDistribution.minMs,
             indexResidentMB: Double(ivfpqResidentDelta) / (1024 * 1024),
             peakResidentMB: ivfpqMemoryAfterQueries.peakResidentMB
         )
@@ -169,23 +177,6 @@ public struct IVFPQBenchmark: Sendable {
             rows: [results.annsResults, results.ivfpqResults],
             datasetLabel: "comparison"
         ).renderTable()
-    }
-
-    private static func percentile(_ p: Double, in values: [Double]) -> Double {
-        guard !values.isEmpty else {
-            return 0
-        }
-        let sorted = values.sorted()
-        let rank = Int(ceil(p * Double(sorted.count))) - 1
-        let index = min(max(rank, 0), sorted.count - 1)
-        return sorted[index]
-    }
-
-    private static func mean(in values: [Double]) -> Double {
-        guard !values.isEmpty else {
-            return 0
-        }
-        return values.reduce(0, +) / Double(values.count)
     }
 
     private static func benchmarkIVFPQBatch(

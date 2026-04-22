@@ -51,105 +51,107 @@ public struct LatencyDistribution: Sendable {
         self.histogramBuckets = histogramBuckets
     }
 
-    public static func empty() -> LatencyDistribution {
-        LatencyDistribution(
-            countSamples: 0,
-            meanMs: 0,
-            stdDevMs: 0,
-            minMs: 0,
-            maxMs: 0,
-            p50Ms: 0,
-            p90Ms: 0,
-            p95Ms: 0,
-            p99Ms: 0,
-            p999Ms: 0,
-            histogramBuckets: []
-        )
-    }
+    public static let empty = LatencyDistribution(
+        countSamples: 0,
+        meanMs: 0,
+        stdDevMs: 0,
+        minMs: 0,
+        maxMs: 0,
+        p50Ms: 0,
+        p90Ms: 0,
+        p95Ms: 0,
+        p99Ms: 0,
+        p999Ms: 0,
+        histogramBuckets: []
+    )
 
     public static func compute(fromLatenciesMs latencies: [Double], bucketCount: Int = 32) -> LatencyDistribution {
         guard !latencies.isEmpty else {
-            return .empty()
+            return .empty
         }
 
         let sorted = latencies.sorted()
         let count = sorted.count
+
         let minValue = sorted.first ?? 0
         let maxValue = sorted.last ?? 0
-        let avg = mean(in: sorted)
-        let stddev = standardDeviation(in: sorted, mean: avg)
 
-        let buckets = makeHistogramBuckets(
-            sortedLatencies: sorted,
-            bucketCount: max(1, bucketCount)
+        let meanValue = mean(in: sorted)
+        let stdDevValue = standardDeviation(in: sorted, mean: meanValue)
+
+        let buckets = buildHistogramBuckets(
+            sorted: sorted,
+            bucketCount: max(1, bucketCount),
+            minValue: minValue,
+            maxValue: maxValue
         )
 
         return LatencyDistribution(
             countSamples: count,
-            meanMs: avg,
-            stdDevMs: stddev,
+            meanMs: meanValue,
+            stdDevMs: stdDevValue,
             minMs: minValue,
             maxMs: maxValue,
-            p50Ms: percentile(0.50, in: sorted),
-            p90Ms: percentile(0.90, in: sorted),
-            p95Ms: percentile(0.95, in: sorted),
-            p99Ms: percentile(0.99, in: sorted),
-            p999Ms: percentile(0.999, in: sorted),
+            p50Ms: percentile(0.50, inSorted: sorted),
+            p90Ms: percentile(0.90, inSorted: sorted),
+            p95Ms: percentile(0.95, inSorted: sorted),
+            p99Ms: percentile(0.99, inSorted: sorted),
+            p999Ms: percentile(0.999, inSorted: sorted),
             histogramBuckets: buckets
         )
     }
 
     public func renderASCIIHistogram(width: Int = 40) -> String {
-        guard !histogramBuckets.isEmpty else {
+        guard !histogramBuckets.isEmpty, countSamples > 0 else {
             return "(no samples)"
         }
 
         let maxCount = histogramBuckets.reduce(0) { Swift.max($0, $1.count) }
         guard maxCount > 0 else {
-            return "(no samples)"
+            return "(empty histogram)"
         }
 
-        let safeWidth = max(1, width)
+        let usableWidth = max(1, width)
         var lines: [String] = []
         let labelWidth = 18
+
         for bucket in histogramBuckets {
-            let label = String(format: "[%7.3f,%7.3f)", bucket.lowerMs, bucket.upperMs)
-            let barLength = Int((Double(bucket.count) / Double(maxCount)) * Double(safeWidth))
+            let label = String(format: "%7.3f-%7.3f", bucket.lowerMs, bucket.upperMs)
+            let paddedLabel = Self.padRightLatency(label, to: labelWidth)
+            let barLength = Int((Double(bucket.count) / Double(maxCount)) * Double(usableWidth))
             let bar = String(repeating: "#", count: barLength)
-            let padded = label.count >= labelWidth
-                ? label
-                : label + String(repeating: " ", count: labelWidth - label.count)
-            lines.append("\(padded) | \(bar) \(bucket.count)")
+            let countText = " (\(bucket.count))"
+            lines.append("\(paddedLabel) | \(bar)\(countText)")
         }
+
         return lines.joined(separator: "\n")
     }
 
     public func cdfCSV() -> String {
-        guard countSamples > 0 else {
+        guard !histogramBuckets.isEmpty, countSamples > 0 else {
             return "latencyMs,cumulativeFraction\n"
         }
 
-        var lines: [String] = ["latencyMs,cumulativeFraction"]
+        var lines = ["latencyMs,cumulativeFraction"]
         var cumulative = 0
-        let total = histogramBuckets.reduce(0) { $0 + $1.count }
-        let denominator = max(1, total)
+        let total = Double(countSamples)
         for bucket in histogramBuckets {
             cumulative += bucket.count
-            let fraction = Double(cumulative) / Double(denominator)
-            lines.append(String(format: "%.6f,%.6f", bucket.upperMs, fraction))
+            let fraction = total > 0 ? Double(cumulative) / total : 0
+            lines.append("\(Self.formatDouble(bucket.upperMs)),\(Self.formatDouble(fraction))")
         }
         return lines.joined(separator: "\n") + "\n"
     }
 
     public func histogramCSV() -> String {
-        var lines: [String] = ["lowerMs,upperMs,count"]
+        var lines = ["lowerMs,upperMs,count"]
         for bucket in histogramBuckets {
-            lines.append(String(format: "%.6f,%.6f,%d", bucket.lowerMs, bucket.upperMs, bucket.count))
+            lines.append("\(Self.formatDouble(bucket.lowerMs)),\(Self.formatDouble(bucket.upperMs)),\(bucket.count)")
         }
         return lines.joined(separator: "\n") + "\n"
     }
 
-    private static func percentile(_ p: Double, in sorted: [Double]) -> Double {
+    private static func percentile(_ p: Double, inSorted sorted: [Double]) -> Double {
         guard !sorted.isEmpty else {
             return 0
         }
@@ -165,106 +167,95 @@ public struct LatencyDistribution: Sendable {
         return values.reduce(0, +) / Double(values.count)
     }
 
-    private static func standardDeviation(in values: [Double], mean avg: Double) -> Double {
+    private static func standardDeviation(in values: [Double], mean meanValue: Double) -> Double {
         guard values.count > 1 else {
             return 0
         }
         let squaredSum = values.reduce(0.0) { running, value in
-            let difference = value - avg
-            return running + (difference * difference)
+            let diff = value - meanValue
+            return running + (diff * diff)
         }
         return sqrt(squaredSum / Double(values.count))
     }
 
-    private static func makeHistogramBuckets(
-        sortedLatencies: [Double],
-        bucketCount: Int
+    private static func buildHistogramBuckets(
+        sorted: [Double],
+        bucketCount: Int,
+        minValue: Double,
+        maxValue: Double
     ) -> [HistogramBucket] {
-        guard let minValue = sortedLatencies.first,
-              let maxValue = sortedLatencies.last else {
-            return []
+        if minValue == maxValue {
+            return [HistogramBucket(lowerMs: minValue, upperMs: maxValue, count: sorted.count)]
         }
 
-        if minValue == maxValue || bucketCount <= 1 {
-            return [
-                HistogramBucket(
-                    lowerMs: minValue,
-                    upperMs: maxValue,
-                    count: sortedLatencies.count
-                )
-            ]
+        let edges = makeBucketEdges(min: minValue, max: maxValue, bucketCount: bucketCount)
+        guard edges.count >= 2 else {
+            return [HistogramBucket(lowerMs: minValue, upperMs: maxValue, count: sorted.count)]
         }
 
-        // Use log-spaced buckets when min > 0; otherwise use linear spacing.
-        let edges: [Double]
-        if minValue > 0 {
-            edges = logSpacedEdges(min: minValue, max: maxValue, bucketCount: bucketCount)
-        } else {
-            // Shift to a small epsilon to avoid log(0).
-            let epsilon = max(maxValue * 1e-9, 1e-9)
-            let lower = epsilon
-            let logEdges = logSpacedEdges(min: lower, max: max(maxValue, lower * 2), bucketCount: bucketCount - 1)
-            // Prepend an initial edge at 0 so the first bucket captures zeros.
-            var combined = [0.0]
-            combined.append(contentsOf: logEdges)
-            edges = combined
-        }
-
-        var buckets: [HistogramBucket] = []
-        buckets.reserveCapacity(edges.count - 1)
-        var cursor = 0
-        let total = sortedLatencies.count
-
-        for i in 0..<(edges.count - 1) {
-            let lower = edges[i]
-            let upper = edges[i + 1]
-            let isLast = (i == edges.count - 2)
-            var count = 0
-            while cursor < total {
-                let value = sortedLatencies[cursor]
-                let inRange = isLast ? (value <= upper) : (value < upper)
-                if value >= lower && inRange {
-                    count += 1
-                    cursor += 1
-                } else if value < lower {
-                    // Should not happen with sorted input, but guard anyway.
-                    cursor += 1
-                } else {
+        var counts = [Int](repeating: 0, count: edges.count - 1)
+        for value in sorted {
+            var placed = false
+            for i in 0..<(edges.count - 1) {
+                let upper = edges[i + 1]
+                let isLast = i == edges.count - 2
+                if value < upper || (isLast && value <= upper) {
+                    counts[i] += 1
+                    placed = true
                     break
                 }
             }
-            buckets.append(HistogramBucket(lowerMs: lower, upperMs: upper, count: count))
+            if !placed {
+                counts[counts.count - 1] += 1
+            }
         }
 
-        // Any remaining samples (numerical edge cases) go into the last bucket.
-        if cursor < total, var last = buckets.last {
-            let remaining = total - cursor
-            last = HistogramBucket(
-                lowerMs: last.lowerMs,
-                upperMs: last.upperMs,
-                count: last.count + remaining
+        var buckets: [HistogramBucket] = []
+        buckets.reserveCapacity(counts.count)
+        for i in 0..<counts.count {
+            buckets.append(
+                HistogramBucket(lowerMs: edges[i], upperMs: edges[i + 1], count: counts[i])
             )
-            buckets[buckets.count - 1] = last
         }
-
         return buckets
     }
 
-    private static func logSpacedEdges(min lo: Double, max hi: Double, bucketCount: Int) -> [Double] {
-        guard bucketCount >= 1, lo > 0, hi > lo else {
-            return [lo, max(hi, lo)]
+    private static func makeBucketEdges(min minValue: Double, max maxValue: Double, bucketCount: Int) -> [Double] {
+        let safeMin = minValue > 0 ? minValue : 1e-6
+        let safeMax = maxValue > safeMin ? maxValue : safeMin * 10
+        let canLog = minValue > 0
+        if canLog {
+            let logMin = log10(safeMin)
+            let logMax = log10(safeMax)
+            let step = (logMax - logMin) / Double(bucketCount)
+            var edges: [Double] = []
+            edges.reserveCapacity(bucketCount + 1)
+            for i in 0...bucketCount {
+                edges.append(pow(10.0, logMin + step * Double(i)))
+            }
+            edges[0] = minValue
+            edges[edges.count - 1] = maxValue
+            return edges
         }
-        let logLo = log(lo)
-        let logHi = log(hi)
-        let step = (logHi - logLo) / Double(bucketCount)
+
+        let step = (maxValue - minValue) / Double(bucketCount)
         var edges: [Double] = []
         edges.reserveCapacity(bucketCount + 1)
         for i in 0...bucketCount {
-            edges.append(exp(logLo + Double(i) * step))
+            edges.append(minValue + step * Double(i))
         }
-        // Ensure first/last match exactly (avoid floating drift).
-        edges[0] = lo
-        edges[edges.count - 1] = hi
+        edges[edges.count - 1] = maxValue
         return edges
+    }
+
+    private static func padRightLatency(_ text: String, to width: Int) -> String {
+        if text.count >= width {
+            return text
+        }
+        return text + String(repeating: " ", count: width - text.count)
+    }
+
+    private static func formatDouble(_ value: Double) -> String {
+        String(format: "%.6f", value)
     }
 }

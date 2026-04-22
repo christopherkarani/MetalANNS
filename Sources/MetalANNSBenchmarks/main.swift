@@ -20,6 +20,10 @@ func reportRow(from results: BenchmarkRunner.Results, label: String = "single") 
         queryCount: results.queryCount,
         avgQueryMs: results.queryLatencyMeanMs,
         maxQueryMs: results.queryLatencyMaxMs,
+        p90Ms: results.latencyDistribution.p90Ms,
+        p999Ms: results.latencyDistribution.p999Ms,
+        stdDevMs: results.queryLatencyStdDevMs,
+        minMs: results.queryLatencyMinMs,
         indexResidentMB: Double(results.indexResidentBytesEstimate) / (1024 * 1024),
         peakResidentMB: results.memoryAfterQueries.peakResidentMB
     )
@@ -113,8 +117,10 @@ func printResults(_ results: BenchmarkRunner.Results, environment: EnvironmentPr
     print("Query count:         \(results.queryCount)")
     print("Query mean:          \(String(format: "%.3f", results.queryLatencyMeanMs)) ms")
     print("Query p50:           \(String(format: "%.2f", results.queryLatencyP50Ms)) ms")
+    print("Query p90:           \(String(format: "%.2f", results.latencyDistribution.p90Ms)) ms")
     print("Query p95:           \(String(format: "%.2f", results.queryLatencyP95Ms)) ms")
     print("Query p99:           \(String(format: "%.2f", results.queryLatencyP99Ms)) ms")
+    print("Query p999:          \(String(format: "%.2f", results.latencyDistribution.p999Ms)) ms")
     print("Query stddev:        \(String(format: "%.3f", results.queryLatencyStdDevMs)) ms")
     print("Query QPS:           \(String(format: "%.2f", results.qps))")
     print("Recall@1:            \(String(format: "%.3f", results.recallAt1))")
@@ -133,6 +139,9 @@ func printResults(_ results: BenchmarkRunner.Results, environment: EnvironmentPr
             print("Thermal:             \(environment.thermalState)")
         }
     }
+
+    print("Latency histogram:")
+    print(results.latencyDistribution.renderASCIIHistogram(width: 30))
 }
 
 func printRunBanner(_ environment: EnvironmentProbe) {
@@ -166,6 +175,35 @@ func makeConfigsForSweep(
     }
 }
 
+func makeCrossProductConfigs(
+    from base: BenchmarkRunner.Config,
+    degreeValues: [Int],
+    efSearchValues: [Int],
+    dataset: BenchmarkDataset
+) -> [(label: String, config: BenchmarkRunner.Config)] {
+    var combos: [(label: String, config: BenchmarkRunner.Config)] = []
+    combos.reserveCapacity(degreeValues.count * efSearchValues.count)
+    for degree in degreeValues {
+        for efSearch in efSearchValues {
+            combos.append(
+                (
+                    label: "degree=\(degree),efSearch=\(efSearch)",
+                    config: BenchmarkRunner.Config(
+                        vectorCount: dataset.trainVectors.count,
+                        dim: dataset.dimension,
+                        degree: degree,
+                        queryCount: base.queryCount,
+                        k: base.k,
+                        efSearch: efSearch,
+                        metric: base.metric
+                    )
+                )
+            )
+        }
+    }
+    return combos
+}
+
 func printUsage() {
     print("USAGE:")
     print("  MetalANNSBenchmarks [--dataset <path.annbin>]                                  # synthetic or loaded single run (default)")
@@ -179,9 +217,12 @@ func printUsage() {
     print("  --runs <n>               number of measured benchmark passes")
     print("  --warmup <n>             number of warmup passes")
     print("  --sweep-efsearch <list>  comma-separated ef values (default: 16,32,64,128,256)")
+    print("  --sweep-degree <list>    comma-separated degree values; combined with --sweep-efsearch")
+    print("                           emits the cross-product as 'degree=D,efSearch=E' rows")
     print("  --dataset <path.annbin>   use real dataset")
     print("  --csv-out <path.csv>      save CSV report")
     print("  --json-out <path.json>    save JSON report")
+    print("  --histogram-out <path>    on a single run, write <path>.histogram.csv and <path>.cdf.csv")
     print("  --metric <cosine|l2|innerproduct|hamming>")
     print("  --degree <n>")
     print("  --efsearch <n>")
@@ -212,6 +253,8 @@ struct ParsedBenchmarkOptions {
     var repeatRuns: Int = 1
     var warmupRuns: Int = 0
     var sweepEfSearchValues: [Int] = []
+    var sweepDegreeValues: [Int] = []
+    var histogramOutPath: String?
     var metric: Metric?
     var degree: Int?
     var efSearch: Int?
@@ -281,7 +324,14 @@ func parseOptions(from args: [String]) throws -> ParsedBenchmarkOptions {
 
         case "--sweep-efsearch":
             let value = try nextValue(for: arg, args: args, index: &index)
-            options.sweepEfSearchValues = try parseIntList(value)
+            options.sweepEfSearchValues = try parseIntList(value, flag: arg)
+
+        case "--sweep-degree":
+            let value = try nextValue(for: arg, args: args, index: &index)
+            options.sweepDegreeValues = try parseIntList(value, flag: arg)
+
+        case "--histogram-out":
+            options.histogramOutPath = try nextValue(for: arg, args: args, index: &index)
 
         case "--metric":
             let value = try nextValue(for: arg, args: args, index: &index)
@@ -351,7 +401,7 @@ func parsePositiveInt(_ flag: String, _ value: String) throws -> Int {
     return parsed
 }
 
-func parseIntList(_ value: String) throws -> [Int] {
+func parseIntList(_ value: String, flag: String = "--sweep-efsearch") throws -> [Int] {
     let values = value
         .split(separator: ",")
         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -359,7 +409,7 @@ func parseIntList(_ value: String) throws -> [Int] {
         .filter { $0 > 0 }
 
     if values.isEmpty {
-        throw BenchmarkDatasetError.invalidDataset("Invalid list for --sweep-efsearch: \(value)")
+        throw BenchmarkDatasetError.invalidDataset("Invalid list for \(flag): \(value)")
     }
 
     return values
@@ -454,6 +504,19 @@ do {
             try report.saveJSON(to: jsonOutPath)
             print("Saved JSON: \(jsonOutPath)")
         }
+        if let histogramOutPath = options.histogramOutPath {
+            let histogramURL = URL(fileURLWithPath: "\(histogramOutPath).histogram.csv")
+            let cdfURL = URL(fileURLWithPath: "\(histogramOutPath).cdf.csv")
+            let parentURL = histogramURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(
+                at: parentURL,
+                withIntermediateDirectories: true
+            )
+            try results.latencyDistribution.histogramCSV().write(to: histogramURL, atomically: true, encoding: .utf8)
+            try results.latencyDistribution.cdfCSV().write(to: cdfURL, atomically: true, encoding: .utf8)
+            print("Saved histogram: \(histogramURL.path)")
+            print("Saved CDF: \(cdfURL.path)")
+        }
 
     case .sweep:
         let dataset: BenchmarkDataset
@@ -492,8 +555,18 @@ do {
             options
         )
 
-        let values = options.sweepEfSearchValues.isEmpty ? defaultSweepValues : options.sweepEfSearchValues
-        let configs = makeConfigsForSweep(from: base, values: values, dataset: dataset)
+        let efValues = options.sweepEfSearchValues.isEmpty ? defaultSweepValues : options.sweepEfSearchValues
+        let configs: [(label: String, config: BenchmarkRunner.Config)]
+        if !options.sweepDegreeValues.isEmpty {
+            configs = makeCrossProductConfigs(
+                from: base,
+                degreeValues: options.sweepDegreeValues,
+                efSearchValues: efValues,
+                dataset: dataset
+            )
+        } else {
+            configs = makeConfigsForSweep(from: base, values: efValues, dataset: dataset)
+        }
 
         let report = try await BenchmarkRunner.sweep(
             configs: configs,
@@ -503,6 +576,8 @@ do {
         )
         print(report.renderTable())
         print("Pareto frontier points: \(report.paretoFrontier().count)")
+        print("")
+        print(report.renderParetoChart(width: 60, height: 16))
 
         let metadataReport = BenchmarkReport(
             rows: report.rows,

@@ -146,7 +146,7 @@ public struct BenchmarkReport: Sendable {
     }
 
     public func renderCSV() -> String {
-        var lines = ["label,recall@10,qps,buildTimeMs,p50ms,p90ms,p95ms,p99ms,p999ms,minMs,stdDevMs,avgQueryMs,maxQueryMs,indexResidentMB,peakResidentMB,concurrency"]
+        var lines = ["label,recall@10,qps,buildTimeMs,p50ms,p90ms,p95ms,p99ms,p999ms,minMs,stdDevMs,avgQueryMs,maxQueryMs,recall@1,recall@100,queryCount,indexResidentMB,peakResidentMB,concurrency"]
         for row in rows {
             lines.append(
                 [
@@ -163,6 +163,9 @@ public struct BenchmarkReport: Sendable {
                     String(format: "%.6f", row.stdDevMs),
                     String(format: "%.6f", row.avgQueryMs),
                     String(format: "%.6f", row.maxQueryMs),
+                    String(format: "%.6f", row.recallAt1),
+                    String(format: "%.6f", row.recallAt100),
+                    String(row.queryCount),
                     String(format: "%.6f", row.indexResidentMB),
                     String(format: "%.6f", row.peakResidentMB),
                     String(row.concurrency)
@@ -174,7 +177,7 @@ public struct BenchmarkReport: Sendable {
     }
 
     public func renderJSON() -> String {
-        var payload: [String: Any] = [
+        let payload: [String: Any] = [
             "datasetLabel": datasetLabel,
             "generatedAt": generatedAt,
             "metadata": metadata,
@@ -211,6 +214,66 @@ public struct BenchmarkReport: Sendable {
             options: [.prettyPrinted, .sortedKeys]
         )
         return String(data: jsonData ?? Data("{}".utf8), encoding: .utf8) ?? "{}"
+    }
+
+    public func renderParetoChart(width: Int = 60, height: Int = 16) -> String {
+        guard !rows.isEmpty else {
+            return "(no data)"
+        }
+
+        let safeWidth = max(20, width)
+        let safeHeight = max(6, height)
+
+        let frontierLabels = Set(paretoFrontier().map { $0.label })
+
+        let qpsValues = rows.map { Swift.max($0.qps, 1e-9) }
+        let logQps = qpsValues.map { log10($0) }
+        guard let minLogQps = logQps.min(), let maxLogQps = logQps.max() else {
+            return "(no data)"
+        }
+        let logRange = maxLogQps - minLogQps
+        let usableLogRange = logRange > 0 ? logRange : 1.0
+
+        let plotWidth = safeWidth - 8
+        let plotHeight = safeHeight - 3
+        guard plotWidth > 0, plotHeight > 0 else {
+            return "(chart too small)"
+        }
+
+        var grid = Array(repeating: Array(repeating: Character(" "), count: plotWidth), count: plotHeight)
+
+        for (idx, row) in rows.enumerated() {
+            let recall = Swift.min(Swift.max(row.recallAt10, 0), 1)
+            let xFraction = recall
+            let yFraction = (logQps[idx] - minLogQps) / usableLogRange
+            let xPos = Swift.min(plotWidth - 1, Swift.max(0, Int(xFraction * Double(plotWidth - 1))))
+            let yPosFromTop = Swift.min(plotHeight - 1, Swift.max(0, plotHeight - 1 - Int(yFraction * Double(plotHeight - 1))))
+            let isFrontier = frontierLabels.contains(row.label)
+            let marker: Character = isFrontier ? "*" : "."
+            let existing = grid[yPosFromTop][xPos]
+            if existing == " " || (marker == "*" && existing == ".") {
+                grid[yPosFromTop][xPos] = marker
+            }
+        }
+
+        var lines: [String] = []
+        lines.append("QPS (log10) vs recall@10  -- '*' = Pareto frontier, '.' = dominated")
+        for (rowIndex, line) in grid.enumerated() {
+            let logValue = maxLogQps - (Double(rowIndex) / Double(max(1, plotHeight - 1))) * usableLogRange
+            let qpsLabel = String(format: "%6.0f", pow(10.0, logValue))
+            lines.append("\(qpsLabel) | " + String(line))
+        }
+        let axis = String(repeating: "-", count: plotWidth)
+        lines.append("       +" + axis)
+        let leftPadWidth = max(3, 9)
+        let midPadWidth = max(3, plotWidth / 2 - 2)
+        let rightPadWidth = max(3, plotWidth / 2 + 1)
+        let xAxisLabels = padLeft("0.0", to: leftPadWidth)
+            + padLeft("0.5", to: midPadWidth)
+            + padLeft("1.0", to: rightPadWidth)
+        lines.append(xAxisLabels)
+
+        return lines.joined(separator: "\n")
     }
 
     public func saveCSV(to path: String) throws {

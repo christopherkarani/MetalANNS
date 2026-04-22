@@ -27,7 +27,7 @@ struct BenchmarkRunner {
         var recallAt100: Double
         var queryCount: Int = 0
         var totalSearchTimeSeconds: Double = 0
-        var latencyDistribution: LatencyDistribution = .empty()
+        var latencyDistribution: LatencyDistribution = .empty
         var memoryBeforeBuild: MemorySnapshot = .zero()
         var memoryAfterBuild: MemorySnapshot = .zero()
         var memoryAfterQueries: MemorySnapshot = .zero()
@@ -36,7 +36,6 @@ struct BenchmarkRunner {
         var concurrency: Int = 1
 
         var indexResidentBytesEstimate: UInt64 {
-            // Rough estimate: post-build resident minus pre-build resident, clamped at 0
             memoryAfterBuild.residentBytes &- min(memoryAfterBuild.residentBytes, memoryBeforeBuild.residentBytes)
         }
     }
@@ -144,6 +143,10 @@ struct BenchmarkRunner {
                     queryCount: result.queryCount,
                     avgQueryMs: result.queryLatencyMeanMs,
                     maxQueryMs: result.queryLatencyMaxMs,
+                    p90Ms: result.latencyDistribution.p90Ms,
+                    p999Ms: result.latencyDistribution.p999Ms,
+                    stdDevMs: result.queryLatencyStdDevMs,
+                    minMs: result.queryLatencyMinMs,
                     indexResidentMB: Double(result.indexResidentBytesEstimate) / (1024 * 1024),
                     peakResidentMB: result.memoryAfterQueries.peakResidentMB
                 )
@@ -269,9 +272,6 @@ struct BenchmarkRunner {
         let totalQueryCount = max(1, queries.count * repeats)
         let distribution = LatencyDistribution.compute(fromLatenciesMs: allLatencies)
 
-        // Warm steady-state mean: mean of the measured latencies excluding the very
-        // first measured search of the very first repeat (which is the closest
-        // analogue to "first query post-warmup" in this latency vector).
         let warmSteadyMeanMs: Double
         if allLatencies.count > 1 {
             let warmSubset = allLatencies.dropFirst()
