@@ -25,7 +25,10 @@ func reportRow(from results: BenchmarkRunner.Results, label: String = "single") 
         stdDevMs: results.queryLatencyStdDevMs,
         minMs: results.queryLatencyMinMs,
         indexResidentMB: Double(results.indexResidentBytesEstimate) / (1024 * 1024),
-        peakResidentMB: results.memoryAfterQueries.peakResidentMB
+        peakResidentMB: results.memoryAfterQueries.peakResidentMB,
+        concurrency: results.concurrency,
+        firstQueryMs: results.firstQueryLatencyMs,
+        warmSteadyMeanMs: results.warmSteadyMeanMs
     )
 }
 
@@ -530,26 +533,8 @@ do {
         print("First-query (cold):  \(String(format: "%.2f", results.firstQueryLatencyMs)) ms")
         print("Warm steady mean:    \(String(format: "%.3f", results.warmSteadyMeanMs)) ms")
 
-        let singleRow = BenchmarkReport.Row(
-            label: "single",
-            recallAt10: results.recallAt10,
-            qps: results.qps,
-            buildTimeMs: results.buildTimeMs,
-            p50Ms: results.queryLatencyP50Ms,
-            p95Ms: results.queryLatencyP95Ms,
-            p99Ms: results.queryLatencyP99Ms,
-            recallAt1: results.recallAt1,
-            recallAt100: results.recallAt100,
-            queryCount: results.queryCount,
-            avgQueryMs: results.queryLatencyMeanMs,
-            maxQueryMs: results.queryLatencyMaxMs,
-            concurrency: results.concurrency,
-            firstQueryMs: results.firstQueryLatencyMs,
-            warmSteadyMeanMs: results.warmSteadyMeanMs
-        )
-
         let report = BenchmarkReport(
-            rows: [singleRow],
+            rows: [reportRow(from: results)],
             datasetLabel: datasetLabel,
             metadata: benchmarkMetadata(
                 mode: "single",
