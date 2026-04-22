@@ -211,6 +211,9 @@ func printUsage() {
     print("  MetalANNSBenchmarks --dataset <path.annbin> --sweep [--sweep-efsearch <list>]  # dataset-aware sweep")
     print("  MetalANNSBenchmarks --dataset <path.annbin> --csv-out <path.csv>                # save CSV")
     print("  MetalANNSBenchmarks --ivfpq                                                    # ANS vs IVFPQ (synthetic if no dataset)")
+    print("  MetalANNSBenchmarks --concurrency 8                                            # single run with N in-flight queries")
+    print("  MetalANNSBenchmarks --concurrency-sweep 1,2,4,8,16                              # sweep concurrency levels")
+    print("  MetalANNSBenchmarks --compare cpu,gpu,gpu-adc                                   # multi-backend compare (see note)")
     print("\nOPTIONS:")
     print("  --query-count <n>        override number of query vectors")
     print("  --seed <n>               deterministic seed for synthetic dataset")
@@ -227,6 +230,9 @@ func printUsage() {
     print("  --degree <n>")
     print("  --efsearch <n>")
     print("  --k <n>")
+    print("  --concurrency <n>           single concurrency level for normal runs (default 1)")
+    print("  --concurrency-sweep <list>  comma-separated concurrency levels (e.g. 1,2,4,8,16); switches mode to concurrency sweep")
+    print("  --compare <list>            comma-separated backend labels; emits one row per label (NOTE: _GraphIndex has no public backend selector — see warning at startup)")
     print("  --ivfpq-subspaces <n>")
     print("  --ivfpq-centroids <n>")
     print("  --ivfpq-coarse-centroids <n>")
@@ -239,6 +245,8 @@ struct ParsedBenchmarkOptions {
     enum Mode {
         case single
         case sweep
+        case concurrencySweep
+        case compare
         case ivfpq
         case help
     }
@@ -259,6 +267,9 @@ struct ParsedBenchmarkOptions {
     var degree: Int?
     var efSearch: Int?
     var k: Int?
+    var concurrency: Int = 1
+    var concurrencySweepLevels: [Int] = []
+    var compareBackendLabels: [String] = []
 
     var ivfpqSubspaces: Int = 8
     var ivfpqNumCentroids: Int = 256
@@ -369,6 +380,27 @@ func parseOptions(from args: [String]) throws -> ParsedBenchmarkOptions {
             let value = try nextValue(for: arg, args: args, index: &index)
             options.ivfpqTrainingIterations = try parsePositiveInt(arg, value)
 
+        case "--concurrency":
+            let value = try nextValue(for: arg, args: args, index: &index)
+            options.concurrency = try parsePositiveInt(arg, value)
+
+        case "--concurrency-sweep":
+            let value = try nextValue(for: arg, args: args, index: &index)
+            options.concurrencySweepLevels = try parseIntList(value)
+            options.mode = .concurrencySweep
+
+        case "--compare":
+            let value = try nextValue(for: arg, args: args, index: &index)
+            let labels = value
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            guard !labels.isEmpty else {
+                throw BenchmarkDatasetError.invalidDataset("Invalid value for --compare: \(value)")
+            }
+            options.compareBackendLabels = labels
+            options.mode = .compare
+
         default:
             throw BenchmarkDatasetError.invalidDataset("Unknown argument: \(arg)")
         }
@@ -472,18 +504,52 @@ do {
             options
         )
 
-        let results = try await BenchmarkRunner.run(
-            config: baseConfig,
-            dataset: dataset,
-            repeatRuns: options.repeatRuns,
-            warmupRuns: options.warmupRuns
-        )
+        let results: BenchmarkRunner.Results
+        if options.concurrency > 1 {
+            results = try await BenchmarkRunner.runConcurrent(
+                config: baseConfig,
+                dataset: dataset,
+                concurrency: options.concurrency,
+                repeatRuns: options.repeatRuns,
+                warmupRuns: options.warmupRuns
+            )
+        } else {
+            results = try await BenchmarkRunner.run(
+                config: baseConfig,
+                dataset: dataset,
+                repeatRuns: options.repeatRuns,
+                warmupRuns: options.warmupRuns
+            )
+        }
 
         printResults(results, environment: environment)
         print("Dataset: \(datasetLabel)")
+        if options.concurrency > 1 {
+            print("Concurrency:         \(options.concurrency)")
+        }
+        print("First-query (cold):  \(String(format: "%.2f", results.firstQueryLatencyMs)) ms")
+        print("Warm steady mean:    \(String(format: "%.3f", results.warmSteadyMeanMs)) ms")
+
+        let singleRow = BenchmarkReport.Row(
+            label: "single",
+            recallAt10: results.recallAt10,
+            qps: results.qps,
+            buildTimeMs: results.buildTimeMs,
+            p50Ms: results.queryLatencyP50Ms,
+            p95Ms: results.queryLatencyP95Ms,
+            p99Ms: results.queryLatencyP99Ms,
+            recallAt1: results.recallAt1,
+            recallAt100: results.recallAt100,
+            queryCount: results.queryCount,
+            avgQueryMs: results.queryLatencyMeanMs,
+            maxQueryMs: results.queryLatencyMaxMs,
+            concurrency: results.concurrency,
+            firstQueryMs: results.firstQueryLatencyMs,
+            warmSteadyMeanMs: results.warmSteadyMeanMs
+        )
 
         let report = BenchmarkReport(
-            rows: [reportRow(from: results)],
+            rows: [singleRow],
             datasetLabel: datasetLabel,
             metadata: benchmarkMetadata(
                 mode: "single",
@@ -584,6 +650,158 @@ do {
             datasetLabel: report.datasetLabel,
             metadata: benchmarkMetadata(
                 mode: "sweep",
+                config: base,
+                datasetLabel: datasetLabel,
+                csvOut: options.csvOutPath,
+                repeatRuns: options.repeatRuns,
+                warmupRuns: options.warmupRuns,
+                seed: options.seed
+            )
+        )
+
+        if let csvOutPath = options.csvOutPath {
+            try metadataReport.saveCSV(to: csvOutPath)
+            print("Saved CSV: \(csvOutPath)")
+        }
+        if let jsonOutPath = options.jsonOutPath {
+            try metadataReport.saveJSON(to: jsonOutPath)
+            print("Saved JSON: \(jsonOutPath)")
+        }
+
+    case .concurrencySweep:
+        let dataset: BenchmarkDataset
+        let datasetLabel: String
+
+        if let datasetPath = options.datasetPath {
+            dataset = try BenchmarkDataset.load(from: datasetPath)
+            datasetLabel = datasetPath
+        } else {
+            let base = try loadOrSyntheticDataset(
+                path: nil,
+                baseConfig: BenchmarkRunner.Config(
+                    vectorCount: 1000,
+                    dim: 128,
+                    queryCount: options.queryCount ?? 100,
+                    k: options.k ?? 10,
+                    efSearch: options.efSearch ?? 64,
+                    metric: options.metric ?? .cosine
+                ),
+                metric: options.metric ?? .cosine,
+                seed: options.seed ?? 42
+            )
+            dataset = base.dataset
+            datasetLabel = "synthetic"
+        }
+
+        let base = try makeBenchmarkConfig(
+            from: BenchmarkRunner.Config(
+                vectorCount: dataset.trainVectors.count,
+                dim: dataset.dimension,
+                queryCount: options.queryCount ?? dataset.testVectors.count,
+                k: options.k ?? 10,
+                efSearch: options.efSearch ?? 64,
+                metric: options.metric ?? dataset.metric
+            ),
+            options
+        )
+
+        let levels = options.concurrencySweepLevels.isEmpty ? [1, 2, 4, 8, 16] : options.concurrencySweepLevels
+        let report = try await BenchmarkRunner.concurrencySweep(
+            config: base,
+            dataset: dataset,
+            concurrencyLevels: levels,
+            repeatRuns: options.repeatRuns,
+            warmupRuns: options.warmupRuns
+        )
+        print(report.renderTable())
+
+        let metadataReport = BenchmarkReport(
+            rows: report.rows,
+            datasetLabel: report.datasetLabel,
+            metadata: benchmarkMetadata(
+                mode: "concurrencySweep",
+                config: base,
+                datasetLabel: datasetLabel,
+                csvOut: options.csvOutPath,
+                repeatRuns: options.repeatRuns,
+                warmupRuns: options.warmupRuns,
+                seed: options.seed
+            )
+        )
+
+        if let csvOutPath = options.csvOutPath {
+            try metadataReport.saveCSV(to: csvOutPath)
+            print("Saved CSV: \(csvOutPath)")
+        }
+        if let jsonOutPath = options.jsonOutPath {
+            try metadataReport.saveJSON(to: jsonOutPath)
+            print("Saved JSON: \(jsonOutPath)")
+        }
+
+    case .compare:
+        // _GraphIndex does not currently expose a public knob for selecting between
+        // its CPU / GPU / GPU-ADC search backends — the choice is made internally
+        // based on workload size, metric, and EF parameters. We emit one row per
+        // requested label so users can still measure variance, but they should
+        // interpret the rows accordingly.
+        fputs(
+            "warning: --compare requested but _GraphIndex has no public backend selector. " +
+            "All rows below run the same auto-selected backend; per-label values reflect " +
+            "run-to-run variance, not differences between distinct backends.\n",
+            stderr
+        )
+
+        let dataset: BenchmarkDataset
+        let datasetLabel: String
+
+        if let datasetPath = options.datasetPath {
+            dataset = try BenchmarkDataset.load(from: datasetPath)
+            datasetLabel = datasetPath
+        } else {
+            let base = try loadOrSyntheticDataset(
+                path: nil,
+                baseConfig: BenchmarkRunner.Config(
+                    vectorCount: 1000,
+                    dim: 128,
+                    queryCount: options.queryCount ?? 100,
+                    k: options.k ?? 10,
+                    efSearch: options.efSearch ?? 64,
+                    metric: options.metric ?? .cosine
+                ),
+                metric: options.metric ?? .cosine,
+                seed: options.seed ?? 42
+            )
+            dataset = base.dataset
+            datasetLabel = "synthetic"
+        }
+
+        let base = try makeBenchmarkConfig(
+            from: BenchmarkRunner.Config(
+                vectorCount: dataset.trainVectors.count,
+                dim: dataset.dimension,
+                queryCount: options.queryCount ?? dataset.testVectors.count,
+                k: options.k ?? 10,
+                efSearch: options.efSearch ?? 64,
+                metric: options.metric ?? dataset.metric
+            ),
+            options
+        )
+
+        let report = try await BenchmarkRunner.compareBackends(
+            config: base,
+            dataset: dataset,
+            backendLabels: options.compareBackendLabels,
+            repeatRuns: options.repeatRuns,
+            warmupRuns: options.warmupRuns,
+            concurrency: options.concurrency
+        )
+        print(report.renderTable())
+
+        let metadataReport = BenchmarkReport(
+            rows: report.rows,
+            datasetLabel: report.datasetLabel,
+            metadata: benchmarkMetadata(
+                mode: "compare",
                 config: base,
                 datasetLabel: datasetLabel,
                 csvOut: options.csvOutPath,

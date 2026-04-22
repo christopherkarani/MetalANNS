@@ -113,6 +113,170 @@ struct BenchmarkRunner {
         )
     }
 
+    static func runConcurrent(
+        config: Config,
+        dataset: BenchmarkDataset,
+        concurrency: Int,
+        repeatRuns: Int = 1,
+        warmupRuns: Int = 0
+    ) async throws -> Results {
+        let normalizedConfig = normalize(config)
+
+        guard normalizedConfig.queryCount > 0 else {
+            throw BenchmarkDatasetError.invalidDataset("queryCount must be greater than zero")
+        }
+        guard !dataset.trainVectors.isEmpty else {
+            throw BenchmarkDatasetError.invalidDataset("trainVectors cannot be empty")
+        }
+        guard !dataset.testVectors.isEmpty else {
+            throw BenchmarkDatasetError.invalidDataset("testVectors cannot be empty")
+        }
+
+        let effectiveQueryCount = min(normalizedConfig.queryCount, dataset.testVectors.count)
+        guard effectiveQueryCount > 0 else {
+            throw BenchmarkDatasetError.invalidDataset("queryCount exceeds dataset query count")
+        }
+
+        let queries = Array(dataset.testVectors.prefix(effectiveQueryCount))
+        let expectedNeighbors = Array(dataset.groundTruth.prefix(effectiveQueryCount))
+        guard !expectedNeighbors.isEmpty else {
+            throw BenchmarkDatasetError.invalidDataset("groundTruth cannot be empty")
+        }
+
+        let ids = (0..<dataset.trainVectors.count).map { "v_\($0)" }
+
+        return try await runIndexedBenchmark(
+            config: normalizedConfig,
+            indexVectors: dataset.trainVectors,
+            indexIDs: ids,
+            queries: queries,
+            expectedNeighbors: expectedNeighbors,
+            repeatRuns: repeatRuns,
+            warmupRuns: warmupRuns,
+            concurrency: max(1, concurrency)
+        )
+    }
+
+    static func concurrencySweep(
+        config: Config,
+        dataset: BenchmarkDataset,
+        concurrencyLevels: [Int],
+        repeatRuns: Int = 1,
+        warmupRuns: Int = 0
+    ) async throws -> BenchmarkReport {
+        var rows: [BenchmarkReport.Row] = []
+        rows.reserveCapacity(concurrencyLevels.count)
+
+        for level in concurrencyLevels {
+            let effectiveLevel = max(1, level)
+            let result = try await runConcurrent(
+                config: config,
+                dataset: dataset,
+                concurrency: effectiveLevel,
+                repeatRuns: repeatRuns,
+                warmupRuns: warmupRuns
+            )
+            rows.append(
+                BenchmarkReport.Row(
+                    label: "concurrency=\(effectiveLevel)",
+                    recallAt10: result.recallAt10,
+                    qps: result.qps,
+                    buildTimeMs: result.buildTimeMs,
+                    p50Ms: result.queryLatencyP50Ms,
+                    p95Ms: result.queryLatencyP95Ms,
+                    p99Ms: result.queryLatencyP99Ms,
+                    recallAt1: result.recallAt1,
+                    recallAt100: result.recallAt100,
+                    queryCount: result.queryCount,
+                    avgQueryMs: result.queryLatencyMeanMs,
+                    maxQueryMs: result.queryLatencyMaxMs,
+                    concurrency: effectiveLevel,
+                    firstQueryMs: result.firstQueryLatencyMs,
+                    warmSteadyMeanMs: result.warmSteadyMeanMs
+                )
+            )
+        }
+
+        return BenchmarkReport(
+            rows: rows,
+            datasetLabel: "train=\(dataset.trainVectors.count),test=\(dataset.testVectors.count),dim=\(dataset.dimension),metric=\(dataset.metric.rawValue)",
+            metadata: [
+                "queryCount": "\(config.queryCount)",
+                "trainCount": "\(dataset.trainVectors.count)",
+                "dimension": "\(dataset.dimension)",
+                "metric": dataset.metric.rawValue,
+                "concurrencySweep": concurrencyLevels.map(String.init).joined(separator: ",")
+            ]
+        )
+    }
+
+    /// Multi-backend comparator.
+    ///
+    /// IMPORTANT: `_GraphIndex` does not currently expose a public knob for
+    /// selecting between its CPU / GPU / GPU-ADC search backends — the choice
+    /// is made internally by `shouldUseHybridGPUSearch` based on workload size,
+    /// metric, and EF parameters. As a result, this comparator runs the
+    /// *same* index implementation for every requested label; the per-label
+    /// rows it emits measure run-to-run variance of the auto-selected backend
+    /// for that workload, not differences between distinct backends.
+    /// `main.swift` prints a warning to that effect when `--compare` is
+    /// invoked. The function is structured so that switching to per-label
+    /// backend selection is a one-line change once such a public knob exists.
+    static func compareBackends(
+        config: Config,
+        dataset: BenchmarkDataset,
+        backendLabels: [String],
+        repeatRuns: Int = 1,
+        warmupRuns: Int = 0,
+        concurrency: Int = 1
+    ) async throws -> BenchmarkReport {
+        var rows: [BenchmarkReport.Row] = []
+        rows.reserveCapacity(backendLabels.count)
+
+        for backendLabel in backendLabels {
+            let result = try await runConcurrent(
+                config: config,
+                dataset: dataset,
+                concurrency: max(1, concurrency),
+                repeatRuns: repeatRuns,
+                warmupRuns: warmupRuns
+            )
+            rows.append(
+                BenchmarkReport.Row(
+                    label: "backend=\(backendLabel)",
+                    recallAt10: result.recallAt10,
+                    qps: result.qps,
+                    buildTimeMs: result.buildTimeMs,
+                    p50Ms: result.queryLatencyP50Ms,
+                    p95Ms: result.queryLatencyP95Ms,
+                    p99Ms: result.queryLatencyP99Ms,
+                    recallAt1: result.recallAt1,
+                    recallAt100: result.recallAt100,
+                    queryCount: result.queryCount,
+                    avgQueryMs: result.queryLatencyMeanMs,
+                    maxQueryMs: result.queryLatencyMaxMs,
+                    concurrency: max(1, concurrency),
+                    firstQueryMs: result.firstQueryLatencyMs,
+                    warmSteadyMeanMs: result.warmSteadyMeanMs,
+                    backendLabel: backendLabel
+                )
+            )
+        }
+
+        return BenchmarkReport(
+            rows: rows,
+            datasetLabel: "train=\(dataset.trainVectors.count),test=\(dataset.testVectors.count),dim=\(dataset.dimension),metric=\(dataset.metric.rawValue)",
+            metadata: [
+                "queryCount": "\(config.queryCount)",
+                "trainCount": "\(dataset.trainVectors.count)",
+                "dimension": "\(dataset.dimension)",
+                "metric": dataset.metric.rawValue,
+                "compare": backendLabels.joined(separator: ","),
+                "compareNote": "no public backend selector; rows reflect auto-selected backend variance"
+            ]
+        )
+    }
+
     static func sweep(
         configs: [(label: String, config: Config)],
         dataset: BenchmarkDataset,
@@ -173,7 +337,8 @@ struct BenchmarkRunner {
         queries: [[Float]],
         expectedNeighbors: [[UInt32]],
         repeatRuns: Int,
-        warmupRuns: Int
+        warmupRuns: Int,
+        concurrency: Int = 1
     ) async throws -> Results {
         guard !indexVectors.isEmpty else {
             throw BenchmarkDatasetError.invalidDataset("index vectors cannot be empty")
@@ -215,10 +380,8 @@ struct BenchmarkRunner {
         let queryK = max(config.k, top100Count)
         let repeats = max(1, repeatRuns)
         let warmups = max(0, warmupRuns)
+        let effectiveConcurrency = max(1, concurrency)
 
-        // Cold timing: capture the very first dispatch *before* any warmup loop runs.
-        // This is a real, measured search; its result is discarded for recall purposes
-        // and the recall pass is run normally below so totals stay consistent.
         let firstQuery = queries[0]
         let coldStart = DispatchTime.now().uptimeNanoseconds
         _ = try await index.search(query: firstQuery, k: queryK)
@@ -227,16 +390,30 @@ struct BenchmarkRunner {
 
         if warmups > 0 {
             for _ in 0..<warmups {
-                _ = try await benchmarkBatch(
-                    index: index,
-                    queryK: queryK,
-                    top1Count: top1Count,
-                    top10Count: top10Count,
-                    top100Count: top100Count,
-                    queries: queries,
-                    expectedNeighbors: expectedNeighbors,
-                    measureLatency: false
-                )
+                if effectiveConcurrency > 1 {
+                    _ = try await benchmarkBatchConcurrent(
+                        index: index,
+                        queryK: queryK,
+                        top1Count: top1Count,
+                        top10Count: top10Count,
+                        top100Count: top100Count,
+                        queries: queries,
+                        expectedNeighbors: expectedNeighbors,
+                        concurrency: effectiveConcurrency,
+                        measureLatency: false
+                    )
+                } else {
+                    _ = try await benchmarkBatch(
+                        index: index,
+                        queryK: queryK,
+                        top1Count: top1Count,
+                        top10Count: top10Count,
+                        top100Count: top100Count,
+                        queries: queries,
+                        expectedNeighbors: expectedNeighbors,
+                        measureLatency: false
+                    )
+                }
             }
         }
 
@@ -248,16 +425,31 @@ struct BenchmarkRunner {
         var totalSearchTimeSeconds = 0.0
 
         for _ in 0..<repeats {
-            let batchStats = try await benchmarkBatch(
-                index: index,
-                queryK: queryK,
-                top1Count: top1Count,
-                top10Count: top10Count,
-                top100Count: top100Count,
-                queries: queries,
-                expectedNeighbors: expectedNeighbors,
-                measureLatency: true
-            )
+            let batchStats: BenchmarkBatchStats
+            if effectiveConcurrency > 1 {
+                batchStats = try await benchmarkBatchConcurrent(
+                    index: index,
+                    queryK: queryK,
+                    top1Count: top1Count,
+                    top10Count: top10Count,
+                    top100Count: top100Count,
+                    queries: queries,
+                    expectedNeighbors: expectedNeighbors,
+                    concurrency: effectiveConcurrency,
+                    measureLatency: true
+                )
+            } else {
+                batchStats = try await benchmarkBatch(
+                    index: index,
+                    queryK: queryK,
+                    top1Count: top1Count,
+                    top10Count: top10Count,
+                    top100Count: top100Count,
+                    queries: queries,
+                    expectedNeighbors: expectedNeighbors,
+                    measureLatency: true
+                )
+            }
 
             recallAt1Total += batchStats.recallAt1
             recallAt10Total += batchStats.recallAt10
@@ -300,7 +492,7 @@ struct BenchmarkRunner {
             memoryAfterQueries: memoryAfterQueries,
             firstQueryLatencyMs: firstQueryLatencyMs,
             warmSteadyMeanMs: warmSteadyMeanMs,
-            concurrency: 1
+            concurrency: effectiveConcurrency
         )
     }
 
@@ -362,6 +554,146 @@ struct BenchmarkRunner {
             recallAt100: recallAt100Total,
             totalSearchSeconds: Double(batchEnd - batchStart) / 1_000_000_000.0
         )
+    }
+
+    private static func benchmarkBatchConcurrent(
+        index: _GraphIndex,
+        queryK: Int,
+        top1Count: Int,
+        top10Count: Int,
+        top100Count: Int,
+        queries: [[Float]],
+        expectedNeighbors: [[UInt32]],
+        concurrency: Int,
+        measureLatency: Bool
+    ) async throws -> BenchmarkBatchStats {
+        let inflight = max(1, concurrency)
+        let queryCount = queries.count
+        let batchStart = DispatchTime.now().uptimeNanoseconds
+
+        var collected: [PerQueryStats] = []
+        collected.reserveCapacity(queryCount)
+
+        try await withThrowingTaskGroup(of: PerQueryStats.self) { group in
+            var dispatched = 0
+            var completed = 0
+
+            // Prime the sliding window with up to `inflight` in-flight tasks.
+            let initialBurst = min(inflight, queryCount)
+            for _ in 0..<initialBurst {
+                let queryIndex = dispatched
+                let query = queries[queryIndex]
+                let expected = expectedNeighbors[queryIndex]
+                group.addTask {
+                    try await runOneQuery(
+                        index: index,
+                        query: query,
+                        expected: expected,
+                        queryK: queryK,
+                        top1Count: top1Count,
+                        top10Count: top10Count,
+                        top100Count: top100Count,
+                        measureLatency: measureLatency
+                    )
+                }
+                dispatched += 1
+            }
+
+            while completed < queryCount {
+                guard let stats = try await group.next() else {
+                    break
+                }
+                collected.append(stats)
+                completed += 1
+
+                if dispatched < queryCount {
+                    let queryIndex = dispatched
+                    let query = queries[queryIndex]
+                    let expected = expectedNeighbors[queryIndex]
+                    group.addTask {
+                        try await runOneQuery(
+                            index: index,
+                            query: query,
+                            expected: expected,
+                            queryK: queryK,
+                            top1Count: top1Count,
+                            top10Count: top10Count,
+                            top100Count: top100Count,
+                            measureLatency: measureLatency
+                        )
+                    }
+                    dispatched += 1
+                }
+            }
+        }
+
+        let batchEnd = DispatchTime.now().uptimeNanoseconds
+
+        var latencies: [Double] = []
+        if measureLatency {
+            latencies.reserveCapacity(collected.count)
+        }
+        var recallAt1Total: Double = 0
+        var recallAt10Total: Double = 0
+        var recallAt100Total: Double = 0
+        for stats in collected {
+            if measureLatency {
+                latencies.append(stats.latencyMs)
+            }
+            recallAt1Total += stats.recallAt1
+            recallAt10Total += stats.recallAt10
+            recallAt100Total += stats.recallAt100
+        }
+
+        return BenchmarkBatchStats(
+            latencies: latencies,
+            recallAt1: recallAt1Total,
+            recallAt10: recallAt10Total,
+            recallAt100: recallAt100Total,
+            totalSearchSeconds: Double(batchEnd - batchStart) / 1_000_000_000.0
+        )
+    }
+
+    private static func runOneQuery(
+        index: _GraphIndex,
+        query: [Float],
+        expected: [UInt32],
+        queryK: Int,
+        top1Count: Int,
+        top10Count: Int,
+        top100Count: Int,
+        measureLatency: Bool
+    ) async throws -> PerQueryStats {
+        let searchStart = DispatchTime.now().uptimeNanoseconds
+        let approx = try await index.search(query: query, k: queryK)
+        let searchEnd = DispatchTime.now().uptimeNanoseconds
+
+        let latencyMs = measureLatency
+            ? Double(searchEnd - searchStart) / 1_000_000.0
+            : 0
+
+        let approxTop1 = BenchmarkIDParser.uint32Set(from: approx, limit: top1Count)
+        let approxTop10 = BenchmarkIDParser.uint32Set(from: approx, limit: top10Count)
+        let approxTop100 = BenchmarkIDParser.uint32Set(from: approx, limit: top100Count)
+
+        let exactTop1 = Set(expected.prefix(top1Count))
+        let exactTop10 = Set(expected.prefix(top10Count))
+        let exactTop100 = Set(expected.prefix(top100Count))
+
+        var r1: Double = 0
+        var r10: Double = 0
+        var r100: Double = 0
+        if !exactTop1.isEmpty {
+            r1 = Double(approxTop1.intersection(exactTop1).count) / Double(exactTop1.count)
+        }
+        if !exactTop10.isEmpty {
+            r10 = Double(approxTop10.intersection(exactTop10).count) / Double(exactTop10.count)
+        }
+        if !exactTop100.isEmpty {
+            r100 = Double(approxTop100.intersection(exactTop100).count) / Double(exactTop100.count)
+        }
+
+        return PerQueryStats(latencyMs: latencyMs, recallAt1: r1, recallAt10: r10, recallAt100: r100)
     }
 
     private static func normalize(_ config: Config) -> Config {
@@ -442,6 +774,13 @@ struct BenchmarkRunner {
         let recallAt10: Double
         let recallAt100: Double
         let totalSearchSeconds: Double
+    }
+
+    private struct PerQueryStats: Sendable {
+        let latencyMs: Double
+        let recallAt1: Double
+        let recallAt10: Double
+        let recallAt100: Double
     }
 }
 
