@@ -62,33 +62,20 @@ struct ErrorModelTests {
         }
     }
 
-    @Test("GraphIndex insert overflow throws indexCapacityExceeded")
-    func capacityCaseThrownAtSource() async throws {
+    @Test("GraphIndex inserts grow storage instead of throwing indexCapacityExceeded")
+    func insertsGrowPastBuildCapacity() async throws {
         let index = GraphIndex(configuration: IndexConfiguration(degree: 2, metric: .l2))
         let baseVectors = seededVectors(count: 4, dim: 8, seed: 11)
         try await index.build(vectors: baseVectors, ids: (0..<baseVectors.count).map { "v\($0)" })
 
-        var overflowCount = 0
         for i in 0..<6 {
-            do {
-                try await index.insert(seededVector(dim: 8, seed: UInt64(100 + i)), id: "overflow-\(i)")
-            } catch let error as ANNSError {
-                guard case .indexCapacityExceeded = error else {
-                    Issue.record("Unexpected ANNSError case on insert \(i): \(error)")
-                    return
-                }
-                overflowCount += 1
-            }
+            try await index.insert(seededVector(dim: 8, seed: UInt64(100 + i)), id: "grown-\(i)")
         }
+        try await index.batchInsert([seededVector(dim: 8, seed: 13)], ids: ["batched-growth"])
 
-        #expect(
-            overflowCount == 2,
-            "Build reserves 2x headroom: 4 inserts fit, the rest must throw typed capacity errors"
-        )
-
-        await expectCase(.indexCapacityExceeded) {
-            try await index.batchInsert([seededVector(dim: 8, seed: 13)], ids: ["batched-overflow"])
-        }
+        #expect(await index.count == 11)
+        let probe = seededVector(dim: 8, seed: 13)
+        #expect(try await index.search(query: probe, k: 1).first?.id == "batched-growth")
     }
 
     @Test("Typed capacity case triggers streaming merge end to end")

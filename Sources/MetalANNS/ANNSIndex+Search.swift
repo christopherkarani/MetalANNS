@@ -6,11 +6,35 @@ extension GraphIndex {
     ///   - searchMode: Overrides `IndexConfiguration.searchMode` for this call.
     ///     `nil` uses the configuration. `.fast` is approximate IVF-flat.
     ///   - nprobe: Overrides `IndexConfiguration.ivfNProbe` for `.fast`.
+    /// - Returns: Up to `k` results ordered by ascending `SearchResult.score`,
+    ///   which is a **distance** (lower is closer). See `Metric` for its meaning
+    ///   per metric and `Metric.similarity(fromDistance:)` to convert it.
     public func search(
         query: [Float],
         k: Int,
         filter: _LegacySearchFilter? = nil,
         metric: Metric? = nil,
+        searchMode: SearchMode? = nil,
+        nprobe: Int? = nil
+    ) async throws -> [SearchResult] {
+        await beginRead()
+        defer { endRead() }
+        return try await searchUnguarded(
+            query: query,
+            k: k,
+            filter: filter,
+            metric: metric,
+            searchMode: searchMode,
+            nprobe: nprobe
+        )
+    }
+
+    /// `search` without the read gate; callers must already hold it.
+    private func searchUnguarded(
+        query: [Float],
+        k: Int,
+        filter: _LegacySearchFilter?,
+        metric: Metric?,
         searchMode: SearchMode? = nil,
         nprobe: Int? = nil
     ) async throws -> [SearchResult] {
@@ -20,6 +44,7 @@ extension GraphIndex {
         guard query.count == vectors.dim else {
             throw ANNSError.dimensionMismatch(expected: vectors.dim, got: query.count)
         }
+        try VectorValidation.requireFinite(query)
         guard k > 0 else {
             return []
         }
@@ -78,12 +103,15 @@ extension GraphIndex {
         filter: _LegacySearchFilter? = nil,
         metric: Metric? = nil
     ) async throws -> [SearchResult] {
+        await beginRead()
+        defer { endRead() }
         guard isBuilt, let vectors, let graph else {
             throw ANNSError.indexEmpty
         }
         guard query.count == vectors.dim else {
             throw ANNSError.dimensionMismatch(expected: vectors.dim, got: query.count)
         }
+        try VectorValidation.requireFinite(query)
         guard maxDistance >= 0 else {
             return []
         }
@@ -145,6 +173,11 @@ extension GraphIndex {
         guard !queries.isEmpty else {
             return []
         }
+        for (index, query) in queries.enumerated() {
+            try VectorValidation.requireFinite(query, index: index)
+        }
+        await beginRead()
+        defer { endRead() }
         if let metrics {
             await metrics.recordBatchSearch()
         }
@@ -229,7 +262,7 @@ extension GraphIndex {
             over: queries,
             maxConcurrency: maxConcurrency
         ) { [self] query in
-            try await search(query: query, k: k, filter: filter, metric: metric)
+            try await searchUnguarded(query: query, k: k, filter: filter, metric: metric)
         }
     }
 
@@ -239,9 +272,19 @@ extension GraphIndex {
         if configuration.hnswConfiguration.enabled, hnsw == nil {
             try rebuildHNSWFromCurrentState()
         }
+        let cpuGraph: [[(UInt32, Float)]]
+        if let cached = cpuGraphCache, cached.count == graph.nodeCount {
+            cpuGraph = cached
+        } else {
+            cpuGraph = extractGraph(from: graph)
+            if graph.nodeCount * graph.degree <= Self.maxCachedCPUGraphEdges {
+                cpuGraphCache = cpuGraph
+            }
+        }
+        // Vectors are read in place; only visited rows are copied.
         return PreparedCPUSearch(
-            vectors: extractVectors(from: vectors),
-            graph: extractGraph(from: graph),
+            vectors: vectors,
+            graph: cpuGraph,
             hnsw: hnsw,
             baseMetric: configuration.metric
         )

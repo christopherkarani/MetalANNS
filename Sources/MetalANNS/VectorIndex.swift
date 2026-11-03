@@ -26,14 +26,42 @@ public struct VectorRecord<Key: IndexKey>: Sendable {
     }
 }
 
+/// One search hit.
+///
+/// Results are ordered nearest first: ascending `distance`, which is the same
+/// as descending `similarity`.
+///
+/// | `metric` | `distance` (lower is closer) | `similarity` (higher is closer) |
+/// |---|---|---|
+/// | `.cosine` | `1 − cos θ`, in `[0, 2]` | `cos θ`, in `[−1, 1]` |
+/// | `.innerProduct` | `−(a · b)` | `a · b` |
+/// | `.l2` | squared Euclidean `‖a − b‖²` | `−‖a − b‖²` |
+/// | `.hamming` | differing bits | `−(differing bits)` |
 public struct VectorNeighbor<Key: IndexKey>: Sendable {
     public let id: Key
-    public let score: Float
+    /// Distance under `metric`; lower is closer.
+    public let distance: Float
+    /// The metric `distance` was computed with (the per-call override, or the
+    /// index's configured metric).
+    public let metric: Metric
     public let internalID: UInt32
 
-    public init(id: Key, score: Float, internalID: UInt32) {
+    /// `distance` converted to a score where higher is closer; see the table
+    /// on `VectorNeighbor`.
+    public var similarity: Float {
+        metric.similarity(fromDistance: distance)
+    }
+
+    @available(
+        *, unavailable,
+        message: "score was a distance (lower is closer). Use `distance`, or `similarity` for higher-is-closer."
+    )
+    public var score: Float { distance }
+
+    public init(id: Key, distance: Float, metric: Metric, internalID: UInt32) {
         self.id = id
-        self.score = score
+        self.distance = distance
+        self.metric = metric
         self.internalID = internalID
     }
 }
@@ -148,11 +176,21 @@ public enum QueryFilterBuilder {
     }
 }
 
+/// Type-safe vector index.
+///
+/// Concurrency: `VectorIndex` is a `Sendable` value wrapping a `GraphIndex`
+/// actor, so copies may be used from any task. Searches run concurrently with
+/// each other; mutations (`insert`, `batchInsert`, `compact`) are exclusive and
+/// wait for in-flight searches, so a search never observes a half-applied
+/// mutation and no mutation is lost to actor re-entrancy.
 public struct VectorIndex<Key: IndexKey, State>: Sendable {
     private let rawIndex: GraphIndex
+    /// Metric reported on results when a search does not override it.
+    private let defaultMetric: Metric
 
-    private init(rawIndex: GraphIndex) {
+    private init(rawIndex: GraphIndex, defaultMetric: Metric) {
         self.rawIndex = rawIndex
+        self.defaultMetric = defaultMetric
     }
 
     /// Power-user escape hatch that exposes the underlying `GraphIndex` actor.
@@ -165,7 +203,7 @@ public struct VectorIndex<Key: IndexKey, State>: Sendable {
         rawIndex
     }
 
-    fileprivate static func mapNeighbors(_ results: [SearchResult]) -> [VectorNeighbor<Key>] {
+    fileprivate static func mapNeighbors(_ results: [SearchResult], metric: Metric) -> [VectorNeighbor<Key>] {
         results.compactMap { result in
             let candidate: Key? =
                 if !result.id.isEmpty {
@@ -179,16 +217,22 @@ public struct VectorIndex<Key: IndexKey, State>: Sendable {
             guard let id = candidate else {
                 return nil
             }
-            return VectorNeighbor(id: id, score: result.score, internalID: result.internalID)
+            return VectorNeighbor(id: id, distance: result.score, metric: metric, internalID: result.internalID)
         }
     }
 }
 
 extension VectorIndex where State == VectorIndexState.Unbuilt {
     public init(configuration: IndexConfiguration = .default) {
-        self.init(rawIndex: GraphIndex(configuration: configuration))
+        self.init(rawIndex: GraphIndex(configuration: configuration), defaultMetric: configuration.metric)
     }
 
+    /// Builds the index. Any non-zero count works: with `count <= degree` the
+    /// exact neighbour graph is built, and it fills in as vectors are inserted.
+    ///
+    /// Throws `ANNSError.nonFiniteVector` for NaN/±inf input and
+    /// `CancellationError` when the calling task is cancelled (checked between
+    /// construction iterations).
     public consuming func build(records: [VectorRecord<Key>]) async throws -> VectorIndex<Key, VectorIndexState.Ready> {
         guard !records.isEmpty else {
             throw ANNSError.constructionFailed("Cannot build index with empty records")
@@ -196,17 +240,37 @@ extension VectorIndex where State == VectorIndexState.Unbuilt {
         let vectors = records.map(\.vector)
         let ids = records.map { String($0.id) }
         try await rawIndex.build(vectors: vectors, ids: ids)
-        return VectorIndex<Key, VectorIndexState.Ready>(rawIndex: rawIndex)
+        return VectorIndex<Key, VectorIndexState.Ready>(rawIndex: rawIndex, defaultMetric: defaultMetric)
     }
 
     public consuming func build(vectors: [[Float]], ids: [Key]) async throws -> VectorIndex<Key, VectorIndexState.Ready>
     {
-        try await build(records: zip(ids, vectors).map { VectorRecord(id: $0.0, vector: $0.1) })
+        guard vectors.count == ids.count else {
+            throw ANNSError.constructionFailed("Vector and ID counts do not match")
+        }
+        try await rawIndex.build(vectors: vectors, ids: ids.map { String($0) })
+        return VectorIndex<Key, VectorIndexState.Ready>(rawIndex: rawIndex, defaultMetric: defaultMetric)
+    }
+
+    /// Builds from one row-major buffer of `ids.count × dimension` floats,
+    /// without materializing `[[Float]]`. The buffer is copied once, into the
+    /// index's vector storage; pass the array you already hold (copy-on-write
+    /// means no copy is made on the way in).
+    public consuming func build(
+        flatVectors: [Float],
+        dimension: Int,
+        ids: [Key]
+    ) async throws -> VectorIndex<Key, VectorIndexState.Ready> {
+        try await rawIndex.build(flatVectors: flatVectors, dimension: dimension, ids: ids.map { String($0) })
+        return VectorIndex<Key, VectorIndexState.Ready>(rawIndex: rawIndex, defaultMetric: defaultMetric)
     }
 
     public static func load(from url: URL) async throws -> VectorIndex<Key, VectorIndexState.Ready> {
         let loaded = try await GraphIndex.load(from: url)
-        return VectorIndex<Key, VectorIndexState.Ready>(rawIndex: loaded)
+        return VectorIndex<Key, VectorIndexState.Ready>(
+            rawIndex: loaded,
+            defaultMetric: await loaded.configuration.metric
+        )
     }
 
     public static func loadReadOnly(
@@ -220,7 +284,10 @@ extension VectorIndex where State == VectorIndexState.Unbuilt {
         case .diskBacked:
             loaded = try await GraphIndex.loadDiskBacked(from: url)
         }
-        return VectorIndex<Key, VectorIndexState.ReadOnly>(rawIndex: loaded)
+        return VectorIndex<Key, VectorIndexState.ReadOnly>(
+            rawIndex: loaded,
+            defaultMetric: await loaded.configuration.metric
+        )
     }
 }
 
@@ -231,6 +298,9 @@ extension VectorIndex where State == VectorIndexState.Ready {
         }
     }
 
+    /// Inserts a vector. Storage grows as needed (no fixed capacity). An id
+    /// that was deleted can be inserted again; it takes its old slot back.
+    /// Throws `ANNSError.idAlreadyExists` for a live id.
     public func insert(_ record: VectorRecord<Key>) async throws {
         try await rawIndex.insert(record.vector, id: String(record.id))
     }
@@ -241,10 +311,13 @@ extension VectorIndex where State == VectorIndexState.Ready {
         try await rawIndex.batchInsert(vectors, ids: ids)
     }
 
+    /// Soft-deletes `id`: it stops appearing in results immediately and can be
+    /// re-inserted. `compact()` reclaims deleted slots.
     public func delete(id: Key) async throws {
         try await rawIndex.delete(id: String(id))
     }
 
+    /// Rebuilds the graph without deleted vectors and reclaims their slots.
     public func compact() async throws {
         try await rawIndex.compact()
     }
@@ -281,7 +354,7 @@ extension VectorIndex where State == VectorIndexState.Ready {
             filter: filter().toCoreFilter(),
             metric: metric
         )
-        return Self.mapNeighbors(results)
+        return Self.mapNeighbors(results, metric: metric ?? defaultMetric)
     }
 
     public func batchSearch(
@@ -296,9 +369,11 @@ extension VectorIndex where State == VectorIndexState.Ready {
             filter: filter().toCoreFilter(),
             metric: metric
         )
-        return results.map(Self.mapNeighbors)
+        return results.map { Self.mapNeighbors($0, metric: metric ?? defaultMetric) }
     }
 
+    /// Returns every vector whose `distance` is at most `maxDistance`
+    /// (distance units of the search metric; see `VectorNeighbor`).
     public func rangeSearch(
         query: [Float],
         maxDistance: Float,
@@ -313,7 +388,7 @@ extension VectorIndex where State == VectorIndexState.Ready {
             filter: filter().toCoreFilter(),
             metric: metric
         )
-        return Self.mapNeighbors(results)
+        return Self.mapNeighbors(results, metric: metric ?? defaultMetric)
     }
 }
 
@@ -340,7 +415,7 @@ extension VectorIndex where State == VectorIndexState.ReadOnly {
             filter: filter().toCoreFilter(),
             metric: metric
         )
-        return Self.mapNeighbors(results)
+        return Self.mapNeighbors(results, metric: metric ?? defaultMetric)
     }
 
     public func batchSearch(
@@ -355,9 +430,11 @@ extension VectorIndex where State == VectorIndexState.ReadOnly {
             filter: filter().toCoreFilter(),
             metric: metric
         )
-        return results.map(Self.mapNeighbors)
+        return results.map { Self.mapNeighbors($0, metric: metric ?? defaultMetric) }
     }
 
+    /// Returns every vector whose `distance` is at most `maxDistance`
+    /// (distance units of the search metric; see `VectorNeighbor`).
     public func rangeSearch(
         query: [Float],
         maxDistance: Float,
@@ -372,6 +449,6 @@ extension VectorIndex where State == VectorIndexState.ReadOnly {
             filter: filter().toCoreFilter(),
             metric: metric
         )
-        return Self.mapNeighbors(results)
+        return Self.mapNeighbors(results, metric: metric ?? defaultMetric)
     }
 }

@@ -70,7 +70,7 @@ struct SearchRequest: Sendable {
 /// CPU traversal inputs prepared on the `GraphIndex` actor (lazy HNSW rebuild
 /// plus vector/graph extraction) and handed to the engine's fallback ladder.
 struct PreparedCPUSearch: Sendable {
-    let vectors: [[Float]]
+    let vectors: any VectorStorage
     let graph: [[(UInt32, Float)]]
     let hnsw: HNSWLayers?
     let baseMetric: Metric

@@ -47,6 +47,7 @@ extension GraphIndex {
         self.mmapLifetime = mmapLifetime
         self.pendingRepairIDs.removeAll()
         self.hnsw = nil
+        self.cpuGraphCache = nil
     }
 
     internal func rebuildHNSWFromCurrentState() throws(ANNSError) {
@@ -70,10 +71,6 @@ extension GraphIndex {
             metric: configuration.metric,
             config: configuration.hnswConfiguration
         )
-    }
-
-    internal func extractVectors(from vectors: any VectorStorage) -> [[Float]] {
-        (0..<vectors.count).map { vectors.vector(at: $0) }
     }
 
     internal func extractGraph(from graph: GraphBuffer) -> [[(UInt32, Float)]] {

@@ -88,12 +88,7 @@ struct SearchExecutionTests {
             ],
             prepareCPU: {
                 await log.append("ladder")
-                return PreparedCPUSearch(
-                    vectors: [[1, 0, 0, 0]],
-                    graph: [[(UInt32.max, 0)]],
-                    hnsw: HNSWLayers(),
-                    baseMetric: .l2
-                )
+                return try makeLadderInputs()
             },
             metrics: nil
         )
@@ -260,8 +255,11 @@ struct SearchExecutionTests {
     }
 
     private func makeLadderInputs() throws -> PreparedCPUSearch {
-        PreparedCPUSearch(
-            vectors: [[1, 0, 0, 0]],
+        let vectors = try VectorBuffer(capacity: 1, dim: 4)
+        try vectors.insert(vector: [1, 0, 0, 0], at: 0)
+        vectors.setCount(1)
+        return PreparedCPUSearch(
+            vectors: vectors,
             graph: [[(UInt32.max, 0)]],
             hnsw: HNSWLayers(),
             baseMetric: .l2

@@ -100,6 +100,7 @@ public enum NNDescentCPU {
         }
 
         for iteration in 0..<maxIterations {
+            try Task.checkCancellation()
             var reverse = [[Int]](repeating: [], count: nodeCount)
             for source in 0..<nodeCount {
                 for (targetID, _) in graph[source] {
@@ -113,6 +114,9 @@ public enum NNDescentCPU {
             var updateCount = 0
 
             for node in 0..<nodeCount {
+                if node & 255 == 0 {
+                    try Task.checkCancellation()
+                }
                 let markToken = ((iteration + 1) * nodeCount) + node
                 candidateScratch.removeAll(keepingCapacity: true)
                 for (neighborID, _) in graph[node] {

@@ -115,6 +115,7 @@ public enum NNDescentGPU {
             throw ANNSError.constructionFailed("maxReverse \(maxReverse) exceeds local_join reverse array limit (128)")
         }
 
+        try Task.checkCancellation()
         try await randomInit(context: context, graph: graph, nodeCount: nodeCount)
         try await computeInitialDistances(
             context: context,
@@ -159,6 +160,7 @@ public enum NNDescentGPU {
         let updateCountPointer = updateCountBuffer.contents().bindMemory(to: UInt32.self, capacity: 1)
 
         for iteration in 0..<maxIterations {
+            try Task.checkCancellation()
             for i in 0..<nodeCount {
                 reverseCounts[i] = 0
             }
@@ -219,6 +221,7 @@ public enum NNDescentGPU {
             }
         }
 
+        try Task.checkCancellation()
         try await sortNeighborLists(context: context, graph: graph, nodeCount: nodeCount)
         graph.setCount(nodeCount)
     }

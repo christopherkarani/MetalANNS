@@ -42,6 +42,9 @@ public enum IncrementalBuilder {
             degree: degree,
             metric: metric
         )
+        // A reused slot (re-insert after delete) is already reachable in the
+        // graph; never link a node to itself.
+        .filter { $0.nodeID != UInt32(internalID) }
 
         var neighborIDs = Array(repeating: UInt32.max, count: degree)
         var neighborDistances = Array(repeating: Float.greatestFiniteMagnitude, count: degree)

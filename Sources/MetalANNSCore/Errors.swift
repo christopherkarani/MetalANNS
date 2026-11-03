@@ -16,6 +16,9 @@ public enum ANNSError: Error, Sendable {
     case gpuResourceExhausted(String)
     case gpuExecutionFailed(String)
     case indexCapacityExceeded
+    /// An input vector contains NaN or ±infinity. `index` is the vector's
+    /// position in the call's input (always 0 for single-vector calls).
+    case nonFiniteVector(index: Int)
 }
 
 extension ANNSError {

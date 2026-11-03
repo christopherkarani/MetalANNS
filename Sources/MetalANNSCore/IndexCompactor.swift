@@ -97,39 +97,20 @@ public enum IndexCompactor {
         let compactedGraph = try GraphBuffer(capacity: newCapacity, degree: targetDegree, device: device)
         let rebuiltEntryPoint: UInt32
 
-        if survivingCount == 1 {
-            let ids = Array(repeating: UInt32.max, count: targetDegree)
-            let distances = Array(repeating: Float.greatestFiniteMagnitude, count: targetDegree)
-            try compactedGraph.setNeighbors(of: 0, ids: ids, distances: distances)
-            compactedGraph.setCount(1)
+        if survivingCount <= targetDegree {
+            // Too few nodes for NN-Descent: the exact graph is cheap and optimal.
+            try ExactGraphBuilder.build(vectors: denseVectors, into: compactedGraph, metric: metric)
             rebuiltEntryPoint = 0
         } else {
-            let rebuildDegree = max(1, min(targetDegree, survivingCount - 1))
-            if rebuildDegree == targetDegree {
-                rebuiltEntryPoint = try await rebuildIntoGraph(
-                    vectors: denseVectors,
-                    vectorStorage: compactedVectors,
-                    graph: compactedGraph,
-                    metric: metric,
-                    maxIterations: maxIterations,
-                    convergenceThreshold: convergenceThreshold,
-                    context: context
-                )
-            } else {
-                let reducedGraph = try GraphBuffer(capacity: survivingCount, degree: rebuildDegree, device: device)
-                let reducedEntryPoint = try await rebuildIntoGraph(
-                    vectors: denseVectors,
-                    vectorStorage: compactedVectors,
-                    graph: reducedGraph,
-                    metric: metric,
-                    maxIterations: maxIterations,
-                    convergenceThreshold: convergenceThreshold,
-                    context: context
-                )
-                try expandGraph(from: reducedGraph, into: compactedGraph, nodeCount: survivingCount)
-                compactedGraph.setCount(survivingCount)
-                rebuiltEntryPoint = reducedEntryPoint
-            }
+            rebuiltEntryPoint = try await rebuildIntoGraph(
+                vectors: denseVectors,
+                vectorStorage: compactedVectors,
+                graph: compactedGraph,
+                metric: metric,
+                maxIterations: maxIterations,
+                convergenceThreshold: convergenceThreshold,
+                context: context
+            )
         }
 
         // FIXME: Major — MetadataStore is not passed through compaction.
@@ -201,27 +182,6 @@ public enum IndexCompactor {
                 distances[slot] = neighbors[slot].1
             }
             try graph.setNeighbors(of: node, ids: ids, distances: distances)
-        }
-    }
-
-    private static func expandGraph(
-        from reduced: GraphBuffer,
-        into expanded: GraphBuffer,
-        nodeCount: Int
-    ) throws {
-        for nodeID in 0..<nodeCount {
-            let reducedIDs = reduced.neighborIDs(of: nodeID)
-            let reducedDistances = reduced.neighborDistances(of: nodeID)
-
-            var ids = Array(repeating: UInt32.max, count: expanded.degree)
-            var distances = Array(repeating: Float.greatestFiniteMagnitude, count: expanded.degree)
-
-            for slot in 0..<min(reduced.degree, expanded.degree) {
-                ids[slot] = reducedIDs[slot]
-                distances[slot] = reducedDistances[slot]
-            }
-
-            try expanded.setNeighbors(of: nodeID, ids: ids, distances: distances)
         }
     }
 }
