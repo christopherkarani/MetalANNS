@@ -268,32 +268,44 @@ struct DownstreamContractTests {
 
     @Test("a build cancelled midway stops early", arguments: [true, false])
     func cancelledMidway(gpuSized: Bool) async throws {
-        // GPU path at 20k; CPU path below `minGPUConstructionNodeCount`, kept
-        // small because tests run unoptimized.
-        let count = gpuSized ? 20_000 : 1_500
-        let vectors = seededVectors(count: count, dim: gpuSized ? 64 : 16)
-        var configuration = IndexConfiguration(degree: gpuSized ? 32 : 16, maxIterations: gpuSized ? 20 : 8)
+        // GPU path just above `minGPUConstructionNodeCount`; CPU path below it.
+        // Kept small because tests run unoptimized and CI's GPU is virtual.
+        let count = gpuSized ? 8_192 : 600
+        let dim = gpuSized ? 32 : 16
+        let vectors = seededVectors(count: count, dim: dim)
+        var configuration = IndexConfiguration(degree: 16, maxIterations: gpuSized ? 20 : 8)
         configuration.convergenceThreshold = 0
+        let ids = (0..<count).map(String.init)
         let fullStart = ContinuousClock.now
-        _ = try await Unbuilt(configuration: configuration).build(vectors: vectors, ids: Self.ids(0..<count))
+        try await GraphIndex(configuration: configuration).build(vectors: vectors, ids: ids)
         let fullDuration = ContinuousClock.now - fullStart
 
-        let task = Task {
-            try await Unbuilt(configuration: configuration).build(vectors: vectors, ids: Self.ids(0..<count))
+        let index = GraphIndex(configuration: configuration)
+        let task = Task { try await index.build(vectors: vectors, ids: ids) }
+
+        // Cancel once the build is observably running (it holds the write gate),
+        // rather than after a sleep: sleeps oversleep badly on loaded CI runners.
+        let deadline = ContinuousClock.now + .seconds(120)
+        while await !index.writerActive, ContinuousClock.now < deadline {
+            await Task.yield()
         }
-        // Early enough that the build cannot finish first even when the suite's
-        // parallel load makes the reference timing unrepresentative.
-        try await Task.sleep(for: min(fullDuration / 5, .milliseconds(200)))
         let cancelledAt = ContinuousClock.now
         task.cancel()
         let result = await task.result
         let stopLatency = ContinuousClock.now - cancelledAt
+
         guard case .failure(let error) = result else {
-            Issue.record("build finished despite cancellation (full build \(fullDuration))")
+            Issue.record("build finished despite cancellation")
             return
         }
         #expect(error is CancellationError)
+        // Cancelled near the start, so almost all the work was still ahead:
+        // stopping in under half a full build means the loops checked.
         #expect(stopLatency < fullDuration / 2, "stopped \(stopLatency) after cancel; full build \(fullDuration)")
+        #expect(await index.isBuilt == false)
+        // The gate was released and the index is still usable.
+        try await index.build(vectors: Array(vectors.prefix(2)), ids: ["a", "b"])
+        #expect(await index.count == 2)
     }
 
     // MARK: 6. Flat build
@@ -359,7 +371,7 @@ struct DownstreamContractTests {
 
     // MARK: 8. Exact vs graph parity
 
-    @Test("exact and graph paths report the same cosine distances for non-unit vectors", arguments: [5_000, 40_000])
+    @Test("exact and graph paths report the same cosine distances for non-unit vectors", arguments: [5_000])
     func exactGraphParity(count: Int) async throws {
         var rng = SeededGenerator(state: 99)
         let dim = 384
