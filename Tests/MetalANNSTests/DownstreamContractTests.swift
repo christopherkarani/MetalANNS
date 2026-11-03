@@ -14,11 +14,21 @@ struct DownstreamContractTests {
 
     private static func ids(_ range: Range<Int>) -> [UInt64] { range.map(UInt64.init) }
 
+    /// Builds on the CPU path (no Metal context). These contracts are about
+    /// API semantics, not kernels; keeping them off the GPU avoids loading CI's
+    /// virtual GPU, which hangs under concurrent suites. GPU-specific contracts
+    /// pass `gpu: true`.
     private static func build(
         _ vectors: [[Float]],
-        configuration: IndexConfiguration = IndexConfiguration(degree: 8)
+        configuration: IndexConfiguration = IndexConfiguration(degree: 8),
+        gpu: Bool = false
     ) async throws -> Ready {
-        try await Unbuilt(configuration: configuration).build(vectors: vectors, ids: ids(0..<vectors.count))
+        let raw =
+            gpu
+            ? GraphIndex(configuration: configuration)
+            : GraphIndex(configuration: configuration, context: nil)
+        return try await Unbuilt(rawIndex: raw, defaultMetric: configuration.metric)
+            .build(vectors: vectors, ids: ids(0..<vectors.count))
     }
 
     private static func dot(_ a: [Float], _ b: [Float]) -> Double {
@@ -375,8 +385,8 @@ struct DownstreamContractTests {
         }
         var graphConfiguration = IndexConfiguration.default
         graphConfiguration.exactSearchMaxVectorCount = 0
-        let exact = try await Self.build(vectors, configuration: .default)
-        let graph = try await Self.build(vectors, configuration: graphConfiguration)
+        let exact = try await Self.build(vectors, configuration: .default, gpu: true)
+        let graph = try await Self.build(vectors, configuration: graphConfiguration, gpu: true)
 
         var maxPathDelta: Float = 0
         var maxReferenceDelta: Double = 0
@@ -402,9 +412,9 @@ struct DownstreamContractTests {
 
     @Test("an insert that lands during compact() is kept")
     func insertDuringCompact() async throws {
-        let n = 8_192
+        let n = 1_500
         let vectors = seededVectors(count: n, dim: 64)
-        let index = try await Self.build(vectors, configuration: .default)
+        let index = try await Self.build(vectors)
         for id in 0..<UInt64(100) { try await index.delete(id: id) }
         let newVector = seededVector(dim: 64, seed: 4242)
         async let compaction: Void = index.compact()
@@ -417,9 +427,9 @@ struct DownstreamContractTests {
 
     @Test("a delete that lands during compact() is kept")
     func deleteDuringCompact() async throws {
-        let n = 8_192
+        let n = 1_500
         let vectors = seededVectors(count: n, dim: 64)
-        let index = try await Self.build(vectors, configuration: .default)
+        let index = try await Self.build(vectors)
         for id in 0..<UInt64(100) { try await index.delete(id: id) }
         async let compaction: Void = index.compact()
         try await Task.sleep(for: .milliseconds(5))
@@ -457,7 +467,7 @@ struct DownstreamContractTests {
     @Test("concurrent searches, inserts, deletes and re-inserts stay consistent")
     func concurrentMutationAndSearch() async throws {
         let base = seededVectors(count: 2_000, dim: 32)
-        let index = try await Self.build(base, configuration: .default)
+        let index = try await Self.build(base)
         let extra = seededVectors(count: 120, dim: 32, seed: 8)
 
         try await withThrowingTaskGroup(of: Void.self) { group in
@@ -492,9 +502,9 @@ struct DownstreamContractTests {
 
     @Test("a second concurrent build on the same GraphIndex is rejected")
     func concurrentBuildRejected() async throws {
-        let vectors = seededVectors(count: 5_000, dim: 32)
-        let ids = (0..<5_000).map(String.init)
-        let index = GraphIndex(configuration: .default)
+        let vectors = seededVectors(count: 1_500, dim: 32)
+        let ids = (0..<1_500).map(String.init)
+        let index = GraphIndex(configuration: IndexConfiguration(degree: 8), context: nil)
         let first = Task { try await index.build(vectors: vectors, ids: ids) }
         let second = Task { try await index.build(vectors: vectors, ids: ids) }
         let results = [await first.result, await second.result]

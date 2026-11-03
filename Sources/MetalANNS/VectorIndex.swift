@@ -188,7 +188,7 @@ public struct VectorIndex<Key: IndexKey, State>: Sendable {
     /// Metric reported on results when a search does not override it.
     private let defaultMetric: Metric
 
-    private init(rawIndex: GraphIndex, defaultMetric: Metric) {
+    internal init(rawIndex: GraphIndex, defaultMetric: Metric) {
         self.rawIndex = rawIndex
         self.defaultMetric = defaultMetric
     }
