@@ -46,6 +46,26 @@ Open issue: at the default `efSearch`, graph-only recall@10 at 100k and 1M is
 far below 0.95. This path is not the default (exact search covers up to 1M
 vectors), so 0.4.0 does not change it.
 
+### Exact search with filters, many deletes, or k > 256
+
+Default settings, 100k × 384 cosine, GPU context, 50 queries (20 for k=300).
+Recall is against float32 brute force over the rows the query is allowed to
+return.
+
+| case | 0.3.0 p50 | 0.3.0 recall | 0.4.0 p50 | 0.4.0 recall |
+|---|---|---|---|---|
+| unfiltered, k=10 | 1.41 ms | 1.000 | 1.43 ms | 1.000 |
+| k=300 | 2.99 ms | 0.265 | 1.48 ms | 1.000 |
+| 300 deletes, k=10 | 3.05 ms | 0.422 | 1.35 ms | 1.000 |
+| 10% filter, k=10 | 0.80 ms | 0.164 | 5.14 ms | 1.000 |
+
+The fused exact scan fetches at most 256 rows, and filtered searches skipped it.
+So a filter, k + deleted > 256, or any range search (default `limit` 1000)
+silently fell back to the graph. These requests now run a host scan that skips
+deleted and non-matching rows during the scan. Filtered search is slower because
+it evaluates the filter for every row; it was fast only because it was wrong.
+Unfiltered host-tier search (30k, no GPU) is unchanged: 0.33 → 0.32 ms.
+
 ### Graph pruning (component, same random degree-32 graph, identical output)
 
 | n × 384 | 0.3.0 sequential | 0.4.0 parallel |
