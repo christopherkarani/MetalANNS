@@ -40,6 +40,13 @@ public actor GraphIndex {
     /// small per-node header); larger graphs are extracted per query.
     internal var cpuGraphCache: [[(UInt32, Float)]]?
     internal static let maxCachedCPUGraphEdges = 4 * 1_024 * 1_024
+    /// Test seam: called at each NN-Descent iteration of `build`. Always nil
+    /// outside tests.
+    internal var buildIterationObserver: (@Sendable (Int) -> Void)?
+
+    internal func setBuildIterationObserver(_ observer: (@Sendable (Int) -> Void)?) {
+        buildIterationObserver = observer
+    }
 
     public init(configuration: IndexConfiguration = .default) {
         self.configuration = configuration

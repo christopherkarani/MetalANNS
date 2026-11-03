@@ -102,6 +102,31 @@ public enum NNDescentGPU {
         maxIterations: Int = 20,
         convergenceThreshold: Float = 0.001
     ) async throws {
+        try await build(
+            context: context,
+            vectors: vectors,
+            graph: graph,
+            nodeCount: nodeCount,
+            metric: metric,
+            maxIterations: maxIterations,
+            convergenceThreshold: convergenceThreshold,
+            iterationObserver: nil
+        )
+    }
+
+    /// `iterationObserver` is called with the iteration index right after each
+    /// iteration's cancellation checkpoint. Tests use it to cancel at a known
+    /// point; production passes `nil`.
+    package static func build(
+        context: MetalContext,
+        vectors: any VectorStorage,
+        graph: GraphBuffer,
+        nodeCount: Int,
+        metric: Metric,
+        maxIterations: Int,
+        convergenceThreshold: Float,
+        iterationObserver: (@Sendable (Int) -> Void)?
+    ) async throws {
         guard nodeCount > 0, nodeCount <= graph.capacity, nodeCount <= vectors.capacity else {
             throw ANNSError.constructionFailed("nodeCount out of bounds for graph/vector capacity")
         }
@@ -161,6 +186,7 @@ public enum NNDescentGPU {
 
         for iteration in 0..<maxIterations {
             try Task.checkCancellation()
+            iterationObserver?(iteration)
             for i in 0..<nodeCount {
                 reverseCounts[i] = 0
             }

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import os
 
 @testable import MetalANNS
 @testable import MetalANNSCore
@@ -269,41 +270,34 @@ struct DownstreamContractTests {
     @Test("a build cancelled midway stops early", arguments: [true, false])
     func cancelledMidway(gpuSized: Bool) async throws {
         // GPU path just above `minGPUConstructionNodeCount`; CPU path below it.
-        // Kept small because tests run unoptimized and CI's GPU is virtual.
         let count = gpuSized ? 8_192 : 600
-        let dim = gpuSized ? 32 : 16
-        let vectors = seededVectors(count: count, dim: dim)
-        var configuration = IndexConfiguration(degree: 16, maxIterations: gpuSized ? 20 : 8)
+        let vectors = seededVectors(count: count, dim: gpuSized ? 32 : 16)
+        var configuration = IndexConfiguration(degree: 16, maxIterations: 8)
         configuration.convergenceThreshold = 0
-        let ids = (0..<count).map(String.init)
-        let fullStart = ContinuousClock.now
-        try await GraphIndex(configuration: configuration).build(vectors: vectors, ids: ids)
-        let fullDuration = ContinuousClock.now - fullStart
-
         let index = GraphIndex(configuration: configuration)
-        let task = Task { try await index.build(vectors: vectors, ids: ids) }
 
-        // Cancel once the build is observably running (it holds the write gate),
-        // rather than after a sleep: sleeps oversleep badly on loaded CI runners.
-        let deadline = ContinuousClock.now + .seconds(120)
-        while await !index.writerActive, ContinuousClock.now < deadline {
-            await Task.yield()
+        // Deterministic, no timing: the build cancels its own task from inside
+        // NN-Descent iteration 0, and must not reach iteration 1.
+        let iterations = OSAllocatedUnfairLock(initialState: [Int]())
+        await index.setBuildIterationObserver { iteration in
+            iterations.withLock { $0.append(iteration) }
+            if iteration == 0 {
+                withUnsafeCurrentTask { $0?.cancel() }
+            }
         }
-        let cancelledAt = ContinuousClock.now
-        task.cancel()
-        let result = await task.result
-        let stopLatency = ContinuousClock.now - cancelledAt
+        let result = await Task {
+            try await index.build(vectors: vectors, ids: (0..<count).map(String.init))
+        }.result
 
         guard case .failure(let error) = result else {
             Issue.record("build finished despite cancellation")
             return
         }
         #expect(error is CancellationError)
-        // Cancelled near the start, so almost all the work was still ahead:
-        // stopping in under half a full build means the loops checked.
-        #expect(stopLatency < fullDuration / 2, "stopped \(stopLatency) after cancel; full build \(fullDuration)")
+        #expect(iterations.withLock { $0 } == [0], "NN-Descent kept iterating after cancellation")
         #expect(await index.isBuilt == false)
         // The gate was released and the index is still usable.
+        await index.setBuildIterationObserver(nil)
         try await index.build(vectors: Array(vectors.prefix(2)), ids: ["a", "b"])
         #expect(await index.count == 2)
     }

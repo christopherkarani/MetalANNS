@@ -223,7 +223,8 @@ extension GraphIndex {
                 nodeCount: nodeCount,
                 metric: configuration.metric,
                 maxIterations: configuration.maxIterations,
-                convergenceThreshold: configuration.convergenceThreshold
+                convergenceThreshold: configuration.convergenceThreshold,
+                iterationObserver: buildIterationObserver
             )
             return 0
         }
@@ -234,7 +235,8 @@ extension GraphIndex {
             degree: configuration.degree,
             metric: configuration.metric,
             maxIterations: configuration.maxIterations,
-            convergenceThreshold: configuration.convergenceThreshold
+            convergenceThreshold: configuration.convergenceThreshold,
+            iterationObserver: buildIterationObserver
         )
 
         for nodeID in 0..<cpuResult.graph.count {
