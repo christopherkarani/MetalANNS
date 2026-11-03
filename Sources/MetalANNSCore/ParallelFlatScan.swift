@@ -35,6 +35,7 @@ enum ParallelFlatScan {
         let chunkSize: Int
         let dotsBase: UnsafeMutablePointer<Float>
         let results: UnsafeMutableBufferPointer<[Entry]>
+        let excluded: UnsafePointer<Bool>?
 
         init(
             query: UnsafePointer<Float>,
@@ -46,7 +47,8 @@ enum ParallelFlatScan {
             metric: Metric,
             chunkSize: Int,
             dotsBase: UnsafeMutablePointer<Float>,
-            results: UnsafeMutableBufferPointer<[Entry]>
+            results: UnsafeMutableBufferPointer<[Entry]>,
+            excluded: UnsafePointer<Bool>?
         ) {
             self.query = query
             self.corpus = corpus
@@ -58,6 +60,7 @@ enum ParallelFlatScan {
             self.chunkSize = chunkSize
             self.dotsBase = dotsBase
             self.results = results
+            self.excluded = excluded
         }
 
         func run(slice: Int, vectorCount: Int) {
@@ -75,7 +78,8 @@ enum ParallelFlatScan {
                 norms: norms,
                 queryNormSq: queryNormSq,
                 topK: topK,
-                metric: metric
+                metric: metric,
+                excluded: excluded
             )
         }
     }
@@ -93,6 +97,8 @@ enum ParallelFlatScan {
     ///   - corpus: row-major Float32 matrix, `vectorCount` rows × `dim` columns.
     ///   - norms: cached squared row norms; required for `.cosine`/`.l2`.
     ///   - queryNormSq: squared norm of `query`; used by `.cosine`/`.l2`.
+    ///   - excluded: optional per-row mask (`vectorCount` entries); rows set to
+    ///     true are skipped, so the result is the exact top-K of the rest.
     static func search(
         query: UnsafePointer<Float>,
         corpus: UnsafePointer<Float>,
@@ -101,7 +107,8 @@ enum ParallelFlatScan {
         vectorCount: Int,
         dim: Int,
         topK: Int,
-        metric: Metric
+        metric: Metric,
+        excluded: UnsafePointer<Bool>? = nil
     ) -> [Entry] {
         guard vectorCount > 0, topK > 0 else { return [] }
         let k = min(topK, vectorCount)
@@ -110,7 +117,7 @@ enum ParallelFlatScan {
         if slices <= 1 {
             return scanSlice(
                 query: query, corpus: corpus, norms: norms, queryNormSq: queryNormSq,
-                range: 0..<vectorCount, dim: dim, topK: k, metric: metric
+                range: 0..<vectorCount, dim: dim, topK: k, metric: metric, excluded: excluded
             )
         }
 
@@ -139,7 +146,8 @@ enum ParallelFlatScan {
                 metric: metric,
                 chunkSize: chunkSize,
                 dotsBase: scratchBuffer.baseAddress!,
-                results: resultsStorage
+                results: resultsStorage,
+                excluded: excluded
             )
             DispatchQueue.concurrentPerform(iterations: slices) { slice in
                 context.run(slice: slice, vectorCount: vectorCount)
@@ -163,7 +171,8 @@ enum ParallelFlatScan {
         range: Range<Int>,
         dim: Int,
         topK: Int,
-        metric: Metric
+        metric: Metric,
+        excluded: UnsafePointer<Bool>? = nil
     ) -> [Entry] {
         let rows = range.count
         var dots = [Float](repeating: 0, count: rows)
@@ -179,7 +188,8 @@ enum ParallelFlatScan {
                 norms: norms,
                 queryNormSq: queryNormSq,
                 topK: topK,
-                metric: metric
+                metric: metric,
+                excluded: excluded
             )
         }
     }
@@ -193,7 +203,8 @@ enum ParallelFlatScan {
         norms: UnsafePointer<Float>?,
         queryNormSq: Float,
         topK: Int,
-        metric: Metric
+        metric: Metric,
+        excluded: UnsafePointer<Bool>?
     ) -> [Entry] {
         var entries = [Entry]()
         entries.reserveCapacity(topK)
@@ -224,6 +235,9 @@ enum ParallelFlatScan {
                 position = largest
             }
         }
+        @inline(__always) func isExcluded(_ row: Int) -> Bool {
+            excluded?[corpusRowOffset + row] ?? false
+        }
         @inline(__always) func append(distance: Float, id: UInt32) {
             if entries.count < topK {
                 entries.append(Entry(distance: distance, id: id))
@@ -237,18 +251,18 @@ enum ParallelFlatScan {
         switch metric {
         case .innerProduct:
             // Distance is negated dot product; ordering equals descending dot.
-            for row in 0..<rowCount {
+            for row in 0..<rowCount where !isExcluded(row) {
                 append(distance: -dots[row], id: UInt32(corpusRowOffset + row))
             }
         case .l2:
             let normsBase = norms!
-            for row in 0..<rowCount {
+            for row in 0..<rowCount where !isExcluded(row) {
                 let d = max(0, queryNormSq - 2 * dots[row] + normsBase[corpusRowOffset + row])
                 append(distance: d, id: UInt32(corpusRowOffset + row))
             }
         case .cosine:
             let normsBase = norms!
-            for row in 0..<rowCount {
+            for row in 0..<rowCount where !isExcluded(row) {
                 // Matches the historical host formula bit-for-bit:
                 // denom = sqrt(queryNormSq * rowNormSq).
                 let denom = (queryNormSq * normsBase[corpusRowOffset + row]).squareRoot()

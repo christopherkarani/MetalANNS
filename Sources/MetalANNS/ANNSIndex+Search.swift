@@ -153,9 +153,15 @@ extension GraphIndex {
             idMap: idMap
         )
 
+        // `.exact` mode scans exactly (deleted and filtered rows skipped
+        // during the scan); `.fast` keeps the graph traversal.
+        let tiers: [any SearchTier] =
+            configuration.searchMode == .exact
+            ? [FlatExactSearchTier(), HybridGPUBeamSearchTier()]
+            : [HybridGPUBeamSearchTier()]
         return try await GraphSearchEngine.run(
             request,
-            tiers: [HybridGPUBeamSearchTier()],
+            tiers: tiers,
             prepareCPU: { try await self.prepareCPULadderState(vectors: vectors, graph: graph) },
             metrics: metrics
         )

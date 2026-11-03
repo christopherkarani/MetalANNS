@@ -328,13 +328,40 @@ public enum FlatGPUSearch {
         k: Int,
         metric: Metric
     ) -> [SearchResult] {
+        hostSearch(query: query, vectors: vectors, topK: min(k, maxTopK), metric: metric, excluded: nil)
+    }
+
+    /// Exact host scan for the top-`k` rows not set in `excluded`, with no
+    /// `maxTopK` cap. Skipping excluded rows during the scan (rather than
+    /// over-fetching and filtering) keeps the result exact for any number of
+    /// deleted or filtered-out rows. `excluded` holds one entry per row.
+    package nonisolated static func hostSearch(
+        query: [Float],
+        vectors: any VectorStorage,
+        k: Int,
+        metric: Metric,
+        excluding excluded: [Bool]
+    ) -> [SearchResult] {
+        precondition(excluded.count == vectors.count, "exclusion mask must cover every row")
+        return excluded.withUnsafeBufferPointer { mask in
+            hostSearch(query: query, vectors: vectors, topK: k, metric: metric, excluded: mask.baseAddress)
+        }
+    }
+
+    private nonisolated static func hostSearch(
+        query: [Float],
+        vectors: any VectorStorage,
+        topK k: Int,
+        metric: Metric,
+        excluded: UnsafePointer<Bool>?
+    ) -> [SearchResult] {
         let vectorCount = vectors.count
         guard vectorCount > 0, k > 0 else { return [] }
         let dim = vectors.dim
         guard query.count == dim else {
             return []
         }
-        let effectiveK = min(k, maxTopK, vectorCount)
+        let effectiveK = min(k, vectorCount)
 
         // Fast path: zero-copy access to the contiguous Float32 buffer.
         if let vectorBuffer = vectors as? VectorBuffer,
@@ -348,6 +375,7 @@ public enum FlatGPUSearch {
                 dim: dim,
                 topK: effectiveK,
                 metric: metric,
+                excluded: excluded,
                 cacheKey: CorpusNormKey(
                     bufferID: ObjectIdentifier(vectorBuffer.buffer),
                     bufferLength: vectorBuffer.buffer.length,
@@ -374,6 +402,7 @@ public enum FlatGPUSearch {
                 dim: dim,
                 topK: effectiveK,
                 metric: metric,
+                excluded: excluded,
                 cacheKey: nil
             )
         }
@@ -527,6 +556,7 @@ public enum FlatGPUSearch {
         dim: Int,
         topK: Int,
         metric: Metric,
+        excluded: UnsafePointer<Bool>?,
         cacheKey: CorpusNormKey?
     ) -> [SearchResult] {
         var queryNormSq: Float = 0
@@ -547,7 +577,8 @@ public enum FlatGPUSearch {
                     vectorCount: vectorCount,
                     dim: dim,
                     topK: topK,
-                    metric: metric
+                    metric: metric,
+                    excluded: excluded
                 )
             }
         }

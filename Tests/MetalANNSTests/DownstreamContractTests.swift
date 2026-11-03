@@ -45,6 +45,20 @@ struct DownstreamContractTests {
         }
     }
 
+    /// Ids of the brute-force top-`k` rows (float64), restricted to `include`.
+    private static func bruteForceIDs(
+        _ query: [Float],
+        in vectors: [[Float]],
+        k: Int,
+        metric: Metric = .cosine,
+        where include: (Int) -> Bool = { _ in true }
+    ) -> Set<UInt64> {
+        let ranked = vectors.indices.filter(include)
+            .map { (row: $0, similarity: referenceSimilarity(query, vectors[$0], metric: metric)) }
+            .sorted { $0.similarity > $1.similarity }
+        return Set(ranked.prefix(k).map { UInt64($0.row) })
+    }
+
     private static func expectANNSError(
         _ matches: (ANNSError) -> Bool,
         _ body: () async throws -> Void,
@@ -406,6 +420,71 @@ struct DownstreamContractTests {
         }
         #expect(maxPathDelta < 1e-5)
         #expect(maxReferenceDelta < 1e-5)
+    }
+
+    // MARK: 10. Exact search beyond the fused top-k cap
+
+    // The fused exact scan caps fetch at `FlatGPUSearch.maxTopK`, and filters
+    // used to skip it. Exact-mode searches must stay exact in every case.
+
+    @Test("exact search stays exact when k exceeds the fused top-k cap")
+    func exactSearchDeepK() async throws {
+        let vectors = seededVectors(count: 3_000, dim: 64)
+        let index = try await Self.build(vectors)
+        let k = FlatGPUSearch.maxTopK + 44
+        for row in [3, 1_234] {
+            let hits = try await index.search(query: vectors[row], topK: k)
+            #expect(hits.count == k)
+            #expect(Set(hits.map(\.id)) == Self.bruteForceIDs(vectors[row], in: vectors, k: k))
+        }
+    }
+
+    @Test("exact search stays exact with more deletes than the fused top-k cap")
+    func exactSearchManyDeletes() async throws {
+        let vectors = seededVectors(count: 3_000, dim: 64)
+        let index = try await Self.build(vectors)
+        let query = vectors[1]
+        // Delete the query's 400 nearest rows: survivors sit outside the
+        // neighbourhood the graph search would explore first.
+        let deleted = Self.bruteForceIDs(query, in: vectors, k: 400)
+        for id in deleted { try await index.delete(id: id) }
+        let expected = Self.bruteForceIDs(query, in: vectors, k: 10) { !deleted.contains(UInt64($0)) }
+
+        let hits = try await index.search(query: query, topK: 10)
+        #expect(Set(hits.map(\.id)) == expected)
+        let batch = try await index.batchSearch(queries: [query, query], topK: 10)
+        #expect(batch.allSatisfy { Set($0.map(\.id)) == expected })
+    }
+
+    @Test("filtered exact search returns the true top-k among matching rows")
+    func exactSearchFiltered() async throws {
+        let vectors = seededVectors(count: 3_000, dim: 64)
+        let index = try await Self.build(vectors)
+        let tag = Field<String>("tag")
+        for row in vectors.indices {
+            try await index.setMetadata(tag, value: row % 20 == 0 ? "keep" : "drop", for: UInt64(row))
+        }
+        for row in [5, 2_222] {
+            let hits = try await index.search(query: vectors[row], topK: 10) { QueryFilter.equals(tag, "keep") }
+            #expect(Set(hits.map(\.id)) == Self.bruteForceIDs(vectors[row], in: vectors, k: 10) { $0 % 20 == 0 })
+        }
+    }
+
+    @Test("filtered range search returns every matching row in range")
+    func rangeSearchFilteredExact() async throws {
+        let vectors = seededVectors(count: 3_000, dim: 64)
+        let index = try await Self.build(vectors)
+        let tag = Field<String>("tag")
+        for row in vectors.indices {
+            try await index.setMetadata(tag, value: row % 20 == 0 ? "keep" : "drop", for: UInt64(row))
+        }
+        let query = vectors[7]
+        let inRange = Self.bruteForceIDs(query, in: vectors, k: 60) { $0 % 20 == 0 }
+        let radius = inRange.map { 1 - Self.referenceSimilarity(query, vectors[Int($0)], metric: .cosine) }.max()!
+        let hits = try await index.rangeSearch(query: query, maxDistance: Float(radius) + 1e-5) {
+            QueryFilter.equals(tag, "keep")
+        }
+        #expect(Set(hits.map(\.id)) == inRange)
     }
 
     // MARK: 9. Concurrency
