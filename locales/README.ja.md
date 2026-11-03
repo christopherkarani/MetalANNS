@@ -45,7 +45,7 @@ let results = try await ready.search(query: queryVector, topK: 10) {
 }
 
 for hit in results {
-    print("\(hit.id) -> \(hit.score)")
+    print("\(hit.id) -> \(hit.distance)")
 }
 ```
 
