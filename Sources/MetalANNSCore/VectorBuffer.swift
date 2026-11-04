@@ -90,6 +90,26 @@ public final class VectorBuffer: @unchecked Sendable {
         }
     }
 
+    /// Copies `flat.count / dim` row-major vectors in one block starting at row `start`.
+    package func batchInsert(flat: [Float], startingAt start: Int) throws {
+        guard flat.count % dim == 0 else {
+            throw ANNSError.dimensionMismatch(expected: dim, got: flat.count % dim)
+        }
+        let rowCount = flat.count / dim
+        guard start >= 0, start + rowCount <= capacity else {
+            throw ANNSError.constructionFailed("Rows \(start)..<\(start + rowCount) exceed capacity \(capacity)")
+        }
+        lock.withLock {
+            flat.withUnsafeBufferPointer { source in
+                guard let baseAddress = source.baseAddress else { return }
+                rawPointer.advanced(by: start * dim).update(from: baseAddress, count: flat.count)
+            }
+            FlatGPUSearch.invalidateHostNormCache(buffer: buffer)
+            Int8CodeCache.invalidate(buffer: buffer)
+            IVFFlatSearch.invalidate(buffer: buffer)
+        }
+    }
+
     public func vector(at index: Int) -> [Float] {
         precondition(index >= 0 && index < capacity, "Index out of bounds")
         let offset = index * dim

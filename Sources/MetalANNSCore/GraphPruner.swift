@@ -34,6 +34,9 @@ public enum GraphPruner {
         }
 
         for nodeID in 0..<nodeCount {
+            if nodeID & 1023 == 0 {
+                try Task.checkCancellation()
+            }
             let neighborIDs = graph.neighborIDs(of: nodeID)
             let neighborDistances = graph.neighborDistances(of: nodeID)
 
@@ -96,6 +99,13 @@ public enum GraphPruner {
         }
     }
 
+    /// Nodes pruned per parallel pass; cancellation is checked between passes.
+    private static let parallelBatchSize = 16_384
+
+    /// Float32 fast path. Each node's pruned list depends only on its own
+    /// neighbour list and the (read-only) vectors, so nodes are pruned in
+    /// parallel into scratch memory, then written back on the calling thread.
+    /// The result is identical to a sequential pass.
     private static func pruneFloat32(
         graph: GraphBuffer,
         vectors: VectorBuffer,
@@ -104,68 +114,145 @@ public enum GraphPruner {
     ) throws {
         let degree = graph.degree
         let dim = vectors.dim
-        let rawVectors = vectors.floatPointer
+        guard nodeCount > 0, let vectorBase = vectors.floatPointer.baseAddress else {
+            return
+        }
+        let slotCount = graph.capacity * degree
+        let adjacency = UnsafePointer(
+            graph.adjacencyBuffer.contents().bindMemory(to: UInt32.self, capacity: slotCount)
+        )
+        let edgeDistances = UnsafePointer(
+            graph.distanceBuffer.contents().bindMemory(to: Float.self, capacity: slotCount)
+        )
 
-        for nodeID in 0..<nodeCount {
-            let neighborIDs = graph.neighborIDs(of: nodeID)
-            let neighborDistances = graph.neighborDistances(of: nodeID)
+        let batchSize = min(parallelBatchSize, nodeCount)
+        let prunedIDs = UnsafeMutableBufferPointer<UInt32>.allocate(capacity: batchSize * degree)
+        let prunedDistances = UnsafeMutableBufferPointer<Float>.allocate(capacity: batchSize * degree)
+        defer {
+            prunedIDs.deallocate()
+            prunedDistances.deallocate()
+        }
+        let processorCount = ProcessInfo.processInfo.activeProcessorCount
+        let work = PruneWork(
+            vectors: vectorBase,
+            adjacency: adjacency,
+            edgeDistances: edgeDistances,
+            outIDs: prunedIDs.baseAddress!,
+            outDistances: prunedDistances.baseAddress!,
+            nodeCount: nodeCount,
+            degree: degree,
+            dim: dim,
+            metric: metric
+        )
 
-            var candidates: [(id: UInt32, distance: Float)] = []
-            candidates.reserveCapacity(degree)
-            for slot in 0..<degree {
-                let neighborID = neighborIDs[slot]
-                if neighborID == UInt32.max {
-                    continue
+        var batchStart = 0
+        while batchStart < nodeCount {
+            try Task.checkCancellation()
+            let batchEnd = min(nodeCount, batchStart + batchSize)
+            let batchCount = batchEnd - batchStart
+            let workers = max(1, min(processorCount, batchCount / 256))
+            let chunk = (batchCount + workers - 1) / workers
+            let firstNode = batchStart
+
+            DispatchQueue.concurrentPerform(iterations: workers) { worker in
+                let start = firstNode + worker * chunk
+                let end = min(firstNode + batchCount, start + chunk)
+                guard start < end else { return }
+                for nodeID in start..<end {
+                    work.prune(nodeID, scratchRow: nodeID - firstNode)
                 }
-                let neighborIndex = Int(neighborID)
-                if neighborIndex < 0 || neighborIndex >= nodeCount {
-                    continue
-                }
-                candidates.append((neighborID, neighborDistances[slot]))
             }
 
-            var prunedIDs: [UInt32] = []
-            var prunedDistances: [Float] = []
-            prunedIDs.reserveCapacity(degree)
-            prunedDistances.reserveCapacity(degree)
+            for nodeID in batchStart..<batchEnd {
+                let offset = (nodeID - batchStart) * degree
+                try graph.setNeighbors(
+                    of: nodeID,
+                    ids: Array(prunedIDs[offset..<(offset + degree)]),
+                    distances: Array(prunedDistances[offset..<(offset + degree)])
+                )
+            }
+            batchStart = batchEnd
+        }
+    }
 
-            for candidate in candidates {
-                let candidateBase = rawVectors.baseAddress!.advanced(by: Int(candidate.id) * dim)
+    /// Scoped work descriptor for one parallel prune pass.
+    ///
+    /// `@unchecked Sendable` is sound here (same contract as
+    /// `ParallelFlatScan.SliceWork`): the pointers reference memory owned by
+    /// `pruneFloat32` that outlives the concurrentPerform join, inputs are only
+    /// read, each worker writes only its own scratch rows, and no field mutates
+    /// after construction.
+    private final class PruneWork: @unchecked Sendable {
+        let vectors: UnsafePointer<Float>
+        let adjacency: UnsafePointer<UInt32>
+        let edgeDistances: UnsafePointer<Float>
+        let outIDs: UnsafeMutablePointer<UInt32>
+        let outDistances: UnsafeMutablePointer<Float>
+        let nodeCount: Int
+        let degree: Int
+        let dim: Int
+        let metric: Metric
+
+        init(
+            vectors: UnsafePointer<Float>,
+            adjacency: UnsafePointer<UInt32>,
+            edgeDistances: UnsafePointer<Float>,
+            outIDs: UnsafeMutablePointer<UInt32>,
+            outDistances: UnsafeMutablePointer<Float>,
+            nodeCount: Int,
+            degree: Int,
+            dim: Int,
+            metric: Metric
+        ) {
+            self.vectors = vectors
+            self.adjacency = adjacency
+            self.edgeDistances = edgeDistances
+            self.outIDs = outIDs
+            self.outDistances = outDistances
+            self.nodeCount = nodeCount
+            self.degree = degree
+            self.dim = dim
+            self.metric = metric
+        }
+
+        /// Prunes `nodeID`'s list into scratch row `scratchRow` (`degree` slots,
+        /// sentinel-padded). Keeps a candidate unless an already-kept neighbour
+        /// is closer to it than the node is.
+        func prune(_ nodeID: Int, scratchRow: Int) {
+            let base = nodeID * degree
+            let keptIDs = outIDs + scratchRow * degree
+            let keptDistances = outDistances + scratchRow * degree
+            var keptCount = 0
+            for slot in 0..<degree {
+                let candidateID = adjacency[base + slot]
+                if candidateID == UInt32.max || Int(candidateID) >= nodeCount {
+                    continue
+                }
+                let candidateDistance = edgeDistances[base + slot]
+                let candidateBase = vectors + Int(candidateID) * dim
                 var isRedundant = false
-
-                for selectedID in prunedIDs {
-                    let selectedBase = rawVectors.baseAddress!.advanced(by: Int(selectedID) * dim)
+                for kept in 0..<keptCount {
                     let pathDistance = SIMDDistance.distance(
-                        selectedBase,
+                        vectors + Int(keptIDs[kept]) * dim,
                         candidateBase,
                         dim: dim,
                         metric: metric
                     )
-                    if pathDistance < candidate.distance {
+                    if pathDistance < candidateDistance {
                         isRedundant = true
                         break
                     }
                 }
-
                 if !isRedundant {
-                    prunedIDs.append(candidate.id)
-                    prunedDistances.append(candidate.distance)
+                    keptIDs[keptCount] = candidateID
+                    keptDistances[keptCount] = candidateDistance
+                    keptCount += 1
                 }
             }
-
-            if prunedIDs.count < degree {
-                prunedIDs.append(contentsOf: Array(repeating: UInt32.max, count: degree - prunedIDs.count))
-                prunedDistances.append(
-                    contentsOf: Array(
-                        repeating: Float.greatestFiniteMagnitude,
-                        count: degree - prunedDistances.count
-                    ))
-            } else if prunedIDs.count > degree {
-                prunedIDs = Array(prunedIDs.prefix(degree))
-                prunedDistances = Array(prunedDistances.prefix(degree))
+            for slot in keptCount..<degree {
+                keptIDs[slot] = UInt32.max
+                keptDistances[slot] = Float.greatestFiniteMagnitude
             }
-
-            try graph.setNeighbors(of: nodeID, ids: prunedIDs, distances: prunedDistances)
         }
     }
 }

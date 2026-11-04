@@ -29,6 +29,24 @@ public actor GraphIndex {
     internal var pendingRepairIDs: [UInt32] = []
     internal var hnsw: HNSWLayers?
     public var metrics: IndexMetrics? = nil
+    /// Read/write gate state; see `ANNSIndex+AccessGate.swift`.
+    internal var activeReaders = 0
+    internal var writerActive = false
+    internal var waitingWriters = 0
+    internal var gateWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Adjacency extracted for CPU graph search, reused across queries.
+    /// Dropped whenever a writer releases the gate (the only time `graph` changes).
+    /// Only kept up to `maxCachedCPUGraphEdges` (about 8 bytes per edge plus a
+    /// small per-node header); larger graphs are extracted per query.
+    internal var cpuGraphCache: [[(UInt32, Float)]]?
+    internal static let maxCachedCPUGraphEdges = 4 * 1_024 * 1_024
+    /// Test seam: called at each NN-Descent iteration of `build`. Always nil
+    /// outside tests.
+    internal var buildIterationObserver: (@Sendable (Int) -> Void)?
+
+    internal func setBuildIterationObserver(_ observer: (@Sendable (Int) -> Void)?) {
+        buildIterationObserver = observer
+    }
 
     public init(configuration: IndexConfiguration = .default) {
         self.configuration = configuration

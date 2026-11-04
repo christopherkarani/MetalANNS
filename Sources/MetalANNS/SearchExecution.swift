@@ -70,7 +70,7 @@ struct SearchRequest: Sendable {
 /// CPU traversal inputs prepared on the `GraphIndex` actor (lazy HNSW rebuild
 /// plus vector/graph extraction) and handed to the engine's fallback ladder.
 struct PreparedCPUSearch: Sendable {
-    let vectors: [[Float]]
+    let vectors: any VectorStorage
     let graph: [[(UInt32, Float)]]
     let hnsw: HNSWLayers?
     let baseMetric: Metric
@@ -115,31 +115,66 @@ struct IVFFlatSearchTier: SearchTier {
 
 /// Exact flat scan (GPU or host BLAS).
 ///
-/// Eligible only without filters: scanning top-(k+deletedCount) and filtering
-/// deleted rows afterwards yields the true top-k survivors, since each deleted
-/// row demotes a survivor by at most one position. Metadata filters break that
-/// argument, so filtered workloads skip this tier entirely.
+/// Unfiltered, with `fetchK` within the fused cap: scanning top-(k+deletedCount)
+/// and dropping deleted rows afterwards yields the true top-k survivors, since
+/// each deleted row demotes a survivor by at most one position.
+///
+/// With a metadata filter, or a fetch above `FlatGPUSearch.maxTopK` (large k,
+/// many deletes, range search), that over-fetch argument fails. In `.exact`
+/// mode those requests run a host scan that skips deleted and non-matching rows
+/// during the scan, so they stay exact instead of degrading to approximate
+/// graph search (for storage and sizes this tier covers; see
+/// `FlatGPUSearch.isEligible`). `.fast` mode keeps sending them to the graph.
 struct FlatExactSearchTier: SearchTier {
     func isEligible(_ request: SearchRequest) -> Bool {
-        guard request.filter == nil else {
+        let masked = Self.needsMaskedScan(request)
+        if masked, request.searchMode != .exact {
             return false
         }
         return MetalANNSCore.FlatGPUSearch.isEligible(
             vectors: request.vectors,
             metric: request.metric,
-            k: request.fetchK,
+            k: masked ? 1 : request.fetchK,
             maxVectorCount: request.exactSearchMaxVectorCount
         )
     }
 
     func execute(_ request: SearchRequest) async throws -> [SearchResult]? {
-        try await MetalANNSCore.FlatGPUSearch.search(
+        if Self.needsMaskedScan(request) {
+            return MetalANNSCore.FlatGPUSearch.hostSearch(
+                query: request.query,
+                vectors: request.vectors,
+                k: request.resultLimit,
+                metric: request.metric,
+                excluding: Self.exclusionMask(request)
+            )
+        }
+        return try await MetalANNSCore.FlatGPUSearch.search(
             context: request.context,
             query: request.query,
             vectors: request.vectors,
             k: request.fetchK,
             metric: request.metric
         )
+    }
+
+    static func needsMaskedScan(_ request: SearchRequest) -> Bool {
+        request.filter != nil || request.fetchK > MetalANNSCore.FlatGPUSearch.maxTopK
+    }
+
+    /// One flag per row: deleted, or rejected by the request's filter.
+    static func exclusionMask(_ request: SearchRequest) -> [Bool] {
+        let rowCount = request.vectors.count
+        var excluded = [Bool](repeating: false, count: rowCount)
+        for id in request.softDeletion.allDeletedIDs where Int(id) < rowCount {
+            excluded[Int(id)] = true
+        }
+        if let filter = request.filter {
+            for row in 0..<rowCount where !excluded[row] {
+                excluded[row] = !request.metadataStore.matches(id: UInt32(row), filter: filter)
+            }
+        }
+        return excluded
     }
 }
 

@@ -11,6 +11,27 @@ public enum NNDescentCPU {
         maxIterations: Int = 20,
         convergenceThreshold: Float = 0.001
     ) async throws -> (graph: [[(UInt32, Float)]], entryPoint: UInt32) {
+        try await build(
+            vectors: vectors,
+            degree: degree,
+            metric: metric,
+            maxIterations: maxIterations,
+            convergenceThreshold: convergenceThreshold,
+            iterationObserver: nil
+        )
+    }
+
+    /// `iterationObserver` is called with the iteration index right after each
+    /// iteration's cancellation checkpoint. Tests use it to cancel at a known
+    /// point; production passes `nil`.
+    package static func build(
+        vectors: [[Float]],
+        degree: Int,
+        metric: Metric,
+        maxIterations: Int,
+        convergenceThreshold: Float,
+        iterationObserver: (@Sendable (Int) -> Void)?
+    ) async throws -> (graph: [[(UInt32, Float)]], entryPoint: UInt32) {
         let nodeCount = vectors.count
         guard nodeCount > 1 else {
             throw ANNSError.constructionFailed("NNDescentCPU requires at least 2 vectors")
@@ -100,6 +121,8 @@ public enum NNDescentCPU {
         }
 
         for iteration in 0..<maxIterations {
+            try Task.checkCancellation()
+            iterationObserver?(iteration)
             var reverse = [[Int]](repeating: [], count: nodeCount)
             for source in 0..<nodeCount {
                 for (targetID, _) in graph[source] {
@@ -113,6 +136,9 @@ public enum NNDescentCPU {
             var updateCount = 0
 
             for node in 0..<nodeCount {
+                if node & 255 == 0 {
+                    try Task.checkCancellation()
+                }
                 let markToken = ((iteration + 1) * nodeCount) + node
                 candidateScratch.removeAll(keepingCapacity: true)
                 for (neighborID, _) in graph[node] {

@@ -88,12 +88,7 @@ struct SearchExecutionTests {
             ],
             prepareCPU: {
                 await log.append("ladder")
-                return PreparedCPUSearch(
-                    vectors: [[1, 0, 0, 0]],
-                    graph: [[(UInt32.max, 0)]],
-                    hnsw: HNSWLayers(),
-                    baseMetric: .l2
-                )
+                return try makeLadderInputs()
             },
             metrics: nil
         )
@@ -226,6 +221,44 @@ struct SearchExecutionTests {
         #expect(output.map(\.id) == ["r0", ""])
     }
 
+    @Test("Exact tier takes filtered and deep-k requests only in exact mode")
+    func exactTierMaskedScanIsExactModeOnly() throws {
+        let vectors = try VectorBuffer(capacity: 128, dim: 4)
+        vectors.setCount(128)
+        let graph = try GraphBuffer(capacity: 128, degree: 2)
+        func request(filter: _LegacySearchFilter?, fetchK: Int, mode: SearchMode) -> SearchRequest {
+            SearchRequest(
+                query: [0, 0, 0, 0],
+                resultLimit: 10,
+                metric: .l2,
+                filter: filter,
+                maxDistance: nil,
+                fetchK: fetchK,
+                fetchEf: fetchK,
+                context: nil,
+                vectors: vectors,
+                graph: graph,
+                entryPoint: 0,
+                degree: 2,
+                exactSearchMaxVectorCount: 1_024,
+                searchMode: mode,
+                softDeletion: SoftDeletion(),
+                metadataStore: MetadataStore(),
+                idMap: IDMap()
+            )
+        }
+        let tier = FlatExactSearchTier()
+        let filter = _LegacySearchFilter.equals(column: "tag", value: "a")
+        let deepK = FlatGPUSearch.maxTopK + 1
+
+        #expect(tier.isEligible(request(filter: nil, fetchK: 10, mode: .exact)))
+        #expect(tier.isEligible(request(filter: nil, fetchK: 10, mode: .fast)))
+        #expect(tier.isEligible(request(filter: filter, fetchK: 10, mode: .exact)))
+        #expect(tier.isEligible(request(filter: nil, fetchK: deepK, mode: .exact)))
+        #expect(!tier.isEligible(request(filter: filter, fetchK: 10, mode: .fast)))
+        #expect(!tier.isEligible(request(filter: nil, fetchK: deepK, mode: .fast)))
+    }
+
     // MARK: - Fixtures
 
     private func makeRequest(
@@ -260,8 +293,11 @@ struct SearchExecutionTests {
     }
 
     private func makeLadderInputs() throws -> PreparedCPUSearch {
-        PreparedCPUSearch(
-            vectors: [[1, 0, 0, 0]],
+        let vectors = try VectorBuffer(capacity: 1, dim: 4)
+        try vectors.insert(vector: [1, 0, 0, 0], at: 0)
+        vectors.setCount(1)
+        return PreparedCPUSearch(
+            vectors: vectors,
             graph: [[(UInt32.max, 0)]],
             hnsw: HNSWLayers(),
             baseMetric: .l2

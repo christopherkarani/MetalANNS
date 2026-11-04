@@ -15,7 +15,7 @@ Add MetalANNS to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/christopherkarani/MetalANNS.git", from: "0.3.0")
+    .package(url: "https://github.com/christopherkarani/MetalANNS.git", from: "0.4.0")
 ]
 ```
 
@@ -47,6 +47,19 @@ let ready = try await index.build(
 MetalANNS automatically selects a GPU (Metal) or CPU (Accelerate) backend
 based on hardware availability.
 
+Any non-zero count works. With no more vectors than `degree`, the exact
+neighbour graph is built directly and fills in as you insert. Vectors with
+NaN or infinite components are rejected with ``ANNSError/nonFiniteVector(index:)``.
+Cancelling the calling task stops construction with `CancellationError`.
+
+If you already hold the vectors in one row-major buffer, build from it
+directly. The buffer is copied once, into the index's storage, and
+`[[Float]]` is never materialized:
+
+```swift
+let ready = try await index.build(flatVectors: flat, dimension: 384, ids: ids)
+```
+
 ## Search with Filters
 
 Use the result builder DSL to compose filters at search time:
@@ -58,9 +71,26 @@ let results = try await ready.search(query: queryVector, topK: 10) {
 }
 
 for hit in results {
-    print("\(hit.id) — score: \(hit.score)")
+    print("\(hit.id) — distance: \(hit.distance), similarity: \(hit.similarity)")
 }
 ```
+
+## Read Scores
+
+Results are ordered nearest first. Each ``VectorNeighbor`` carries the
+`distance` the index ranks by (lower is closer), the `metric` it was computed
+with, and a `similarity` (higher is closer):
+
+| Metric | `distance` | `similarity` |
+|---|---|---|
+| `.cosine` | `1 − cos θ`, in `[0, 2]` | `cos θ`, in `[−1, 1]` |
+| `.innerProduct` | `−(a · b)` | `a · b` |
+| `.l2` | squared Euclidean `‖a − b‖²` | `−‖a − b‖²` |
+| `.hamming` | differing bits | `−(differing bits)` |
+
+Cosine is computed from the stored vectors as given. The exact scan and the
+graph search use the same formula, so they agree to float rounding for vectors
+of any norm. `rangeSearch(maxDistance:)` takes a `distance`.
 
 ## Mutate the Index
 
@@ -69,8 +99,21 @@ A `Ready` index supports live mutations:
 ```swift
 try await ready.insert(VectorRecord(id: "doc_new", vector: newVector))
 try await ready.delete(id: "doc_old")
+try await ready.insert(VectorRecord(id: "doc_old", vector: updatedVector)) // re-add after delete
 try await ready.compact()
 ```
+
+Storage grows as you insert; there is no fixed capacity. A deleted id can be
+inserted again and takes its old slot back. `compact()` rebuilds the graph
+without the remaining deleted vectors.
+
+## Concurrency
+
+``VectorIndex`` is `Sendable` and wraps an actor, so you can share it across
+tasks. Searches run concurrently with each other. `insert`, `batchInsert`,
+`compact` and `build` are exclusive: they wait for in-flight searches, and
+searches issued while one runs wait for it. A search never sees a half-applied
+mutation, and an insert issued during `compact()` is not lost.
 
 ## Persist and Load
 

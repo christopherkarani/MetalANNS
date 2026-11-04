@@ -204,4 +204,51 @@ struct GraphPrunerTests {
 
         #expect(prunedRecall > baselineRecall - 0.02)
     }
+
+    @Test("Parallel Float32 pruning matches a sequential reference across batches")
+    func parallelPruneMatchesSequentialReference() throws {
+        let nodeCount = 40_000  // > 2 parallel batches of 16_384
+        let dim = 8
+        let degree = 8
+        let vectors = seededVectors(count: nodeCount, dim: dim, seed: 17)
+        let vectorBuffer = try VectorBuffer(capacity: nodeCount, dim: dim)
+        try vectorBuffer.batchInsert(vectors: vectors, startingAt: 0)
+        vectorBuffer.setCount(nodeCount)
+        let graph = try GraphBuffer(capacity: nodeCount, degree: degree)
+
+        var rng = SeededGenerator(state: 23)
+        var input: [[(UInt32, Float)]] = []
+        for node in 0..<nodeCount {
+            var list: [(UInt32, Float)] = (0..<degree).map { slot in
+                if slot == degree - 1, node % 5 == 0 { return (UInt32.max, Float.greatestFiniteMagnitude) }
+                let other = Int.random(in: 0..<nodeCount, using: &rng)
+                return (UInt32(other), SIMDDistance.distance(vectors[node], vectors[other], metric: .l2))
+            }
+            list.sort { $0.1 < $1.1 }
+            input.append(list)
+            try graph.setNeighbors(of: node, ids: list.map(\.0), distances: list.map(\.1))
+        }
+        graph.setCount(nodeCount)
+
+        try GraphPruner.prune(graph: graph, vectors: vectorBuffer, nodeCount: nodeCount, metric: .l2)
+
+        for node in 0..<nodeCount {
+            var keptIDs: [UInt32] = []
+            var keptDistances: [Float] = []
+            for (id, distance) in input[node] where id != UInt32.max {
+                let redundant = keptIDs.contains { kept in
+                    SIMDDistance.distance(vectors[Int(kept)], vectors[Int(id)], metric: .l2) < distance
+                }
+                if !redundant {
+                    keptIDs.append(id)
+                    keptDistances.append(distance)
+                }
+            }
+            keptIDs += Array(repeating: UInt32.max, count: degree - keptIDs.count)
+            keptDistances += Array(repeating: Float.greatestFiniteMagnitude, count: degree - keptDistances.count)
+            #expect(graph.neighborIDs(of: node) == keptIDs, "node \(node)")
+            #expect(graph.neighborDistances(of: node) == keptDistances, "node \(node)")
+            if graph.neighborIDs(of: node) != keptIDs { break }
+        }
+    }
 }

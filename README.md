@@ -86,10 +86,21 @@ let results = try await readyIndex.search(query: queryVector, topK: 10) {
     QueryFilter.greaterThan(Field<Float>("relevance"), 0.85)
 }
 
+for hit in results {
+    // Nearest first. `distance` is what the index ranks by (lower = closer);
+    // `similarity` is higher = closer (cosine: cos θ, inner product: a·b, L2: −‖a−b‖²).
+    print(hit.id, hit.distance, hit.similarity)
+}
+
 try await readyIndex.save(to: fileURL)
 let loaded = try await VectorIndex<String, VectorIndexState.Ready>
     .loadReadOnly(from: fileURL, mode: .mmap)
 ```
+
+- **Any size.** Builds accept 1+ vectors; inserts grow storage as needed; a deleted id can be re-inserted.
+- **Flat input.** `build(flatVectors:dimension:ids:)` takes one row-major `[Float]` and copies it once.
+- **Validated.** NaN/±inf vectors throw `ANNSError.nonFiniteVector(index:)`; cancelling the task stops a build.
+- **Concurrency-safe.** Searches run in parallel; mutations wait for them, so none are lost or torn.
 
 ---
 
@@ -105,7 +116,7 @@ Default search is a fused exact scan (CPU NEON / int8 prefilter / one GPU dispat
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/christopherkarani/MetalANNS.git", from: "0.3.0")
+    .package(url: "https://github.com/christopherkarani/MetalANNS.git", from: "0.4.0")
 ]
 ```
 

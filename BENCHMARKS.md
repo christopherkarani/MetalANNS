@@ -1,6 +1,93 @@
 # MetalANNS Benchmarks
 
-Last updated: `2026-08-24`
+Last updated: `2026-11-03`
+
+## 2026-11-03 — 0.4.0: downstream fixes, parallel pruning, CPU graph search without per-query copies
+
+Machine: M3 Max, release build, 384-dim cosine, synthetic corpus (seed 42), 200
+queries, 1 run + 1 warmup, `--k 10 --exact-k`. 0.3.0 and 0.4.0 were run
+back-to-back with nothing else running. Recall is recall@10 against exact.
+
+### Default settings (exact search up to 1M vectors) — unchanged
+
+| n | version | build | p50 | p99 | recall@10 | max RSS |
+|---|---|---|---|---|---|---|
+| 10k | 0.3.0 | 2.18 s | 0.15 ms | 0.32 ms | 1.000 | 75 MB |
+| 10k | 0.4.0 | 2.23 s | 0.18 ms | 0.32 ms | 1.000 | 75 MB |
+| 100k | 0.3.0 | 7.9 s | 0.82 ms | 1.29 ms | 0.999 | 439 MB |
+| 100k | 0.4.0 | 15.5 s* | 1.01 ms | 8.58 ms* | 0.999 | 416 MB |
+| 1M | 0.3.0 | 258 s | 6.16 ms | 6.90 ms | 1.000 | 3.69 GB |
+| 1M | 0.4.0 | 296 s | 7.69 ms | 18.8 ms* | 1.000 | 3.88 GB |
+
+\* Run-to-run noise, not a regression. An interleaved A/B at 100k (3 runs per
+version) gave builds of 13.1 / 14.7 / 7.9 s for 0.3.0 and 12.7 / 7.7 / 7.7 s
+for 0.4.0. That spread comes from GPU NN-Descent, which is bimodal on both
+versions. p50 was 0.79–0.96 ms and p99 1.35–1.74 ms on both versions. Default
+recall@10 is ≥ 0.999 at every size.
+
+### Graph search (`--exact-search-limit 0`, not the default)
+
+| n | version | p50 | p99 | recall@10 |
+|---|---|---|---|---|
+| 10k | 0.3.0 | 3.24 ms | 3.92 ms | 1.000 |
+| 10k | 0.4.0 | **0.06 ms** | 0.10 ms | 1.000 |
+| 100k | 0.3.0 | 36.5 ms | 38.5 ms | 0.282 |
+| 100k | 0.4.0 | **0.10 ms** | 0.17 ms | 0.271 |
+| 1M | 0.3.0 | 489 ms | 597 ms | 0.544 |
+| 1M | 0.4.0 | **326 ms** | 350 ms | 0.570 |
+
+The CPU graph path used to copy every vector, and the whole adjacency list,
+into Swift arrays on every query. It now reads vector storage in place. The
+adjacency extraction is cached across queries up to 4M edges (about 100k nodes
+at degree 32) and dropped on every write. Above that size it is still
+extracted per query, which is why 1M only gains about 1.5×.
+
+Open issue: at the default `efSearch`, graph-only recall@10 at 100k and 1M is
+far below 0.95. This path is not the default (exact search covers up to 1M
+vectors), so 0.4.0 does not change it.
+
+### Exact search with filters, many deletes, or k > 256
+
+Default settings, 100k × 384 cosine, GPU context, 50 queries (20 for k=300).
+Recall is against float32 brute force over the rows the query is allowed to
+return.
+
+| case | 0.3.0 p50 | 0.3.0 recall | 0.4.0 p50 | 0.4.0 recall |
+|---|---|---|---|---|
+| unfiltered, k=10 | 1.41 ms | 1.000 | 1.43 ms | 1.000 |
+| k=300 | 2.99 ms | 0.265 | 1.48 ms | 1.000 |
+| 300 deletes, k=10 | 3.05 ms | 0.422 | 1.35 ms | 1.000 |
+| 10% filter, k=10 | 0.80 ms | 0.164 | 5.14 ms | 1.000 |
+
+The fused exact scan fetches at most 256 rows, and filtered searches skipped it.
+So a filter, k + deleted > 256, or any range search (default `limit` 1000)
+silently fell back to the graph. These requests now run a host scan that skips
+deleted and non-matching rows during the scan. Filtered search is slower because
+it evaluates the filter for every row; it was fast only because it was wrong.
+Unfiltered host-tier search (30k, no GPU) is unchanged: 0.33 → 0.32 ms.
+
+### Graph pruning (component, same random degree-32 graph, identical output)
+
+| n × 384 | 0.3.0 sequential | 0.4.0 parallel |
+|---|---|---|
+| 100k | 1.14 s | 0.20 s (5.7×) |
+| 1M | 12.8 s | 2.25 s (5.7×) |
+
+Float32 pruning now runs nodes in parallel batches. Each node's result depends
+only on its own list and the read-only vectors, so output is bit-identical. A
+regression test in `GraphPrunerTests` checks this against a sequential
+reference. End-to-end build time is dominated by GPU NN-Descent, so the gain
+there is about 1 s at 100k and about 10 s at 1M.
+
+### Reproduce
+
+```bash
+for n in 10000 100000 1000000; do
+  swift run -c release MetalANNSBenchmarks --vector-count $n --dimension 384 \
+    --query-count 200 --runs 1 --warmup 1 --k 10 --exact-k --metric cosine --seed 42
+  # graph-only column: append --exact-search-limit 0
+done
+```
 
 ## 2026-08-24 — Opt-in `.fast` IVF-flat (bucket B @50k)
 

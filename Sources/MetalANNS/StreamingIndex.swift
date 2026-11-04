@@ -84,6 +84,8 @@ public actor _StreamingIndex {
 
     private var pendingVectors: [[Float]] = []
     private var pendingIDs: [String] = []
+    /// True while a `flushPendingIntoDelta` call is suspended on the delta.
+    private var isFlushingPending = false
 
     private var allVectorData: [Float] = []
     private var allIDsList: [String] = []
@@ -630,23 +632,35 @@ public actor _StreamingIndex {
         allVectorData.removeSubrange(start..<end)
     }
 
-    private func adjustedConfiguration(for nodeCount: Int) -> IndexConfiguration {
-        var adjusted = config.indexConfiguration
-        adjusted.degree = min(adjusted.degree, max(1, nodeCount - 1))
-        return adjusted
-    }
-
+    /// Moves pending rows into the delta index.
+    ///
+    /// One flusher at a time: the delta calls suspend, and a concurrent insert
+    /// must not resubmit rows that are already in flight. Rows added meanwhile
+    /// stay in `pending` (still searched) and this loop picks them up. After
+    /// each await, only the submitted prefix is dropped, and only if a merge
+    /// has not already reset `pending` in the meantime.
     private func flushPendingIntoDelta() async throws {
+        guard !isFlushingPending else {
+            return
+        }
+        isFlushingPending = true
+        defer { isFlushingPending = false }
+
         while !pendingVectors.isEmpty {
+            let batchVectors = pendingVectors
+            let batchIDs = pendingIDs
+
             if delta == nil {
-                guard pendingVectors.count >= 2 else {
+                guard batchVectors.count >= 2 else {
                     return
                 }
-                let newDelta = try await buildIndex(vectors: pendingVectors, ids: pendingIDs)
+                let newDelta = try await buildIndex(vectors: batchVectors, ids: batchIDs)
+                guard pendingIDs.starts(with: batchIDs) else {
+                    return
+                }
                 delta = newDelta
-                idInDelta = Set(pendingIDs)
-                pendingVectors.removeAll(keepingCapacity: true)
-                pendingIDs.removeAll(keepingCapacity: true)
+                idInDelta = Set(batchIDs)
+                dropFlushedPrefix(count: batchIDs.count)
                 continue
             }
 
@@ -655,10 +669,12 @@ public actor _StreamingIndex {
             }
 
             do {
-                try await delta.batchInsert(pendingVectors, ids: pendingIDs)
-                idInDelta.formUnion(pendingIDs)
-                pendingVectors.removeAll(keepingCapacity: true)
-                pendingIDs.removeAll(keepingCapacity: true)
+                try await delta.batchInsert(batchVectors, ids: batchIDs)
+                guard pendingIDs.starts(with: batchIDs) else {
+                    return
+                }
+                idInDelta.formUnion(batchIDs)
+                dropFlushedPrefix(count: batchIDs.count)
             } catch let error as ANNSError {
                 guard case .indexCapacityExceeded = error else {
                     throw error
@@ -670,6 +686,11 @@ public actor _StreamingIndex {
                 try await triggerMerge()
             }
         }
+    }
+
+    private func dropFlushedPrefix(count: Int) {
+        pendingVectors.removeFirst(count)
+        pendingIDs.removeFirst(count)
     }
 
     private func shouldMerge() async -> Bool {
@@ -769,7 +790,9 @@ public actor _StreamingIndex {
     }
 
     private func buildIndex(vectors: [[Float]], ids: [String]) async throws -> GraphIndex {
-        let index = GraphIndex(configuration: adjustedConfiguration(for: vectors.count))
+        // Full configured degree even for tiny deltas: small builds get an exact
+        // graph, and later inserts keep filling it to `degree` neighbours.
+        let index = GraphIndex(configuration: config.indexConfiguration)
         try await index.build(vectors: vectors, ids: ids)
         if let metrics {
             await index.setMetrics(metrics)
